@@ -11,7 +11,7 @@ plus a 8 kB stylesheet, and the native plugins are code-split so a browser never
 npm install
 npm run mock        # serves the built app + a synthetic Subsonic library on :4533
 npm run build       # dist/ — the PWA, and the payload for both native shells
-npm test            # 19 unit tests: deployment copy, md5 vectors, token auth, parsing, play rules
+npm test            # 62 unit tests: deployment copy, md5 vectors, token auth, parsing, play rules,
 npm run apk          # artifacts/Navilite-<version>-debug.apk
 npm run ipa:unsigned # artifacts/Navilite-<version>-unsigned.ipa
 ```
@@ -193,12 +193,48 @@ npm test
   names **no outside service** at all (the owner's rule, enforced by the test).
 - `test/changelog.test.ts` — `src/ui/changelog.ts` and `CHANGELOG.md` are the same document; the
   in-app page and the file cannot drift apart.
+- `test/visualizer.test.ts` — the spectrum contract, driven through the real `attachVisualizer`
+  with a recording 2D context: a loud frame followed by silence leaves nothing behind, a quiet
+  frame is the quiet frame's height (not the previous one decayed), two identical frames draw
+  byte-identical rectangles, every bar is one flat colour at full alpha, and every frame is fully
+  cleared. This is the test that fails on v1.1's peak caps and release fall-off.
+- `test/lyrics-cache.test.ts` — a track opened *before* its sidecar existed shows the words once
+  the miss expires, and the miss itself is remembered in the meantime.
+- `test/layout-393.test.ts` — the sideways-scroll regression: the real app in a real browser at
+  **393 x 852 dpr 3** with safe-area insets, over the stress library, failing if any state's
+  document is wider than the viewport. Needs Chrome and a built `dist/`; skips with the reason
+  otherwise.
 
 What the tests do *not* cover: anything that needs a device (native playback, the hand-off, the
 Keychain/Keystore path), and live lyrics from the real Navidrome — the pilot sidecar lives on his
 box, so the end-to-end path was exercised against the mock's implementation of the same endpoint.
 See `docs/verification.md` for exactly what was verified where, with the commands and the observed
 output.
+
+## Measuring the layout and the spectrum
+
+The owner's phone is an iPhone 15 Pro: **393 x 852 CSS px**, dpr 3, safe-area insets 59 / 34. Two
+drivers over one in-page measurement (`tools/layout-probe-browser.js`, injected before the app's
+first paint), fourteen states each — every route, both now-playing modes, mid-swipe, the mini
+player bar carrying a long title, the search field focused — against a mock library built to be
+hostile to layouts (`npm run mock -- --stress` puts a long unbroken Japanese artist name, long
+track titles and two long playlist names in it):
+
+```bash
+npm run mock                                                      # then, in another shell:
+node tools/layout-audit.mjs --url http://127.0.0.1:4533           # Chrome, 393x852 dpr 3 + insets
+node tools/layout-audit.mjs --url http://127.0.0.1:4533 --sweep 320:440 --step 1
+node tools/device-probe.mjs --device <simulator-udid>             # iOS WebKit: the app in Safari
+node tools/device-probe.mjs --serve --app <App.app>               # ...and the real Capacitor shell
+node tools/spectrum-proof.mjs --url http://127.0.0.1:4533         # real pixels: no after-image
+```
+
+Each of them exits non-zero when something is wider than the viewport — they report a number, not
+an impression. `npm test` runs the 393 px audit too (`test/layout-393.test.ts`) whenever Chrome and
+a built `dist/` are present, and skips it with the reason when they are not.
+
+The device probe needs an app built with `server.url` pointing at the probe (a measurement-only
+`capacitor.config.ts`, reverted straight after — see `docs/verification.md` §10).
 
 ## Building the Android APK
 

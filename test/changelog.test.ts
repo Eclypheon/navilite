@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 then v1.1, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1']);
+test('the changelog is the owner-visible list: v1.0, v1.1, v1.2, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -56,4 +56,16 @@ test('every v1.1 entry the owner asked for is actually in the list', () => {
   assert.match(text, /playing is highlighted/);
   assert.match(text, /Lyrics/);
   assert.match(text, /blank/);
+});
+
+test('every v1.2 defect the owner reported is described in his own terms', () => {
+  const v12 = CHANGELOG.find((release) => release.version === '1.2');
+  const text = v12?.items.join('\n') ?? '';
+  // The three v1.2 reports, in the order they were reported.
+  assert.match(text, /sideways|390 px/);
+  assert.match(text, /393 px/, 'the width the report was made at has to be named');
+  for (const item of v12?.items ?? []) {
+    assert.doesNotMatch(item, /viewport|overflow-x|flex box|CSS|localStorage|analyser/i);
+  }
+  assert.match(text, /spectrum/i);
 });

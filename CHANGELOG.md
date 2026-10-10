@@ -26,3 +26,9 @@ Plain language, user-visible changes only. The app shows this same list under
 - The track that is playing is highlighted in the playlist.
 - Settings has a "What's new" page — this text.
 - Leave the server address blank and it uses your library's usual address.
+
+## 1.2 — 2026-10-11
+
+- The spectrum is the current frame only. The little mark that floated above each bar and the fading copy of where the bar had been are both gone: nothing on the screen is a leftover of the moment before, and the reading itself no longer averages the previous frame in.
+- Lyrics get the whole screen. The album art steps aside in Lyrics mode and the lines are set tighter, so a verse fits at once instead of one line at a time — on your phone the panel is 452 px tall instead of 89, at 13 px a line (about 26 lines visible).
+- Measured at your phone's exact width this time: 393 px, with your longest Japanese titles and playlist names, on every screen and in both modes. The old check ran at 390 px, which is why it said clean while your phone still scrolled sideways. There is now a test that runs at 393 px and fails if anything on any screen is wider than the screen.

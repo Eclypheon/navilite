@@ -1,0 +1,1621 @@
+{
+  "device": {
+    "name": "iPhone 15 Pro",
+    "width": 393,
+    "height": 852,
+    "deviceScaleFactor": 3,
+    "safeAreaTop": 59,
+    "safeAreaBottom": 34
+  },
+  "environment": {
+    "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+    "innerWidth": 393,
+    "innerHeight": 793,
+    "outerWidth": 393,
+    "outerHeight": 852,
+    "screenWidth": 393,
+    "screenHeight": 852,
+    "devicePixelRatio": 3,
+    "visualViewportWidth": 393,
+    "visualViewportScale": 1,
+    "standalone": false,
+    "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "safeAreaInsets": {
+      "top": "59px",
+      "right": "0px",
+      "bottom": "34px",
+      "left": "0px"
+    },
+    "documentClientWidth": 393,
+    "documentScrollWidth": 393,
+    "bodyScrollWidth": 393
+  },
+  "results": [
+    {
+      "label": "Library (#/artists) — long Japanese artist name in the list",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 818,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/artists",
+      "innerWidth": 393,
+      "innerHeight": 818,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > button.row:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > button.row:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    },
+    {
+      "label": "Library — search field focused (iOS focus-zoom check)",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 759,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/artists",
+      "innerWidth": 393,
+      "innerHeight": 759,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > button.row:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > button.row:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    },
+    {
+      "label": "Artist (#/artist/artist-ja) — long Japanese album names in the grid",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 759,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/artist/artist-ja",
+      "innerWidth": 393,
+      "innerHeight": 759,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.grid:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "div#app > header.topbar > nav.tabs",
+          "right": 333,
+          "left": 101.06,
+          "width": 231.94,
+          "slack": 60,
+          "scrollWidth": 232,
+          "clientWidth": 232
+        },
+        {
+          "selector": "div#app > header.topbar > nav.tabs > button.tab:nth-of-type(2)",
+          "right": 256.56,
+          "left": 176.78,
+          "width": 79.78,
+          "slack": 136.44,
+          "scrollWidth": 78,
+          "clientWidth": 78
+        }
+      ]
+    },
+    {
+      "label": "Album (#/album/album-ja-1) — long Japanese and unbroken-Latin track titles",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 793,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/album/album-ja-1",
+      "innerWidth": 393,
+      "innerHeight": 793,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > div.row",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > div.row.song:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    },
+    {
+      "label": "Playlists (#/playlists) — two very long playlist names",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 793,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/playlists",
+      "innerWidth": 393,
+      "innerHeight": 793,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > div.row",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > div.row.song:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    },
+    {
+      "label": "Playlist (#/playlist/pl-stress-ja) — long Japanese playlist name",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 793,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/playlist/pl-stress-ja",
+      "innerWidth": 393,
+      "innerHeight": 793,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > div.row",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > div.row.song:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    },
+    {
+      "label": "Settings (#/settings) — the long playback-preference select",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 793,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/settings",
+      "innerWidth": 393,
+      "innerHeight": 793,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > div.row",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > div.row.song:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    },
+    {
+      "label": "Changelog (#/changelog)",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 793,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/changelog",
+      "innerWidth": 393,
+      "innerHeight": 793,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.changelog",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.changelog > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.changelog > p.muted.small",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.changelog > section.release:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.changelog > section.release:nth-of-type(1) > h2.section",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.changelog > section.release:nth-of-type(1) > ul.release-items",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "div.changelog > section.release:nth-of-type(1) > ul.release-items > li:nth-of-type(1)",
+          "right": 379,
+          "left": 34,
+          "width": 345,
+          "slack": 14,
+          "scrollWidth": 345,
+          "clientWidth": 345
+        }
+      ]
+    },
+    {
+      "label": "Now (#/now, spectrum) — long title, long \"Playing from\" line",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 759,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/now",
+      "innerWidth": 393,
+      "innerHeight": 759,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > section.now > div.now-top:nth-of-type(1) > button.icon-button.now-close",
+          "right": 381,
+          "left": 345,
+          "width": 36,
+          "slack": 12,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > div.row.song.playing:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    },
+    {
+      "label": "Now (#/now, lyrics) — long unbroken Japanese lyric lines",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 759,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/now",
+      "innerWidth": 393,
+      "innerHeight": 759,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > section.now.lyrics-mode > div.now-top:nth-of-type(1) > button.icon-button.now-close",
+          "right": 381,
+          "left": 345,
+          "width": 36,
+          "slack": 12,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > div.row.song.playing:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ],
+      "detail": {
+        "lines": 12,
+        "visibleLines": 12,
+        "lineHeight": 36,
+        "fontSize": "13px",
+        "panelHeight": 363,
+        "coverVisible": false,
+        "coverHeight": 0
+      }
+    },
+    {
+      "label": "Now (#/now, lyrics) — mid-swipe, finger down and moved",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 759,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/now",
+      "innerWidth": 393,
+      "innerHeight": 759,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > section.now.lyrics-mode > div.now-top:nth-of-type(1) > button.icon-button.now-close",
+          "right": 381,
+          "left": 345,
+          "width": 36,
+          "slack": 12,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > div.row.song.playing:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ],
+      "detail": {
+        "lines": 12,
+        "visibleLines": 12,
+        "lineHeight": 36,
+        "fontSize": "13px",
+        "panelHeight": 363,
+        "coverVisible": false,
+        "coverHeight": 0
+      }
+    },
+    {
+      "label": "Now (#/now, lyrics) — after the swipe completes",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 759,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/playlists",
+      "innerWidth": 393,
+      "innerHeight": 759,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > button.row:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > button.row:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ],
+      "detail": {
+        "lines": 12,
+        "visibleLines": 12,
+        "lineHeight": 0,
+        "fontSize": "13px",
+        "panelHeight": 0,
+        "coverVisible": false,
+        "coverHeight": 0
+      }
+    },
+    {
+      "label": "Library with the player bar showing a long Japanese title",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 759,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/artists",
+      "innerWidth": 393,
+      "innerHeight": 759,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.page-head:nth-of-type(1) > div.page-title-text:nth-of-type(1) > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > button.row:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > button.row:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    },
+    {
+      "label": "Stress album with the player bar showing a long unbroken Latin title",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "innerWidth": 393,
+        "innerHeight": 793,
+        "outerWidth": 393,
+        "outerHeight": 852,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "visualViewportWidth": 393,
+        "visualViewportScale": 1,
+        "standalone": false,
+        "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+        "safeAreaInsets": {
+          "top": "59px",
+          "right": "0px",
+          "bottom": "34px",
+          "left": "0px"
+        },
+        "documentClientWidth": 393,
+        "documentScrollWidth": 393,
+        "bodyScrollWidth": 393
+      },
+      "route": "#/album/album-ja-1",
+      "innerWidth": 393,
+      "innerHeight": 793,
+      "documentClientWidth": 393,
+      "documentScrollWidth": 393,
+      "bodyScrollWidth": 393,
+      "scrollingElementScrollWidth": null,
+      "horizontalOverflow": 0,
+      "actualOffenders": [],
+      "overflowersInsideScrollers": [],
+      "selfOverflow": [],
+      "tightestEdges": [
+        {
+          "selector": "div#app > header.topbar > button.icon-button:nth-of-type(2)",
+          "right": 379,
+          "left": 343,
+          "width": 36,
+          "slack": 14,
+          "scrollWidth": 34,
+          "clientWidth": 34
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > h1",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > p.muted",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.detail:nth-of-type(1) > div.detail-text > div.row",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        },
+        {
+          "selector": "main#view > div.list:nth-of-type(2) > div.row.song:nth-of-type(1)",
+          "right": 379,
+          "left": 14,
+          "width": 365,
+          "slack": 14,
+          "scrollWidth": 365,
+          "clientWidth": 365
+        }
+      ]
+    }
+  ],
+  "probe": {
+    "source": "page",
+    "href": "http://127.0.0.1:4677/#/album/album-ja-1",
+    "at": "2026-10-10T23:45:22.242Z"
+  }
+}

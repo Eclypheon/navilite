@@ -453,6 +453,9 @@ function setNowMode(mode: NowMode): void {
   shell.pillLyrics.setAttribute('aria-selected', String(lyrics));
   shell.visualizerHost.classList.toggle('hidden', lyrics);
   shell.lyricsHost.classList.toggle('hidden', !lyrics);
+  // v1.2: the class the stylesheet hangs the text-screen layout off — it hides the album art
+  // and gives the freed height to the lines instead of leaving the column at its 88 px minimum.
+  shell.nowOverlay.classList.toggle('lyrics-mode', lyrics);
   // Load on first view rather than on every track change: fewer requests, same result.
   if (lyrics) shell.lyrics.show(queueRef?.currentSong ?? null);
 }

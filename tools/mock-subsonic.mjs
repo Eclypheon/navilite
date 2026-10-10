@@ -13,10 +13,18 @@
  * It is a development tool. Nothing here ships in the app, and no credential is stored.
  *
  *   node tools/mock-subsonic.mjs [--port 4533] [--dist dist] [--user U] [--password P]
+ *                              [--stress] [--lyrics-plain] [--no-lyrics] [--no-cors]
+ *
+ * `--stress` adds one artist, album, three tracks and two playlists whose names are long,
+ * Japanese and unbroken — the shape the owner's own library is full of, and the worst case
+ * for a 393 px layout. `tools/layout-audit.mjs` runs against it.
  *
  * Debug endpoints (not part of Subsonic, used by the end-to-end check):
- *   GET /__state   → requests seen, scrobbles, starred ids, saved play queue
- *   POST /__reset  → clear that state
+ *   GET  /__state   → requests seen, scrobbles, starred ids, saved play queue
+ *   POST /__reset   → clear that state
+ *   POST /__report  → a layout-probe report posted from inside the page (see
+ *                     tools/device-probe.mjs — the iOS Simulator run has no CDP to attach to)
+ *   GET  /__reports → those reports, for the harness on the host
  */
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -29,10 +37,16 @@ import { coverPixels, renderWav, TRACK_PARTIALS, trackDurationSeconds } from './
 const here = dirname(fileURLToPath(import.meta.url));
 
 const args = new Map();
-for (let i = 2; i < process.argv.length; i += 2) {
-  const key = process.argv[i]?.replace(/^--/, '');
-  const value = process.argv[i + 1];
-  if (key) args.set(key, value ?? 'true');
+for (let i = 2; i < process.argv.length; i += 1) {
+  const token = process.argv[i];
+  if (!token || !token.startsWith('--')) continue;
+  const next = process.argv[i + 1];
+  if (next && !next.startsWith('--')) {
+    args.set(token.replace(/^--/, ''), next);
+    i += 1;
+  } else {
+    args.set(token.replace(/^--/, ''), 'true');
+  }
 }
 const PORT = Number(args.get('port') ?? 4533);
 const DIST = resolve(args.get('dist') ?? join(here, '..', 'dist'));
@@ -50,6 +64,17 @@ const NO_LYRICS = args.has('no-lyrics');
  * owner's library, so the mock can produce it; the timed `.lrc` path is the default.
  */
 const LYRICS_PLAIN = args.has('lyrics-plain');
+/**
+ * `--stress`: one more artist whose every name is the shape the owner's library is actually
+ * full of — long, Japanese, and with no spaces to break at — plus a long playlist name and a
+ * long lyric line. v1.1's layout harness ran against "Track 1 · 110/330/1320 Hz" and a
+ * playlist called "Late night", so nothing in it could ever push a layout wide, and the
+ * owner's iPhone disagreed with the harness. This fixture is what makes the 393 px audit
+ * reproduce his conditions. Opt-in: the default fixture stays exactly as documented.
+ */
+const STRESS = args.has('stress');
+const STRESS_ARTIST_ID = 'artist-ja';
+const STRESS_ALBUM_ID = 'album-ja-1';
 
 /* ------------------------------------------------------------------ library */
 
@@ -63,6 +88,8 @@ const state = {
   playQueue: null,
   ratings: new Map(),
   lyrics: [],
+  /** Layout-probe reports from a real device/simulator run (see tools/device-probe.mjs). */
+  reports: [],
   playlists: [
     { id: 'pl-1', name: 'Late night', songIds: [], created: '2026-01-01T00:00:00Z', changed: '2026-01-01T00:00:00Z' },
   ],
@@ -115,6 +142,75 @@ for (const [artistIndex, artistName] of ARTIST_NAMES.entries()) {
     }
     albums.push(album);
   }
+}
+
+/*
+ * The stress artist. Names are deliberately the worst case a layout can meet: CJK has no
+ * spaces, so a line can only be made to fit by wrapping *between* characters (CSS
+ * `overflow-wrap: anywhere` or `word-break: break-word`) or by clipping (ellipsis); a Latin
+ * name with no spaces at all tests the same thing without the font fallback.
+ */
+if (STRESS) {
+  const artist = {
+    id: STRESS_ARTIST_ID,
+    name: '星野源と仲間たちと深夜のドライブ音楽団',
+    albumCount: 1,
+  };
+  artists.push(artist);
+  const stressAlbum = {
+    id: STRESS_ALBUM_ID,
+    name: '夜のあいだにきみと話したかったことのすべて',
+    artist: artist.name,
+    artistId: artist.id,
+    coverArt: `cover-${STRESS_ALBUM_ID}`,
+    year: 2026,
+    songCount: 3,
+    duration: 0,
+    songs: [],
+  };
+  const stressTitles = [
+    '第一章　夜のなかをあるいていくきみのこえがきこえる',
+    '第二章　ほしがまたたくそらのしたでとおいくもをこえて',
+    'InterludeWithoutAnySpacesAtAllInTheTitleWhatsoeverForTheLayoutToBreak',
+  ];
+  for (const [index, title] of stressTitles.entries()) {
+    const audioIndex = trackCounter % 4;
+    trackCounter += 1;
+    const duration = trackDurationSeconds(audioIndex);
+    const song = {
+      id: `${STRESS_ALBUM_ID}-track-${index + 1}`,
+      title,
+      artist: artist.name,
+      artistId: artist.id,
+      album: stressAlbum.name,
+      albumId: STRESS_ALBUM_ID,
+      coverArt: stressAlbum.coverArt,
+      duration,
+      track: index + 1,
+      suffix: 'wav',
+      contentType: 'audio/wav',
+      bitRate: 1411,
+      audioIndex,
+    };
+    stressAlbum.songs.push(song);
+    songs.push(song);
+    stressAlbum.duration += duration;
+  }
+  albums.push(stressAlbum);
+  state.playlists.push({
+    id: 'pl-stress-ja',
+    name: '深夜のドライブ用プレイリスト（2026年秋・改訂第3版・これでもかというほど長い名前）',
+    songIds: stressAlbum.songs.map((song) => song.id),
+    created: '2026-01-01T00:00:00Z',
+    changed: '2026-01-01T00:00:00Z',
+  });
+  state.playlists.push({
+    id: 'pl-stress-latin',
+    name: 'LateNightDrivingPlaylistWithNoSpacesAtAllBecauseSomeoneNamedItLikeThis-2026-revision-3-final-final',
+    songIds: stressAlbum.songs.map((song) => song.id),
+    created: '2026-01-01T00:00:00Z',
+    changed: '2026-01-01T00:00:00Z',
+  });
 }
 
 const wavCache = new Map();
@@ -552,9 +648,32 @@ function plainSidecar() {
   return LYRIC_LINES.map((value) => ({ value }));
 }
 
+/** `--stress`: long, unbroken Japanese lines, the worst case for a 393 px lyric column. */
+const STRESS_LYRIC_LINES = [
+  '夜のあいだにきみと話したかったことのすべてをここに書いておくよ',
+  'ほしがまたたくそらのしたでとおいくもをこえてであるいていくきみのこえがきこえる',
+  'あしたへむかうみちのうえでなんどでもうたおうとおもっていたけれど',
+  'でんしゃのまどからみえるけしきはいつもとおなじはずなのに',
+  'きみのいないまちのひかりはどこかすこしだけいろがちがってみえた',
+  'それでもぼくらはあるいていくのだろうなにもわからないまま',
+  'よあけまえのそらいちばんくらいじかんにきみはなんといっただろう',
+  'おぼえていないことだけがたしかにここにあったきろくになる',
+  'かぜがふくたびにきこえるおとをしんじていたいとおもった',
+  'またあしたここでとまたあしたここでとくりかえしていた',
+  'うたがおわってもきみのこえだけがのこっているようなきがした',
+  'だからぼくはもういちどさいしょのひかりのほうへあるいていく',
+];
+
 /** The lyrics this mock's library holds for a track — or nothing at all. */
 function lyricsFor(song) {
-  if (!song || NO_LYRICS || song.albumId !== PILOT_ALBUM_ID) return null;
+  if (!song || NO_LYRICS) return null;
+  if (STRESS && song.albumId === STRESS_ALBUM_ID) {
+    // A long, unbroken Japanese line: the shape a lyric panel has to lay out on a phone.
+    return STRESS_LYRIC_LINES.map((value, index) =>
+      LYRICS_PLAIN ? { value } : { start: Math.round((index * song.duration * 1000) / STRESS_LYRIC_LINES.length), value },
+    );
+  }
+  if (song.albumId !== PILOT_ALBUM_ID) return null;
   return LYRICS_PLAIN ? plainSidecar() : timedSidecar(song);
 }
 
@@ -632,6 +751,39 @@ const server = createServer((request, response) => {
     state.scrobbles = [];
     state.lyrics = [];
     send(response, 200, { reset: true }, { 'content-type': 'application/json; charset=utf-8' });
+    return;
+  }
+
+  /*
+   * The layout probe's way home. A phone (or the iOS Simulator) runs the audit inside the
+   * page and cannot be attached to a debugger from here, so it posts its measurements back
+   * to the origin it loaded the app from and this server holds them until the harness on the
+   * host asks. Bodies are capped: this is a measurement channel, not an upload endpoint.
+   */
+  if (path === '/__reports') {
+    send(response, 200, { count: state.reports.length, reports: state.reports }, { 'content-type': 'application/json; charset=utf-8' });
+    return;
+  }
+  if (path === '/__report' && request.method === 'POST') {
+    const chunks = [];
+    let size = 0;
+    request.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > 4 * 1024 * 1024) {
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        state.reports.push({ receivedAt: new Date().toISOString(), report: parsed });
+        send(response, 200, { stored: state.reports.length }, { 'content-type': 'application/json; charset=utf-8' });
+      } catch (error) {
+        send(response, 400, { error: String(error) }, { 'content-type': 'application/json; charset=utf-8' });
+      }
+    });
     return;
   }
 

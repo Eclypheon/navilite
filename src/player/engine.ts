@@ -392,11 +392,13 @@ export class AudioEngine {
       const source = ctx.createMediaElementSource(this.el);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
-      // v1.1: deliberately close to unsmoothed. The old 0.8 gave each frame an 80% memory
-      // of the last one, which reads as the bars gliding/sagging behind the music. The
-      // visualiser supplies its own short fall-off, so it can snap on the attack and let go
-      // visibly instead of the analyser averaging the two together.
-      analyser.smoothingTimeConstant = 0.15;
+      // v1.1 dropped this from 0.8 to 0.15 (each frame was carrying 80% of the last one, which
+      // read as the bars gliding behind the music). v1.2 finishes the job: 0.15 is still a
+      // memory of the previous frame *inside the analyser*, and the owner's complaint about the
+      // spectrum is precisely that a bar should show the current frame and nothing else. Every
+      // frame is now an independent measurement; the visualiser adds no ballistics of its own
+      // either, so a bar's height is exactly this frame's magnitude.
+      analyser.smoothingTimeConstant = 0;
       analyser.minDecibels = -95;
       source.connect(analyser);
       analyser.connect(ctx.destination);

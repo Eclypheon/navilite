@@ -405,3 +405,217 @@ both binaries. Neither binary is in the repo (`artifacts/` is gitignored).
   paints from the clock on return).
 - The real Navidrome's sidecars (§9.4).
 - Scrolling "feel" on a physical phone; the overflow checks above are geometry, not touch comfort.
+
+## 10. v1.2 — the three things the owner reported (2026-10-11)
+
+Scope, from the card: the sideways scroll, Lyrics mode as a full-height text screen with no album
+art, and the after-image in the spectrum. Nothing else was folded in — the lyrics *source* change
+(a custom route for the sidecar text) is v1.3, behind Nova's route.
+
+(§7's "No simulator run" is superseded here: v1.2 used an iOS 26.1 simulator, both Safari and a
+real Capacitor WKWebView shell — §10.2.)
+
+### 10.1 Tests, build, artifacts
+
+```
+$ npm test            ℹ tests 62  ℹ pass 62  ℹ fail 0  ℹ skipped 0     (v1.1: 53)
+$ npm run typecheck   (tsc --noEmit, clean)
+$ npm run build       dist/assets/index-CAjohe-r.js   78.61 kB │ gzip: 26.91 kB
+                      dist/assets/index-DF1Dipzq.css  11.28 kB │ gzip:  3.03 kB
+$ npm run apk            → artifacts/Navilite-1.2.0-debug.apk       8,780,787 bytes  (v1.1: 8,780,443, +344)
+$ npm run ipa:unsigned   → artifacts/Navilite-1.2.0-unsigned.ipa      864,067 bytes  (v1.1:   863,802, +265)
+# .ipa: app version 1.2.0 (3), UIBackgroundModes[0]=audio
+```
+
+New tests: `test/visualizer.test.ts` (the spectrum contract), `test/lyrics-cache.test.ts` (a
+sidecar that lands after the track was first opened), `test/layout-393.test.ts` (the 393 px
+regression), and the v1.2 changelog guard in `test/changelog.test.ts`.
+
+### 10.2 "Still slightly too wide for my screen … horizontal scroll" — measured, and the honest answer
+
+**The harness changed first, because the v1.1 claim ("clean at 390 and 360 px") was checking the
+wrong thing.** Three engines now, all over one in-page measurement
+(`tools/layout-probe-browser.js`, injected before the app's first paint):
+
+| driver | engine | device |
+|---|---|---|
+| `tools/layout-audit.mjs` | Chrome via CDP | 393 x 852 CSS px, dpr 3, `Emulation.setSafeAreaInsetsOverride` top 59 / bottom 34 |
+| `device-probe.mjs --device <sim>` | iOS 26.1 Safari (real WebKit) | iPhone 15 Pro simulator |
+| `device-probe.mjs --serve --app …` | **the app itself**: Capacitor 8 WKWebView in the simulator, `app.navilite` installed and launched, driven through its own controls | same; reports `innerWidth 393`, `safe-area-inset-top 59px`, `bottom 34px` from the OS |
+
+Fourteen states per run, on a library built to be hostile to layouts (`mock-subsonic.mjs --stress`:
+artist `星野源と仲間たちと深夜のドライブ音楽団`, long Japanese album and track titles, an unbroken
+Latin title, two very long playlist names):
+
+```
+Library (#/artists) — long Japanese artist name
+Library — search field focused (the iOS focus-zoom case)
+Artist — long Japanese album names in the grid
+Album — long Japanese and unbroken-Latin track titles
+Playlists — two very long playlist names
+Playlist — long Japanese playlist name
+Settings — the long playback-preference select
+Changelog
+Now (#/now, spectrum) — long title, long "Playing from" line
+Now (#/now, lyrics) — long unbroken Japanese lyric lines
+Now (#/now, lyrics) — mid-swipe, finger down and moved
+Now (#/now, lyrics) — after the swipe completes
+Library with the player bar showing a long Japanese title
+Stress album with the player bar showing a long unbroken Latin title
+```
+
+Result, in all three engines, in every state:
+
+```
+document clientWidth 393 = documentElement.scrollWidth 393   → overflow 0 px
+tightest content box in the layout: .now-close, right 381 → 12 px of slack
+RESULT: no horizontal overflow anywhere.
+```
+
+The same run inside the native shell (`docs/layout-393-native-report.json`) reports it off the
+phone's own numbers — `innerWidth 393`, `env(safe-area-inset-top) 59px`, `bottom 34px` from iOS,
+`visualViewport scale 1` — and the same result: every state 393/393, overflow 0 px.
+
+The width sweep (`--sweep 320:440 --step 1`, eight routes at every width) also comes back clean at
+every width in the range.
+
+So: **there is no element wider than the 393 px viewport, and I could not reproduce the sideways
+scroll.** What v1.1 actually got wrong is the checking, and it got it wrong in four ways that are
+now closed: it measured 390 and 360 (both *narrower* than the phone, and a tuned layout that fits
+one width is not responsive), at dpr 2, with a fixture whose longest string was
+`Track 1 · 110/330/1320 Hz` (nothing in it could push a layout), and it never looked at the states
+that actually hold a long string in a non-wrapping row — the mini player bar while browsing, and
+the search field focused. Those are states 13, 2 and 14 above.
+
+What changed in the app anyway — structure, not symptom:
+
+- **No viewport units left in the stylesheet.** `.toast` was `min(90vw, 520px)`; a `vw` ignores the
+  safe area and counts a reserved scrollbar on engines that have one, and it is the class of sizing
+  the owner's own words point at ("forcing some kind of set width"). It is now
+  `min(calc(100% - 28px), 520px)`.
+- **`-webkit-text-size-adjust: 100%`** on `html, body`. Inflated text is the one way a line gets
+  wider without a width being declared anywhere.
+- **Safe-area insets on the horizontal axis too** (`.topbar`, `.view`, `.playerbar`, `.now-top`,
+  `.now-bar`, `.lyrics`), so landscape content stops running under the notch.
+- **Deliberately not done: `overflow-x: hidden`.** There was nothing to hide, and adding it would
+  both mask the next offender and defeat the regression test (which measures `scrollWidth`).
+- **Found and reported, not changed:** `.now-art { width: 100%; height: 100% }` overrides
+  `.now-cover > * { width: min(46vw, 190px) }` (same specificity, later in the file), so the album
+  art on the spectrum screen is a 357 px square rather than the 190 px cap the stylesheet intends.
+  It is not one of the three reported defects, so v1.2 leaves the spectrum screen's look alone;
+  it is a one-line change if he wants a smaller cover there.
+
+If a sideways scroll survives on his phone after installing this build, the measurement to take is
+on his device, not here: the read-only seam (`window.__navilite.status()`,
+`document.documentElement.scrollWidth` vs `window.innerWidth`) through Safari's Web Inspector
+against the installed app, on the screen where it happens.
+
+### 10.3 Lyrics mode is a text screen: no art, and the whole height
+
+Measured on the same 393 x 852 target, in both engines, before and after:
+
+```
+before (v1.1):  lyrics: 1 of 12 lines fit whole · line box 55.09 px at 15px · panel 89.48 px · cover 359 px (visible)
+after  (v1.2):  lyrics: 12 of 12 lines fit whole · line box 37.09 px at 13px · panel 452.48 px · cover hidden
+                (the same run inside the native shell: panel 363 px, 12 of 12 lines, cover hidden, 13px)
+```
+
+Two causes, both measured rather than guessed: the album art was still on screen (a 357 px image,
+§10.2), and the lyrics column was pinned at its own `min-height: 88px` because a flex item with
+`flex-basis: auto` is sized by its (long) content first and then shrunk to the minimum by the rows
+above it. Fix: a `lyrics-mode` class on `.now` (set in `setNowMode`) that hides `.now-cover` and
+gives `.now-lyrics` `flex: 1 1 0; min-height: 0`, plus tighter line boxes.
+
+Decisions, since two were mine to make:
+
+- **13 px on a 1.35 line box.** iOS's own caption size; comfortable for kanji *and* romaji at arm's
+  length; roughly 26 lines of the 852 px screen at once instead of 15 at 15 px. The active line
+  keeps the same size and is picked out by colour and weight only, so following the highlight never
+  reflows the column under the reader's eye.
+- **The transport bar stays.** It costs 108 px — about six lines — and the alternative is leaving
+  the screen to pause. The song title, artist and "Playing from …" rows (136 px, another eight)
+  stay for the same reason: they are how you know what you are reading. Chrome costs about 13 of
+  the ~39 lines the screen could hold; the remaining ~26 are lyrics.
+- **Found and reported, not changed:** the native shell has ~89 px less room than Chrome for the
+  same screen (lyrics panel 363 px vs 452 px), because `ios.contentInset: 'always'` already shrinks
+  the web view's layout viewport by the safe-area insets *and* the app adds
+  `padding-top: env(safe-area-inset-top)` on top of that. The inset is counted twice. It is
+  vertical space, it is pre-existing (v1.1 behaves the same way), and it is not one of the three
+  reported defects — but it is worth ~5 lines of lyrics on his phone, so it belongs in v1.3 rather
+  than in a hotfix to a frozen scope.
+
+### 10.4 "Some after image or some separation of the colors at the top of each bar"
+
+Four separate memories of earlier frames were being drawn, all in the old `drawSpectrum`, plus one
+in the engine:
+
+1. **peak caps** — a 2 px rectangle above each bar at `globalAlpha 0.9` while the bar itself was
+   drawn at 0.55–1.0, i.e. a differently-bright floating segment: this is the reported "separation
+   of the colors at the top of each bar";
+2. **a fixed release fall-off** (`BAR_FALLOFF = 0.78` per frame) — the bar showed the previous
+   frame's level for ~115 ms after the music moved on: the "after image";
+3. **the bar gradient's accent stop at the top** — a second colour by construction;
+4. **the reflection** under the baseline — a deliberate second copy of the bar;
+5. and `analyser.smoothingTimeConstant = 0.15`, so 15% of the previous frame was inside every
+   reading to begin with.
+
+v1.2 draws one flat colour, one rectangle per band, whose height is a pure function of the frame
+just read, and sets the analyser smoothing to 0.
+
+**Evidence 1 — the drawing itself** (`test/visualizer.test.ts`, the real `attachVisualizer` driven
+by a recording 2D context):
+
+```
+v1.1: 192 rectangles per frame (64 bars + 64 reflections + 64 caps)
+v1.2:  64 rectangles per frame
+✖ (against v1.1, via git stash) every bar in a frame is one flat colour at full alpha … 192 !== 64
+✔ (v1.2) a loud frame followed by silence collapses to the baseline on the very next frame
+✔ (v1.2) a quiet frame is drawn from the quiet frame, not from the louder one before it
+✔ (v1.2) two identical frames draw byte-identical rectangles
+✔ (v1.2) every bar is one flat colour at full alpha, and each frame is fully cleared
+```
+
+**Evidence 2 — real pixels, real app** (`tools/spectrum-proof.mjs`): the app playing the mock's WAV
+through its own transport, `getImageData` off the real canvas, the audio taken to silence by
+setting `volume = 0` on the engine's media element (captured by wrapping `window.Audio` before the
+bundle runs — pausing instead flips the screen to the album-art theme and would prove nothing about
+the bars):
+
+```
+v1.1 (stashed src/player/{visualizer,engine}.ts, rebuilt):
+  playing: 23356 lit pixels (checksum 1831121519)
+  +50 ms:  37214 lit — 159% of the loud frame (caps and reflections *add* lit pixels)
+  +160 ms: 18302 lit — 78%, the release fall-off
+  +240 ms: 14409 lit, DIFFERENT from +160 ms — still decaying
+  RESULT: FAIL — something of an earlier frame is still on screen.
+
+v1.2:
+  playing: 23617 lit pixels
+  +50 ms:  1277 lit — 5.4% (informational: this reading depends on the media pipeline's own
+           latency, which varies between runs; it is reported, not asserted)
+  +160 ms: 1277 lit
+  +240 ms: 1277 lit, byte-identical to +160 ms
+  RESULT: every bar is the current frame only.
+```
+
+### 10.5 The lyrics cache the owner tripped over, pinned by test
+
+`test/lyrics-cache.test.ts` covers the exact case: a track is opened *before* its sidecar exists
+(the panel correctly says "no romaji lyrics for this track yet" and the miss is remembered for six
+hours), the sidecar then lands, and the same track shows its words on the next visit after the miss
+expires. Both halves are asserted, including the one that is easy to forget — inside the six-hour
+window the app still says "no lyrics" for a track that now has them. The window is deliberate
+(`MISS_TTL_MS`, and the file says why), so v1.2 does not change it; the refresh story belongs to
+v1.3 with the lyrics source.
+
+### 10.6 Still unverified
+
+- **His phone.** Nothing here ran on it. iOS WebKit *is* covered twice (§10.2), including the real
+  Capacitor shell reporting the OS's own insets, but a simulator is not his device.
+- **The sideways scroll, if it survives.** No offending element could be found at 393 px in three
+  engines, so the claim is "measured clean at the reported width", not "fixed a named offender"
+  (§10.2, and the on-device measurement to take next).
+- **His sidecar corpus.** 202 files / 213 tracks is what the lyrics view will meet in v1.3; v1.2
+  was measured against the mock's stress corpus, which is one 12-line song (§10.3).
+- Native playback, lock-screen controls, Keystore/Keychain and the sideload install: unchanged from
+  §9.7 — still no device, still unverified.

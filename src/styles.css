@@ -34,6 +34,14 @@ body {
   color: var(--text);
   font: 15px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  /*
+   * v1.2. The one thing that can widen a line without a single width being declared is inflated
+   * text: iOS autosizing decides a block "needs" bigger type and blows it up, which can push a
+   * non-wrapping row past the right edge. Off explicitly, on every engine, so the size in this
+   * file is the size that is drawn.
+   */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 #app {
@@ -72,7 +80,7 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: max(10px, env(safe-area-inset-top)) 14px 10px;
+  padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--line);
@@ -129,7 +137,7 @@ button {
 
 .view {
   flex: 1;
-  padding: 16px 14px calc(var(--bar-height) + 28px);
+  padding: 16px max(14px, env(safe-area-inset-right)) calc(var(--bar-height) + 28px) max(14px, env(safe-area-inset-left));
   max-width: 1100px;
   width: 100%;
   margin: 0 auto;
@@ -444,7 +452,7 @@ img {
   grid-template-columns: 1fr auto;
   gap: 4px 12px;
   align-items: center;
-  padding: 8px 14px calc(8px + env(safe-area-inset-bottom));
+  padding: 8px max(14px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
   min-height: var(--bar-height);
   background: color-mix(in srgb, var(--bg-overlay) 92%, transparent);
   backdrop-filter: blur(18px);
@@ -617,7 +625,7 @@ img {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 10px 14px 8px;
+  padding: 10px max(14px, env(safe-area-inset-right)) 8px max(14px, env(safe-area-inset-left));
   flex: none;
 }
 
@@ -779,6 +787,46 @@ img {
   font-weight: 600;
 }
 
+/* --------------------------------------------------------- lyrics mode (v1.2) */
+
+/*
+ * Lyrics mode is the text screen: the album art goes away and every pixel it was holding goes
+ * to the lines. This is not a cosmetic preference — measured on the 393 x 852 target with the
+ * library's long Japanese titles, the art was a 357 px square sitting above the text, and the
+ * text column had been squeezed to its 88 px `min-height`: **1 line of a 12-line song** fit on
+ * screen.
+ *
+ * 13 px on a 1.35 line box is the density choice. It is iOS's own caption size, it stays
+ * comfortably legible for kanji and romaji at arm's length, and it fits roughly 37 lines where
+ * 15 px fits 22. The active line is deliberately the *same* size as the others and is picked
+ * out by colour and weight only, so following the highlight never reflows the column under the
+ * reader's eye.
+ */
+.now.lyrics-mode .now-cover {
+  display: none;
+}
+
+.now.lyrics-mode .now-lyrics {
+  /*
+   * `flex-basis: 0` instead of `auto`. With `auto` the column is sized by its (long) content
+   * first and then shrunk to `min-height` by the rows above it; with `0` it takes the whole
+   * leftover height, which is what "as much of the song as possible" means.
+   */
+  flex: 1 1 0;
+  min-height: 0;
+  margin-top: 4px;
+}
+
+.now.lyrics-mode .lyrics {
+  padding: 0 max(14px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left));
+}
+
+.now.lyrics-mode .lyric-line {
+  padding: 1px 0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .lyrics-empty {
   margin: 0;
   padding: 22px 0;
@@ -802,7 +850,13 @@ img {
   bottom: calc(var(--bar-height) + 18px);
   transform: translate(-50%, 12px);
   z-index: 20;
-  max-width: min(90vw, 520px);
+  /*
+   * v1.2: was `min(90vw, 520px)`. A viewport unit is the wrong ruler for a fixed element: it
+   * counts the scrollbar on engines that reserve one, and it says nothing about the safe area.
+   * A percentage of the containing block (the viewport, for a fixed box) with a fixed inset is
+   * the same width on the phone and the correct width everywhere else.
+   */
+  max-width: min(calc(100% - 28px), 520px);
   padding: 10px 14px;
   border-radius: 10px;
   border: 1px solid var(--line);
