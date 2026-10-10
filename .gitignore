@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+.env
+.env.*
+
+# Build outputs that are deliberately not committed: the repo carries source, not
+# binaries. See README "Artifacts" for where `npm run apk` / `npm run ipa:unsigned`
+# put them, and why they are kept out of git.
+artifacts/
+build/
+build-ios/
+Pods/
+*.ipa
+*.apk
+*.aab
+*.keystore
+*.jks
