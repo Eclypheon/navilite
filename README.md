@@ -23,8 +23,8 @@ source, not binaries), and stay far under the ~50 MB a Telegram bot can deliver:
 
 | Artifact | Bytes | Why that size |
 |---|---|---|
-| `artifacts/Navilite-0.1.0-debug.apk` | 8,772,279 (8.4 MiB) | AndroidX + Capacitor core + ExoPlayer (the native audio plugin), plus 17 web payload files. Debug-signed, so it sideloads without any signing setup. |
-| `artifacts/Navilite-0.1.0-unsigned.ipa` | 856,822 (0.8 MiB) | No engine is bundled: WKWebView and AVFoundation are the OS's. Just the arm64 binary and the web payload. Unsigned on purpose (`docs/ios-sideload.md`). |
+| `artifacts/Navilite-0.1.0-debug.apk` | 8,773,616 (8.4 MiB) | AndroidX + Capacitor core + ExoPlayer (the native audio plugin), plus 17 web payload files. Debug-signed, so it sideloads without any signing setup. |
+| `artifacts/Navilite-0.1.0-unsigned.ipa` | 856,888 (0.8 MiB) | No engine is bundled: WKWebView and AVFoundation are the OS's. Just the arm64 binary and the web payload. Unsigned on purpose (`docs/ios-sideload.md`). |
 
 ## What it does
 

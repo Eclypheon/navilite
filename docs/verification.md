@@ -126,9 +126,9 @@ reason: the library sent no Access-Control-Allow-Origin for this stream, so the 
 
 ```
 $ npm run apk
-BUILD SUCCESSFUL in 1m 3s
+BUILD SUCCESSFUL in 7s
 built /Users/neokester/navilite/artifacts/Navilite-0.1.0-debug.apk
-bytes: 8772279
+bytes: 8773616
 ```
 
 ```
@@ -152,7 +152,7 @@ and the app's own foreground service. It is debug-signed, so it installs straigh
 $ npm run ipa:unsigned
 ** BUILD SUCCEEDED **
 built  /Users/neokester/navilite/artifacts/Navilite-0.1.0-unsigned.ipa
-bytes: 856821
+bytes: 856888
 app version 0.1.0 (1), UIBackgroundModes[0]=audio
 $ file build-ios/.../App.app/App
 Mach-O 64-bit executable arm64
@@ -202,7 +202,7 @@ Let's Encrypt certificate valid to 2026-12-15, renewed by tailscaled; **not** re
 tailnet (three independent public checkers time out on `:9443` while the same probe reaches Funnel
 `:10000`).
 
-Two corrections came out of that deployment, both in this repo:
+Three corrections came out of that deployment, all in this repo:
 
 1. **The connect form's placeholder named the wrong server.** It read
    `https://alienlab.tailbed832.ts.net (or leave blank for same origin)` — no port, i.e. **443**,
@@ -215,6 +215,14 @@ Two corrections came out of that deployment, both in this repo:
    (tailnet-only, publicly trusted certificate, so the PWA installs from it with nothing to install
    on the phone, and Android's user-CA restriction does not apply), and stating that port 443 is
    **not** it.
+3. **A build-script bug surfaced while rebuilding the native artifacts.**
+   `tools/build-ios-ipa.sh` had two ways to ship files that no longer exist in `dist/`: incremental
+   `xcodebuild` does not drop bundle resources removed from the source, and `zip` *updates* an
+   existing archive instead of replacing it, so a rebuild on top of an old `.ipa` kept the previous
+   `index-*.js`. The first rebuild produced an 884,401-byte `.ipa` holding **both** the old and the
+   new bundle (54 members); with `App.app` removed before the build and the target archive removed
+   before zipping, it is 856,888 bytes with 47 members and exactly one `index-*.js` — the corrected
+   one.
 
 The rebuilt `dist/` (19 unit tests and `tsc --noEmit` clean before the build) was installed to the
 host's served copy at `/home/k/docker/data/navilite/dist/` — the directory the Caddy container mounts
@@ -234,3 +242,12 @@ $ curl -sS 'https://alienlab.tailbed832.ts.net:9443/rest/ping.view?v=1.16.1&c=na
 (The Subsonic probe carries no credentials on purpose, so Navidrome's error 10 is the expected
 answer — it proves the same-origin proxy is still wired after the file swap. `/sw.js`,
 `/manifest.webmanifest`, the icons, and `/favicon.svg` all returned 200 over the door too.)
+
+The two native artifacts in `artifacts/` were rebuilt from the corrected source as well, since both
+embed the web payload and the old copies carried the portless placeholder:
+
+```
+$ npm run apk            → artifacts/Navilite-0.1.0-debug.apk    bytes: 8773616
+$ npm run ipa:unsigned   → artifacts/Navilite-0.1.0-unsigned.ipa bytes: 856888
+# index-Cd0kb3q2.js inside both: carries "…:9443 (or leave blank for same origin)", portless form: 0
+```

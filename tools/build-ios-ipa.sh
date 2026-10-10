@@ -41,6 +41,12 @@ fi
 
 cd "${ROOT}/ios/App"
 
+# Incremental xcodebuild does not remove bundle resources that have since disappeared from the
+# source, so a rebuilt dist/ (new hashed asset names) leaves the previous index-*.js inside
+# App.app — and therefore inside the .ipa. Drop the product so the bundle matches dist/ exactly;
+# the dependency builds under Build/ stay cached, so this is cheap.
+rm -rf "${DERIVED}/Build/Products/${CONFIG_DIR}/App.app"
+
 # Unsigned build: no team, no provisioning profile, no keychain prompt.
 xcodebuild \
   -project App.xcodeproj \
@@ -66,12 +72,16 @@ BACKGROUND="$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "${APP}/In
 
 if [ "${MODE}" = "simulator" ]; then
   NAME="Navilite-${VERSION}-simulator.zip"
-  (cd "${DERIVED}/Build/Products/${CONFIG_DIR}" && zip -qry "${OUT}/${NAME}" App.app)
+  (cd "${DERIVED}/Build/Products/${CONFIG_DIR}" && rm -f "${OUT}/${NAME}" && zip -qry "${OUT}/${NAME}" App.app)
 else
   NAME="Navilite-${VERSION}-unsigned.ipa"
   STAGE="$(mktemp -d)"
   mkdir -p "${STAGE}/Payload"
   cp -R "${APP}" "${STAGE}/Payload/"
+  # zip *updates* an existing archive and never drops members that are gone, so a rebuild on top
+  # of an existing .ipa would keep shipping files that are no longer in App.app (e.g. an old
+  # hashed index-*.js). Remove it first so the archive matches the bundle exactly.
+  rm -f "${OUT}/${NAME}"
   (cd "${STAGE}" && zip -qry "${OUT}/${NAME}" Payload)
   rm -rf "${STAGE}"
 fi
