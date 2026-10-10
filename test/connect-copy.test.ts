@@ -8,7 +8,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CANONICAL_ORIGIN, SERVER_URL_PLACEHOLDER } from '../src/config.ts';
+import { CANONICAL_ORIGIN, DEFAULT_SERVER_URL, SERVER_URL_PLACEHOLDER } from '../src/config.ts';
 import { normalizeServerUrl } from '../src/api/subsonic.ts';
 
 const HOST = 'alienlab.tailbed832.ts.net';
@@ -18,6 +18,17 @@ test('the canonical origin is HTTPS on the :9443 door, not port 443', () => {
   assert.equal(url.protocol, 'https:');
   assert.equal(url.hostname, HOST);
   assert.equal(url.port, '9443');
+});
+
+test('v1.1: a blank Server URL means the library, not a dead end', () => {
+  // The owner asked for the field to default when left empty. Both the pre-filled value and
+  // the empty-submit fallback are this one constant, so they cannot disagree.
+  assert.equal(DEFAULT_SERVER_URL, CANONICAL_ORIGIN);
+  const url = new URL(DEFAULT_SERVER_URL);
+  assert.equal(url.port, '9443');
+  assert.equal(normalizeServerUrl(DEFAULT_SERVER_URL), CANONICAL_ORIGIN);
+  // And it is a real origin, not a placeholder that would fail a fetch.
+  assert.ok(DEFAULT_SERVER_URL.startsWith('https://'));
 });
 
 test('the Server URL placeholder keeps the port — never the bare host', () => {

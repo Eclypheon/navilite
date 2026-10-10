@@ -39,8 +39,15 @@ export interface EngineStatus {
 
 /** ~1.8 s of silence from the analyser while audio is definitely playing = not real samples. */
 const ZERO_FRAMES_BEFORE_THEME = 18;
-/** The same non-zero frame for ~2.5 s is a frozen buffer, not a measurement. */
-const FROZEN_FRAMES_BEFORE_THEME = 25;
+/**
+ * The same non-zero frame for ~1 s is a frozen buffer, not a measurement.
+ *
+ * v1.1 lowered this from 25 frames (2.5 s): with the analyser running at a near-zero
+ * smoothing constant (below), a genuinely live frame differs every single sample, so a
+ * repeat is already strong evidence — and 2.5 s of animation that is not measuring
+ * anything is exactly the "draggy" reading the owner reported.
+ */
+const FROZEN_FRAMES_BEFORE_THEME = 10;
 const METER_INTERVAL_MS = 100;
 
 export class AudioEngine {
@@ -139,6 +146,26 @@ export class AudioEngine {
   /** The live frequency data, or null when there is nothing real to show. */
   spectrumData(): Uint8Array | null {
     return this.spectrumLive && this.analyser ? this.freq : null;
+  }
+
+  /**
+   * A fresh analyser frame, for the visualiser to call once per animation frame.
+   *
+   * This is the v1.1 fix for the "draggy" spectrum: the meter below only samples every
+   * 100 ms (it is doing the honesty bookkeeping, which does not need to run at 60 Hz), so
+   * a canvas that drew from that buffer was redrawing the same 10 Hz measurement fifteen
+   * times a second — visibly stepped, however smooth the drawing looked. Pulling the frame
+   * per paint costs one `getByteFrequencyData()` call and makes the bars move with the
+   * audio instead of with the timer.
+   *
+   * Returns null when the analyser is not a real measurement, so the theme animation takes
+   * over exactly as before.
+   */
+  readSpectrum(): Uint8Array | null {
+    if (!this.spectrumLive || !this.analyser || this.backend !== 'web') return null;
+    if (this.ctx?.state === 'suspended') return null;
+    this.analyser.getByteFrequencyData(this.freq);
+    return this.freq;
   }
 
   /** Analyser sample rate, so a spectrum can be interpreted in Hz (0 when no graph). */
@@ -365,7 +392,11 @@ export class AudioEngine {
       const source = ctx.createMediaElementSource(this.el);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.8;
+      // v1.1: deliberately close to unsmoothed. The old 0.8 gave each frame an 80% memory
+      // of the last one, which reads as the bars gliding/sagging behind the music. The
+      // visualiser supplies its own short fall-off, so it can snap on the attack and let go
+      // visibly instead of the analyser averaging the two together.
+      analyser.smoothingTimeConstant = 0.15;
       analyser.minDecibels = -95;
       source.connect(analyser);
       analyser.connect(ctx.destination);

@@ -119,6 +119,13 @@ export const ICONS = {
   queue: 'M4 6h11v2H4V6zm0 5h11v2H4v-2zm0 5h7v2H4v-2zm13 0v-6l4 3-4 3z',
   settings:
     'M4 7h9v2H4V7zm13 0h3v2h-3V7zm-5-3h2v8h-2V4zM4 15h3v2H4v-2zm7 0h9v2h-9v-2zm-4-3h2v8H7v-8z',
+  // v1.1: shuffle and repeat, for the compact bar on the spectrum screen.
+  shuffle:
+    'M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z',
+  repeat: 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z',
+  repeatOne:
+    'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z',
+  changelog: 'M6 3h9l5 5v13H6V3zm2 8h8v2H8v-2zm0 4h8v2H8v-2z',
 };
 
 export function playIcon(playing: boolean, size = 24): SVGSVGElement {

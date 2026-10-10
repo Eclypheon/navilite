@@ -251,3 +251,157 @@ $ npm run apk            → artifacts/Navilite-0.1.0-debug.apk    bytes: 877361
 $ npm run ipa:unsigned   → artifacts/Navilite-0.1.0-unsigned.ipa bytes: 856888
 # index-Cd0kb3q2.js inside both: carries "…:9443 (or leave blank for same origin)", portless form: 0
 ```
+
+## 9. v1.1 — the UI/UX pass (2026-10-11)
+
+### 9.1 Tests and build
+
+```
+$ npm test           ℹ tests 53  ℹ pass 53  ℹ fail 0     (19 → 53: lyrics, romanisation, queue
+$ npm run typecheck  (tsc --noEmit, clean)                order, changelog drift, connect copy)
+$ npm run build      dist/assets/index-BlvTS-Cb.js  79.11 kB │ gzip: 27.12 kB
+                     dist/assets/index-0MlfN5BE.css 10.62 kB │ gzip:  3.50 kB
+```
+
+### 9.2 "No need for sideways scrolling" — measured, and the cause was real
+
+Method: Chrome via CDP with `Emulation.setDeviceMetricsOverride` at **390** and **360** CSS px
+(mobile, dpr 2), then on each route: `document.documentElement.scrollWidth` vs `window.innerWidth`,
+plus a walk of every element for `getBoundingClientRect().right > innerWidth`.
+
+The first pass found one route where the page still wanted more room than the phone:
+`#/settings` reported a **685 px** layout viewport on a 390 px device, because of the playback
+select — a `<select>` is as wide as its longest option ("Automatic — real spectrum in the
+foreground, native engine in the background"), and that option measured **671 px**. A select that
+wide pushes the page, and iOS Safari shows it as the sideways scroll he reported. Fix in
+`src/styles.css`: `.field` and `select.field` take `max-width: 100%`, `min-width: 0`, and the inline
+variant is allowed to shrink.
+
+After the fix, all six routes measure exactly the viewport width with **zero** offenders:
+
+```
+390 px: #/artists 390/390   #/playlists 390/390   #/settings 390/390
+        #/changelog 390/390 #/album/album-1-1 390/390 #/playlist/pl-1 390/390
+360 px: same six routes, all 360/360, offenders: none
+```
+
+Long Japanese titles (the case in the report): injecting
+`夜のなかをあるいていく どこまでもつづくよるのうた きみのこえがきこえるようなきがした それでもぼくらはあるいていく`
+into the album rows and the now-playing title leaves `scrollWidth == 360` and the title element
+itself ellipsised (`scrollWidth 764 > clientWidth 244`) — it shortens instead of widening the page.
+
+### 9.3 The spectrum — frame times, not adjectives
+
+With the spectrum actually drawing (90 consecutive `requestAnimationFrame` intervals, 360 px
+viewport, audio playing, real analyser frames):
+
+```
+p50 16.7 ms   p95 16.7 ms   max 16.8 ms   avg 16.5 ms    → 60 fps, no dropped frame in 1.5 s
+```
+
+Two controls, so the number means something. The same loop on `about:blank` in the same browser
+gives `p95 116.7 ms` — this machine throttles a tab that is not compositing, which is where an
+earlier measurement's scary numbers came from. And with the canvas hidden (Lyrics mode) the loop
+sits at `p50 50.0 ms`, because nothing is asking Chrome to compose a frame; the visualiser itself
+is what holds the 60 fps.
+
+That the frames are *fresh* — the actual complaint ("draggy and laggy") — was measured directly:
+120 consecutive animation frames while playing, hashing the analyser output each frame, gave
+**0 byte-identical pairs**. The old design read the meter's 100 ms snapshot, so at 60 fps roughly
+five of every six frames re-drew the same buffer; `smoothingTimeConstant` was also dropped from 0.8
+to near-unsmoothed, and the stale-frame guard now keys on a same-non-zero reading rather than a
+2.5 s byte-identical window.
+
+The spectrum is still the real one: `getByteFrequencyData()`, `fftSize` 2048 at 48 kHz (23.44 Hz per
+bin). Playing the mock's track whose partials are 440/1760/3520 Hz, the four loudest bins are
+422/445, 1758, 3516 Hz — the declared partials, within one bin.
+
+### 9.4 Lyrics — all four answers, end to end
+
+Source is the library and nothing else: `getLyricsBySongId` (OpenSubsonic), with the legacy
+`getLyrics` only as a fallback. The mock now implements those two endpoints the way Navidrome
+serves sidecar files; its lines are invented for the harness and ship nowhere.
+
+| Case | What was run | What came back |
+|---|---|---|
+| Timed sidecar | `npm run mock` (default: first album has a `.lrc`-style sidecar), play a track from it, open the Lyrics pill | 6 lines rendered; the mock recorded `getLyricsBySongId id=album-1-1-track-3 … served:true`; the highlighted line tracked the clock (line 2 active at ~5 s, line 4 at ~16 s) |
+| Untimed sidecar | `npm run mock -- --lyrics-plain`, same track | 6 lines, **no** highlight in four samples over 5 s of playback (timings absent, so nothing lights up), and the panel scrolls (`scrollHeight 239 > clientHeight 154`) |
+| No lyrics at all | a track from an album without a sidecar | `getLyricsBySongId … served:false` then `getLyrics … served:false` → the panel reads **"no romaji lyrics for this track yet"**. No spinner, nothing invented |
+| Track changes | press Next twice with the panel open | panel reloaded per track (`album-1-1-track-1 → -2 → -3`, one library request each) |
+
+The romaniser is a safety net, not the feature: a line that still holds kanji is shown as written
+plus one line of small print (`Kanji is left as it is — reading it out needs a dictionary the app
+does not carry.`), and `test/lyrics.test.ts` asserts kanji is never reported as romaji.
+
+Nothing leaks into what ships:
+
+```
+$ shasum -a 256 dist/assets/index-BlvTS-Cb.js
+e6ba262e…277caaa   dist/assets/index-BlvTS-Cb.js
+       ^ the same hash for the copy inside Navilite-1.1.0-debug.apk and inside Navilite-1.1.0-unsigned.ipa
+$ grep -c 'no romaji lyrics for this track yet' <bundle inside the APK>   → 1
+$ grep -c '夜のなか' <bundle inside the APK>                                → 0
+$ grep -c 'lrclib'  <bundle inside the APK>                                → 0
+$ grep -r 'lrclib' src/ test/ dist/                      → only the guard in test/lyrics.test.ts
+```
+
+**Not verified:** lyrics served by the real Navidrome from his pilot sidecar. That needs his
+credentials and lives behind the tailnet door, and the point of the change is that the text is his;
+the mock answers the same endpoint with the same JSON shape, and the operator confirmed the
+sidecar/`LyricsPriority` behaviour on the box.
+
+### 9.5 Navigation, gesture, launch restore, (x/y), highlight
+
+- **Logo → spectrum:** clicking the header `.brand` gives `#/now` with the now-playing screen
+  visible.
+- **Swipe left from the spectrum:** a synthesised touch drag leftwards across the now-playing
+  screen lands on `#/playlists` (Playlists tab active) with playback untouched.
+- **Search without a tab:** the Library screen carries the field
+  (`input[type=search]`, placeholder *"Search your library"*) plus a Search button; typing
+  "Transmission" and pressing Enter gives `#/search/Transmission` with the three matching albums
+  listed, backed by a real `search3` call (`songCount=40 albumCount=10 artistCount=10`). The tab is
+  gone, the ability is not.
+- **Launch restore:** with a queue saved by `savePlayQueue`, a reload lands on `#/now` for that
+  track (`Playing from your last session (4/4)`), shows the cover and duration, and does **not**
+  start playing by itself; pressing play resumes at the saved position (the mock had
+  `position: 10055`, the clock came up at `0:07`).
+- **(x/y)** shows the track's place in the playlist, which is what he asked for. It follows the
+  playlist position rather than the play-order cursor, so switching shuffle on does not rename the
+  track from 3/4 to 1/4.
+- **Blank Server URL:** the field is pre-filled with the canonical origin and reads
+  `https://alienlab.tailbed832.ts.net:9443 (leave blank to use this)`, and the form says in as many
+  words *"Left blank, the address above is used — that is your library."* Submitting a blank field
+  from a page served by the mock issued a real
+  `GET https://alienlab.tailbed832.ts.net:9443/rest/ping.view?…` — so it falls back to the door
+  rather than failing on an empty box. That call reached the real library over the tailnet and came
+  back `wrong username or password` (Subsonic error 40 — the credentials used here are the mock's,
+  not his), which is the correct answer and incidentally another confirmation that the door is live.
+- **Highlight:** playing a playlist's track marks exactly one row (`.row.song.playing`) with the
+  title of the track that is playing.
+- **Shuffle / repeat:** the buttons are state, not decoration — `aria-pressed` and the icon follow,
+  and repeat cycles `off → all → one → off`; `test/queue-order.test.ts` covers the order maths and
+  the end-of-queue behaviour.
+
+### 9.6 Artifacts
+
+```
+$ npm run apk            → artifacts/Navilite-1.1.0-debug.apk    8,780,443 bytes  (v1.0: 8,772,279, +0.09%)
+$ npm run ipa:unsigned   → artifacts/Navilite-1.1.0-unsigned.ipa   863,802 bytes  (v1.0:   856,822, +0.81%)
+# .ipa: 47 members, one index-*.js — app version 1.1.0 (2), UIBackgroundModes[0]=audio
+```
+
+(The v1.0 figures are the released ones; the corrected v1.0 rebuild that is still in `artifacts/`
+under its old `0.1.0` name is 8,773,616 / 856,888, so against that pair v1.1 is +6,827 / +6,914.)
+
+Both embed the web payload that is current in `dist/`, byte for byte (SHA-256 above), so "verified
+on the real build" means the browser run in §9.2–9.5 was served exactly the bundle that is inside
+both binaries. Neither binary is in the repo (`artifacts/` is gitignored).
+
+### 9.7 Still unverified without a device
+
+- Native playback and the native-shell hand-off (ExoPlayer / AVFoundation), lock-screen controls,
+  Keystore / Keychain behaviour, and the actual install on the iPhone — no device in this session.
+- iOS backgrounding behaviour of the lyrics panel (Web Audio and the page timers stop; the panel
+  paints from the clock on return).
+- The real Navidrome's sidecars (§9.4).
+- Scrolling "feel" on a physical phone; the overflow checks above are geometry, not touch comfort.

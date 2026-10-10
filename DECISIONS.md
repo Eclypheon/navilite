@@ -68,6 +68,27 @@ doesn't, not *never*).
   relying on it, and keep the same-origin deployment as the thing that makes the question moot.
 - Note `Vary: Origin` — whatever emits this is a real CORS middleware, not an accident.
 
+## Lyrics (owner's call, 2026-10-11)
+
+- **The lyrics live in his music folder**, one file per song next to the audio, sharing the song's
+  file name. Navidrome reads them (`LyricsPriority`:
+  `.ttml,.yaml,.yml,.elrc,.lrc,.srt,.txt,embedded` — `.md` is not a supported extension) and serves
+  them to clients.
+- **The app reads them through the library**, never from a third party: OpenSubsonic
+  `getLyricsBySongId` first (id-keyed, so it cannot pick the wrong song), legacy `getLyrics` only as
+  a fallback for a server that lacks the newer call — and the fallback's blob is discarded unless
+  the server's own artist/title match the track that is playing, because that call keys on
+  artist+title and would otherwise hand over the wrong song's words.
+- **Nothing is committed, bundled or shipped.** No lyrics text in the repo, none in `dist/`, none in
+  the APK/IPA. The only copy away from his server is a per-device cache
+  (`src/storage/lyrics.ts`, `localStorage`, clearable from Settings).
+- **Untimed is the normal case, not a degraded one.** Many of his files have no timings: the panel
+  is built for plain text first and the line highlight simply lights up when a `.lrc`-style file
+  does carry `[mm:ss.xx]` timings. Nothing is gated on timing.
+- Kanji cannot be romanised in the browser without a dictionary (~40 MB), so the local converter
+  handles **kana only** and a kana line is romanised as a safety net; the expected input is already
+  romaji or English, written by Navi.
+
 ## Ownership
 
 - Research: **Mugger** (`researcher`) — modality verdict in flight (`t_4c24f452`).

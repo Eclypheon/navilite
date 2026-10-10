@@ -40,6 +40,16 @@ const USER = args.get('user') ?? 'navidrome';
 const PASSWORD = args.get('password') ?? 'navidrome';
 const NO_CORS = args.has('no-cors');
 const NO_CORS_STREAM = args.has('no-cors-stream');
+/**
+ * `--no-lyrics`: the library has no lyrics files at all — every lyrics call answers 70
+ * ("data not found"), which is what a track with no sidecar gets from Navidrome.
+ */
+const NO_LYRICS = args.has('no-lyrics');
+/**
+ * `--lyrics-plain`: sidecars without timings, i.e. `.txt`. This is the *normal* case for the
+ * owner's library, so the mock can produce it; the timed `.lrc` path is the default.
+ */
+const LYRICS_PLAIN = args.has('lyrics-plain');
 
 /* ------------------------------------------------------------------ library */
 
@@ -52,6 +62,7 @@ const state = {
   starred: new Set(),
   playQueue: null,
   ratings: new Map(),
+  lyrics: [],
   playlists: [
     { id: 'pl-1', name: 'Late night', songIds: [], created: '2026-01-01T00:00:00Z', changed: '2026-01-01T00:00:00Z' },
   ],
@@ -354,6 +365,16 @@ function handleRest(response, method, params, url) {
       return;
     }
 
+    case 'getLyricsBySongId': {
+      serveLyricsBySongId(response, params);
+      return;
+    }
+
+    case 'getLyrics': {
+      serveLegacyLyrics(response, params);
+      return;
+    }
+
     case 'getPlaylists':
       ok(response, {
         playlists: {
@@ -490,6 +511,99 @@ function serveStatic(response, urlPath) {
   send(response, 200, body, { 'content-type': MIME[extname(candidate)] ?? 'application/octet-stream' });
 }
 
+/* ------------------------------------------------- sidecar lyrics (mock) */
+
+/**
+ * Lyrics as the *library* serves them, which is the only source the app has.
+ *
+ * On the real box these come from a file next to the audio (`.lrc`, `.txt`, …) that Navidrome
+ * reads and answers `getLyricsBySongId` from; Navi owns writing those files. Here the mock
+ * stands in for the server so the app's whole path — request, parse, romaji, timed highlight —
+ * can be exercised without anyone's copyrighted text: **these lines are invented, written in
+ * this file, and they ship nowhere.**
+ *
+ * Only the first album has sidecars, mirroring "a pilot sidecar is being written on one
+ * album": every other track answers 70, i.e. "no lyrics for this track yet", so a run of the
+ * mock covers both the answered and the unanswered case.
+ */
+const PILOT_ALBUM_ID = 'album-1-1';
+
+const LYRIC_LINES = [
+  '夜のなかを あるいていく',
+  'きみのこえが きこえる',
+  'ほしが またたく そらのした',
+  'とおいくもを こえて',
+  'あしたへ むかう みち',
+  'うたおう なんどでも',
+];
+
+/** What a romaji sidecar with timings looks like once the server has parsed it (`.lrc`). */
+function timedSidecar(song) {
+  const total = LYRIC_LINES.length;
+  const durationMs = Math.max(1, song.duration) * 1000;
+  return LYRIC_LINES.map((value, index) => ({
+    start: Math.round((index * durationMs) / total),
+    value,
+  }));
+}
+
+/** What an untimed sidecar looks like (`.txt`): same shape, no `start` on any line. */
+function plainSidecar() {
+  return LYRIC_LINES.map((value) => ({ value }));
+}
+
+/** The lyrics this mock's library holds for a track — or nothing at all. */
+function lyricsFor(song) {
+  if (!song || NO_LYRICS || song.albumId !== PILOT_ALBUM_ID) return null;
+  return LYRICS_PLAIN ? plainSidecar() : timedSidecar(song);
+}
+
+function serveLyricsBySongId(response, params) {
+  const song = songs.find((item) => item.id === params.id);
+  const line = lyricsFor(song);
+  state.lyrics.push({ endpoint: 'getLyricsBySongId', id: params.id ?? null, at: new Date().toISOString(), served: line !== null });
+  if (!line) {
+    // What Navidrome answers for a track whose folder has no lyrics file.
+    fail(response, 70, 'Lyrics not found');
+    return;
+  }
+  ok(response, {
+    lyricsList: {
+      structuredLyrics: [
+        {
+          displayArtist: song.artist,
+          displayTitle: song.title,
+          lang: 'jpn',
+          synced: !LYRICS_PLAIN,
+          offset: 0,
+          line,
+        },
+      ],
+    },
+  });
+}
+
+function serveLegacyLyrics(response, params) {
+  const title = params.title ?? '';
+  const artist = params.artist ?? '';
+  // The old call has no song id: it matches on artist and title. In this fixture two tracks in
+  // different albums share both, so the lookup is genuinely ambiguous — answer 70 rather than
+  // guess which one was meant. (The app guards the same way: a blob whose own title/artist do
+  // not match the playing track is discarded, because another song's words are worse than
+  // none. The id-keyed call above has no such ambiguity, which is why it is tried first.)
+  const matches = songs.filter((item) => item.title === title && (!artist || item.artist === artist));
+  const song = matches.length === 1 ? matches[0] : undefined;
+  const line = lyricsFor(song);
+  state.lyrics.push({ endpoint: 'getLyrics', title, artist, at: new Date().toISOString(), served: line !== null });
+  if (!line) {
+    fail(response, 70, 'Lyrics not found');
+    return;
+  }
+  // The old call has no timings: a flat blob, exactly like a `.txt` file's contents.
+  const value = line.map((entry) => entry.value).join('\n');
+  ok(response, { lyrics: { artist: song.artist, title: song.title, value } });
+}
+
 /* ------------------------------------------------------------------- server */
 
 const server = createServer((request, response) => {
@@ -506,6 +620,7 @@ const server = createServer((request, response) => {
         scrobbles: state.scrobbles,
         starred: [...state.starred],
         playQueue: state.playQueue,
+        lyrics: state.lyrics,
         playlists: state.playlists,
       },
       { 'content-type': 'application/json; charset=utf-8' },
@@ -515,6 +630,7 @@ const server = createServer((request, response) => {
   if (path === '/__reset') {
     state.requests = [];
     state.scrobbles = [];
+    state.lyrics = [];
     send(response, 200, { reset: true }, { 'content-type': 'application/json; charset=utf-8' });
     return;
   }

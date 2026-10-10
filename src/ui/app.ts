@@ -4,22 +4,36 @@
  * Plain DOM, no framework. The whole UI is element building and a router over the URL
  * hash — a virtual DOM would buy nothing here, and the visualiser wants a canvas it
  * owns rather than a tree that gets re-rendered underneath it.
+ *
+ * v1.1 shape of the app: **Library**, **Playlists** and a settings gear; the now-playing
+ * screen is a route (`#/now`) rather than a hidden overlay, so the logo, a swipe and a cold
+ * start can all land on it. Its controls live in one compact bar at the bottom of the
+ * screen, and the Spectrum/Lyrics switch at the top swaps what fills the middle.
  */
 import { SubsonicClient, SubsonicError } from '../api/subsonic.ts';
 import type { Album, Artist, Playlist, QueueContext, QueueItem, Song } from '../api/types.ts';
-import { SERVER_URL_PLACEHOLDER } from '../config.ts';
+import { DEFAULT_SERVER_URL, SERVER_URL_PLACEHOLDER } from '../config.ts';
 import { AudioEngine, type EngineStatus } from '../player/engine.ts';
 import { attachVisualizer } from '../player/visualizer.ts';
 import { DEFAULT_PALETTE, paletteFromArtwork, type Palette } from '../player/palette.ts';
 import { platformInfo, type PlatformInfo } from '../platform.ts';
+import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
+import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
 import { loadSettings, saveSettings, type PlaybackPreference, type Settings } from '../storage/settings.ts';
+import { CHANGELOG } from './changelog.ts';
 import { ICONS, cover, formatDuration, formatTime, h, icon, playIcon, replace, starIcon } from './dom.ts';
+import { createLyricsView, type LyricsView } from './lyrics.ts';
 
 const PASSWORD_KEY = 'subsonic-password';
 const BUILD_ID = '__BUILD_ID__';
+/** Where the now-playing screen sends a left swipe, and where "close" goes if nowhere else. */
+const PLAYLISTS_ROUTE = '#/playlists';
+const DEFAULT_ROUTE = '#/artists';
+
+type NowMode = 'spectrum' | 'lyrics';
 
 interface Shell {
   header: HTMLElement;
@@ -46,9 +60,17 @@ interface Shell {
   nowPosition: HTMLElement;
   nowDuration: HTMLElement;
   nowPlay: HTMLButtonElement;
-  nowChip: HTMLElement;
-  nowReason: HTMLElement;
-  nowTheme: HTMLElement;
+  nowShuffle: HTMLButtonElement;
+  nowRepeat: HTMLButtonElement;
+  lyricsHost: HTMLElement;
+  pillSpectrum: HTMLButtonElement;
+  pillLyrics: HTMLButtonElement;
+  nowMode: NowMode;
+  lyrics: LyricsView;
+  /** Song id currently marked as playing in a list, so the toggle only runs when it changes. */
+  highlighted: string | null;
+  /** The last non-now route, so closing the now screen returns where you were. */
+  lastBrowseRoute: string;
   scrubbing: boolean;
 }
 
@@ -59,6 +81,9 @@ interface AppContext {
   engine: AudioEngine;
   library: Library | null;
   queue: PlaybackQueue | null;
+  lyrics: LyricsService;
+  /** Rows showing a given song, so the playing one can be highlighted wherever it appears. */
+  rows: Map<string, Set<HTMLElement>>;
   palette: Palette;
   render(): void;
   toast(message: string, kind?: 'info' | 'error'): void;
@@ -74,6 +99,7 @@ export async function boot(root: HTMLElement): Promise<void> {
   const shell = buildShell(root);
   const visualizer = attachVisualizer(shell.canvas, engine, DEFAULT_PALETTE);
 
+  const lyrics = new LyricsService(new LyricsCache(), () => ctx.library?.client ?? null);
   const ctx: AppContext = {
     platform,
     settings,
@@ -81,25 +107,27 @@ export async function boot(root: HTMLElement): Promise<void> {
     engine,
     library: null,
     queue: null,
+    lyrics,
+    rows: new Map(),
     palette: DEFAULT_PALETTE,
     render: () => renderRoute(ctx, shell),
     toast: (message, kind = 'info') => toast(shell, message, kind),
   };
+  shell.lyrics = createLyricsView(lyrics);
+  shell.lyricsHost.append(shell.lyrics.element);
+  shell.lyrics.show(null);
 
   const applyPalette = (palette: Palette): void => {
     ctx.palette = palette;
-    shell.visualizerHost.style.setProperty('--accent-primary', palette.primary);
-    shell.visualizerHost.style.setProperty('--accent-secondary', palette.secondary);
-    shell.visualizerHost.style.setProperty('--accent-tertiary', palette.accent);
+    applyPaletteVars(shell, palette);
     visualizer.setPalette(palette);
-    shell.nowTheme.textContent = palette.fromArt
-      ? 'Theme from the album art'
-      : 'Default theme (no cover art colours available)';
   };
   applyPalette(DEFAULT_PALETTE);
 
+  let restored = false;
   if (await restoreSession(ctx, shell, applyPalette)) {
-    if (!location.hash) location.hash = '#/artists';
+    restored = await restorePlayQueue(ctx);
+    if (!location.hash) location.hash = restored ? '#/now' : DEFAULT_ROUTE;
   }
 
   window.addEventListener('hashchange', () => renderRoute(ctx, shell));
@@ -121,6 +149,7 @@ export async function boot(root: HTMLElement): Promise<void> {
 
   visualizer.start();
   renderRoute(ctx, shell);
+  if (restored) updatePlayerBar(ctx, shell, engine.status());
 
   // A small read-only seam: it lets the end-to-end harness (and anyone debugging a real
   // deployment from devtools) ask what the engine is actually doing. It exposes no
@@ -135,6 +164,21 @@ export async function boot(root: HTMLElement): Promise<void> {
     fftSize: () => engine.fftSize,
     libraryReady: () => ctx.library !== null,
     route: () => location.hash,
+    nowMode: () => shell.nowMode,
+    playingRow: () => document.querySelector('.row.song.playing .row-title')?.textContent ?? null,
+    context: () => shell.nowContext.textContent,
+    // Visible lyrics, so an end-to-end check can read what the panel actually shows.
+    lyrics: () => Array.from(document.querySelectorAll('.lyric-line')).map((node) => node.textContent),
+    activeLyric: () => document.querySelector('.lyric-line.active')?.textContent ?? null,
+    lyricsMessage: () => document.querySelector('.lyrics-empty')?.textContent ?? null,
+    /** The track the player is on, and the track the lyrics panel loaded for. */
+    tracks: () => ({
+      playing: ctx.queue?.currentSong?.id ?? null,
+      panel: shell.lyrics.state().songId,
+      panelLoaded: shell.lyrics.state().loaded,
+      panelLines: shell.lyrics.state().lines,
+      panelMessage: shell.lyrics.state().message,
+    }),
   };
 
   if (!ctx.library) await renderConnect(ctx, shell);
@@ -159,16 +203,16 @@ function toast(shell: Shell, message: string, kind: 'info' | 'error'): void {
 
 function buildShell(root: HTMLElement): Shell {
   const tabs = new Map<string, HTMLButtonElement>();
+  // v1.1: two tabs, not five. Albums, Favourites and Search were removed at the owner's
+  // request; search stays reachable from inside Library (see renderArtists), and the album
+  // and favourites views still exist as routes for deep links.
   const tabDefs: Array<[string, string]> = [
     ['artists', 'Library'],
-    ['albums', 'Albums'],
     ['playlists', 'Playlists'],
-    ['favourites', 'Favourites'],
-    ['search', 'Search'],
   ];
   const nav = h(
     'nav',
-    { class: 'tabs' },
+    { class: 'tabs', 'aria-label': 'Sections' },
     tabDefs.map(([route, label]) => {
       const button = h('button', {
         class: 'tab',
@@ -181,8 +225,18 @@ function buildShell(root: HTMLElement): Shell {
       return button;
     }),
   );
+  const brand = h(
+    'button',
+    {
+      class: 'brand',
+      'aria-label': 'Now playing',
+      title: 'Now playing',
+      onclick: () => openNow(),
+    },
+    [h('span', { class: 'brand-mark', text: '◧' }), h('span', { text: 'Navilite' })],
+  );
   const header = h('header', { class: 'topbar' }, [
-    h('div', { class: 'brand' }, [h('span', { class: 'brand-mark', text: '◧' }), h('span', { text: 'Navilite' })]),
+    brand,
     nav,
     h('button', { class: 'icon-button', 'aria-label': 'Settings', onclick: () => (location.hash = '#/settings') }, [
       icon(ICONS.settings),
@@ -227,31 +281,61 @@ function buildShell(root: HTMLElement): Shell {
   const nowPosition = h('span', { class: 'time', text: '0:00' });
   const nowDuration = h('span', { class: 'time', text: '0:00' });
   const nowPlay = h('button', { class: 'transport big', 'aria-label': 'Play or pause', onclick: () => void togglePlayback() }, [
-    playIcon(false, 28),
+    playIcon(false, 26),
   ]);
-  const nowChip = h('span', { class: 'mode-chip', text: 'idle' });
-  const nowReason = h('p', { class: 'now-reason', text: '' });
-  const nowTheme = h('p', { class: 'now-theme', text: '' });
+  const nowShuffle = h(
+    'button',
+    {
+      class: 'transport small toggle',
+      'aria-label': 'Shuffle',
+      'aria-pressed': 'false',
+      onclick: () => {
+        queueRef?.setShuffle(!(queueRef?.shuffle ?? false));
+      },
+    },
+    [icon(ICONS.shuffle, 20)],
+  );
+  const nowRepeat = h(
+    'button',
+    {
+      class: 'transport small toggle',
+      'aria-label': 'Repeat',
+      'aria-pressed': 'false',
+      onclick: () => {
+        queueRef?.cycleRepeat();
+      },
+    },
+    [icon(ICONS.repeat, 20)],
+  );
+
+  const pillSpectrum = h('button', { class: 'pill-option active', text: 'Spectrum', onclick: () => setNowMode('spectrum') });
+  const pillLyrics = h('button', { class: 'pill-option', text: 'Lyrics', onclick: () => setNowMode('lyrics') });
+  const pill = h('div', { class: 'pill', role: 'tablist', 'aria-label': 'Spectrum or lyrics' }, [pillSpectrum, pillLyrics]);
+
+  const lyricsHost = h('div', { class: 'now-lyrics hidden' });
   const nowOverlay = h('section', { class: 'now hidden', 'aria-label': 'Now playing' }, [
-    visualizerHost,
-    h('div', { class: 'now-content' }, [
+    h('div', { class: 'now-top' }, [
       h('button', { class: 'icon-button now-close', 'aria-label': 'Close now playing', onclick: () => closeNow() }, [
         icon(ICONS.close),
       ]),
-      nowCover,
-      nowTitle,
-      nowSubtitle,
-      nowContext,
-      h('div', { class: 'now-progress' }, [nowPosition, nowProgress, nowDuration]),
-      h('div', { class: 'now-controls' }, [
-        h('button', { class: 'transport', 'aria-label': 'Previous', onclick: () => void queueRef?.previous() }, [
-          icon(ICONS.previous, 26),
-        ]),
-        nowPlay,
-        h('button', { class: 'transport', 'aria-label': 'Next', onclick: () => void queueRef?.next() }, [icon(ICONS.next, 26)]),
-      ]),
-      h('div', { class: 'now-mode' }, [nowChip, nowReason, nowTheme]),
+      pill,
     ]),
+    nowCover,
+    visualizerHost,
+    lyricsHost,
+    nowTitle,
+    nowSubtitle,
+    nowContext,
+    h('div', { class: 'now-progress' }, [nowPosition, nowProgress, nowDuration]),
+    h('div', { class: 'now-bar', 'aria-label': 'Playback controls' }, [nowShuffle, h('button', {
+      class: 'transport',
+      'aria-label': 'Previous',
+      onclick: () => void queueRef?.previous(),
+    }, [icon(ICONS.previous, 22)]), nowPlay, h('button', {
+      class: 'transport',
+      'aria-label': 'Next',
+      onclick: () => void queueRef?.next(),
+    }, [icon(ICONS.next, 22)]), nowRepeat]),
   ]);
 
   const toastNode = h('div', { class: 'toast' });
@@ -281,9 +365,15 @@ function buildShell(root: HTMLElement): Shell {
     nowPosition,
     nowDuration,
     nowPlay,
-    nowChip,
-    nowReason,
-    nowTheme,
+    nowShuffle,
+    nowRepeat,
+    lyricsHost,
+    pillSpectrum,
+    pillLyrics,
+    nowMode: 'spectrum',
+    lyrics: null as unknown as LyricsView,
+    highlighted: null,
+    lastBrowseRoute: DEFAULT_ROUTE,
     scrubbing: false,
   };
 
@@ -291,7 +381,10 @@ function buildShell(root: HTMLElement): Shell {
   bindSeek(shell.nowProgress, shell, () => queueRef);
   playerBar.addEventListener('click', (event) => {
     if ((event.target as HTMLElement).closest('button, input')) return;
-    openNow(shell);
+    openNow();
+  });
+  bindSwipe(nowOverlay, (direction) => {
+    if (direction === 'left') location.hash = PLAYLISTS_ROUTE;
   });
 
   root.replaceChildren(header, view, playerBar, nowOverlay, toastNode);
@@ -305,13 +398,63 @@ function togglePlayback(): void {
   void queueRef?.toggle();
 }
 
-function openNow(shell: Shell): void {
-  shell.nowOverlay.classList.remove('hidden');
-  shell.visualizerHost.style.setProperty('--accent-primary', shell.visualizerHost.style.getPropertyValue('--accent-primary'));
+/** The logo, and the mini player, both land here. */
+function openNow(): void {
+  if (location.hash !== '#/now') location.hash = '#/now';
 }
 
 function closeNow(): void {
-  document.querySelector('.now')?.classList.add('hidden');
+  const target = queueRefRef.lastBrowseRoute || DEFAULT_ROUTE;
+  if (location.hash === '#/now') location.hash = target;
+}
+
+/** The shell needs to be reachable from the module-level routing helpers. */
+let queueRefRef: Shell = null as unknown as Shell;
+
+/** Swipe left/right on an element; used on the now-playing screen. */
+function bindSwipe(element: HTMLElement, onSwipe: (direction: 'left' | 'right') => void): void {
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+  element.addEventListener(
+    'touchstart',
+    (event) => {
+      const touch = event.touches[0];
+      if (!touch) return;
+      startX = touch.clientX;
+      startY = touch.clientY;
+      tracking = true;
+    },
+    { passive: true },
+  );
+  element.addEventListener(
+    'touchend',
+    (event) => {
+      if (!tracking) return;
+      tracking = false;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.4) return;
+      onSwipe(dx < 0 ? 'left' : 'right');
+    },
+    { passive: true },
+  );
+}
+
+function setNowMode(mode: NowMode): void {
+  const shell = queueRefRef;
+  shell.nowMode = mode;
+  const lyrics = mode === 'lyrics';
+  shell.pillSpectrum.classList.toggle('active', !lyrics);
+  shell.pillLyrics.classList.toggle('active', lyrics);
+  shell.pillSpectrum.setAttribute('aria-selected', String(!lyrics));
+  shell.pillLyrics.setAttribute('aria-selected', String(lyrics));
+  shell.visualizerHost.classList.toggle('hidden', lyrics);
+  shell.lyricsHost.classList.toggle('hidden', !lyrics);
+  // Load on first view rather than on every track change: fewer requests, same result.
+  if (lyrics) shell.lyrics.show(queueRef?.currentSong ?? null);
 }
 
 function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => PlaybackQueue | null): void {
@@ -342,6 +485,15 @@ function queueDurationMs(queue: PlaybackQueue | null): number {
   return (song?.duration ?? 0) * 1000;
 }
 
+function applyPaletteVars(shell: Shell, palette: Palette): void {
+  shell.visualizerHost.style.setProperty('--accent-primary', palette.primary);
+  shell.visualizerHost.style.setProperty('--accent-secondary', palette.secondary);
+  shell.visualizerHost.style.setProperty('--accent-tertiary', palette.accent);
+  document.documentElement.style.setProperty('--accent-primary', palette.primary);
+  document.documentElement.style.setProperty('--accent-secondary', palette.secondary);
+  document.documentElement.style.setProperty('--accent-tertiary', palette.accent);
+}
+
 /* ------------------------------------------------------------------- state */
 
 interface PaletteHooks {
@@ -357,6 +509,32 @@ async function restoreSession(ctx: AppContext, shell: Shell, hooks: PaletteHooks
   if (password === null) return false;
   connect(ctx, shell, { serverUrl, username, password }, hooks, { silent: true });
   return true;
+}
+
+/**
+ * The queue the server saved for us (`savePlayQueue` on every track change), put back
+ * without starting playback. This is what makes a cold start land on the spectrum screen
+ * for the track that was playing, as the owner asked.
+ */
+async function restorePlayQueue(ctx: AppContext): Promise<boolean> {
+  const client = ctx.library?.client;
+  const queue = ctx.queue;
+  if (!client || !queue) return false;
+  try {
+    const saved = await client.getPlayQueue();
+    const entries = saved?.entry ?? [];
+    if (entries.length === 0) return false;
+    const items: QueueItem[] = entries.map((song) => ({ song, context: { kind: 'song', name: 'your last session' } }));
+    const found = entries.findIndex((song) => song.id === saved?.current);
+    queue.restore(items, found === -1 ? 0 : found, saved?.position ?? 0, {
+      kind: 'song',
+      name: 'your last session',
+    });
+    return true;
+  } catch (error) {
+    console.warn('[navilite] could not restore the saved play queue', error);
+    return false;
+  }
 }
 
 interface Credentials {
@@ -398,13 +576,25 @@ function routeParts(): string[] {
 }
 
 function renderRoute(ctx: AppContext, shell: Shell): void {
-  const [head = 'artists', id] = routeParts();
+  queueRefRef = shell;
+  const [head = 'artists', id, extra] = routeParts();
   setActiveTab(shell, head);
+  const nowOpen = head === 'now';
+  shell.nowOverlay.classList.toggle('hidden', !nowOpen);
+  if (!nowOpen && head !== 'connect') shell.lastBrowseRoute = location.hash || DEFAULT_ROUTE;
+  // The view behind the now screen is only rendered when it is not covered: it saves a
+  // network round trip on a cold start that lands straight on the spectrum.
+  if (nowOpen && ctx.queue?.currentSong) {
+    shell.playerBar.classList.add('hidden');
+    return;
+  }
   shell.playerBar.classList.toggle('hidden', ctx.queue?.currentSong == null);
   if (!ctx.library || !ctx.queue) {
     void renderConnect(ctx, shell);
     return;
   }
+  ctx.rows.clear();
+  shell.highlighted = null;
   const fail = (error: unknown) => {
     replace(shell.view, h('div', { class: 'empty' }, [h('p', { text: errorText(error) })]));
   };
@@ -422,7 +612,7 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
       void renderFavourites(ctx, shell).catch(fail);
       break;
     case 'search':
-      void renderSearch(ctx, shell).catch(fail);
+      void renderSearch(ctx, shell, id ? decodeURIComponent(id) : '').catch(fail);
       break;
     case 'artist':
       void renderArtist(ctx, shell, id ?? '').catch(fail);
@@ -436,22 +626,33 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
     case 'settings':
       renderSettings(ctx, shell);
       break;
+    case 'changelog':
+      renderChangelog(shell);
+      break;
     case 'connect':
       void renderConnect(ctx, shell);
+      break;
+    case 'now':
+      // Covered by the overlay; nothing to draw behind it.
+      replace(shell.view, h('div'));
       break;
     default:
       replace(
         shell.view,
         h('div', { class: 'empty' }, [
-          h('p', { text: `No such screen: ${head}` }),
-          h('button', { class: 'button', text: 'Back to the library', onclick: () => (location.hash = '#/artists') }),
+          h('p', { text: `No such screen: ${head}${extra ? `/${extra}` : ''}` }),
+          h('button', { class: 'button', text: 'Back to the library', onclick: () => (location.hash = DEFAULT_ROUTE) }),
         ]),
       );
   }
+  updateRowHighlight(ctx, shell);
 }
 
 function setActiveTab(shell: Shell, head: string): void {
-  const alias = head === 'artist' ? 'artists' : head === 'album' ? 'albums' : head === 'playlist' ? 'playlists' : head;
+  const alias = head === 'artist' ? 'artists' : head === 'playlist' ? 'playlists' : head;
+  // The now screen, settings and the changelog do not belong to a tab: leaving the last
+  // one highlighted is the honest thing, since you got there from it.
+  if (!shell.tabs.has(alias)) return;
   for (const [route, button] of shell.tabs) {
     const active = route === alias;
     button.classList.toggle('active', active);
@@ -463,7 +664,7 @@ function pageTitle(shell: Shell, title: string, subtitle?: string, actions: HTML
   replace(
     shell.view,
     h('div', { class: 'page-head' }, [
-      h('div', {}, [h('h1', { text: title }), subtitle ? h('p', { class: 'muted', text: subtitle }) : null]),
+      h('div', { class: 'page-title-text' }, [h('h1', { text: title }), subtitle ? h('p', { class: 'muted', text: subtitle }) : null]),
       h('div', { class: 'page-actions' }, actions),
     ]),
   );
@@ -480,9 +681,10 @@ async function renderConnect(ctx: AppContext, shell: Shell): Promise<void> {
     class: 'field',
     type: 'url',
     inputmode: 'url',
+    autocapitalize: 'off',
     autocomplete: 'off',
     placeholder: SERVER_URL_PLACEHOLDER,
-    value: ctx.settings.serverUrl,
+    value: ctx.settings.serverUrl || DEFAULT_SERVER_URL,
   });
   const userInput = h('input', {
     class: 'field',
@@ -497,7 +699,8 @@ async function renderConnect(ctx: AppContext, shell: Shell): Promise<void> {
   const saveButton = h('button', { class: 'button primary', text: 'Save and continue' });
 
   const readForm = (): Credentials => ({
-    serverUrl: urlInput.value.trim(),
+    // v1.1: a blank field means the library, not a dead end.
+    serverUrl: urlInput.value.trim() || DEFAULT_SERVER_URL,
     username: userInput.value.trim(),
     password: passwordInput.value,
   });
@@ -530,8 +733,8 @@ async function renderConnect(ctx: AppContext, shell: Shell): Promise<void> {
         ctx.settings = { ...ctx.settings, serverUrl: credentials.serverUrl, username: credentials.username };
         saveSettings(ctx.settings);
         await ctx.secrets.set(PASSWORD_KEY, credentials.password);
-        connect(ctx, shell, credentials, { apply: (palette) => applyPaletteGlobal(ctx, shell, palette) });
-        location.hash = '#/artists';
+        connect(ctx, shell, credentials, { apply: (palette) => applyPaletteGlobal(shell, palette) });
+        location.hash = DEFAULT_ROUTE;
         ctx.toast(`Connected as ${credentials.username}`);
       } catch (error) {
         status.textContent = errorText(error);
@@ -555,22 +758,39 @@ async function renderConnect(ctx: AppContext, shell: Shell): Promise<void> {
       h('p', { class: 'muted small', text: ctx.secrets.secure
         ? `Credentials are stored in ${ctx.secrets.description}.`
         : `Credentials are stored in ${ctx.secrets.description} — a pure PWA has no OS keystore. The Android/iOS builds use Keychain / Android Keystore instead.` }),
-      h('p', { class: 'muted small', text: 'Leave the URL blank only if this app is served from the same origin as Navidrome (the recommended deployment).' }),
+      h('p', { class: 'muted small', text: 'Left blank, the address above is used — that is your library.' }),
     ]),
   );
 }
 
 /** One-off palette application when the shell's own hooks are not in scope. */
-function applyPaletteGlobal(ctx: AppContext, shell: Shell, palette: Palette): void {
-  ctx.palette = palette;
-  shell.visualizerHost.style.setProperty('--accent-primary', palette.primary);
-  shell.visualizerHost.style.setProperty('--accent-secondary', palette.secondary);
-  shell.visualizerHost.style.setProperty('--accent-tertiary', palette.accent);
-  shell.nowTheme.textContent = palette.fromArt ? 'Theme from the album art' : 'Default theme (no cover art colours available)';
+function applyPaletteGlobal(shell: Shell, palette: Palette): void {
+  applyPaletteVars(shell, palette);
 }
 
 async function renderArtists(ctx: AppContext, shell: Shell): Promise<void> {
-  pageTitle(shell, 'Library', 'Artists, from getArtists');
+  // Search lives here now that the Search tab is gone (the owner asked for the tab to go,
+  // not the ability), and the URL is still `#/search/<query>` so a deep link works.
+  const query = h('input', {
+    class: 'field inline',
+    type: 'search',
+    placeholder: 'Search your library',
+    autocomplete: 'off',
+    enterkeyhint: 'search',
+    'aria-label': 'Search your library',
+  });
+  const run = (): void => {
+    const value = query.value.trim();
+    if (value === '') return;
+    location.hash = `#/search/${encodeURIComponent(value)}`;
+  };
+  query.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') run();
+  });
+  pageTitle(shell, 'Library', 'Artists, from getArtists', [
+    query,
+    h('button', { class: 'button', 'aria-label': 'Search', text: 'Search', onclick: run }),
+  ]);
   const listHost = h('div', { class: 'list' }, [h('p', { class: 'muted', text: 'Loading artists…' })]);
   shell.view.append(listHost);
   const artists = await ctx.library!.artists();
@@ -686,6 +906,7 @@ async function renderAlbum(ctx: AppContext, shell: Shell, id: string): Promise<v
     ]),
     h('div', { class: 'list' }, songs.map((song, index) => songRow(ctx, song, index, items, items[0]?.context ?? null, true))),
   );
+  updateRowHighlight(ctx, shell);
 }
 
 async function renderPlaylists(ctx: AppContext, shell: Shell): Promise<void> {
@@ -755,6 +976,7 @@ async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promis
       ),
     ),
   );
+  updateRowHighlight(ctx, shell);
 }
 
 async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {
@@ -798,15 +1020,17 @@ async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {
       h('div', { class: 'list' }, ...songs.map((song, index) => songRow(ctx, song, index, items, items[0]?.context ?? null, true))),
     );
   }
+  updateRowHighlight(ctx, shell);
 }
 
-async function renderSearch(ctx: AppContext, shell: Shell): Promise<void> {
+async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promise<void> {
   const input = h('input', {
     class: 'field inline',
     type: 'search',
     placeholder: 'Search the library',
     autocomplete: 'off',
     enterkeyhint: 'search',
+    value: initial,
   });
   const results = h('div', { class: 'list' });
   const submit = (): void => {
@@ -834,6 +1058,7 @@ async function renderSearch(ctx: AppContext, shell: Shell): Promise<void> {
           ),
           songs.length + albums.length + artists.length === 0 ? h('p', { class: 'muted', text: 'Nothing found.' }) : null,
         );
+        updateRowHighlight(ctx, shell);
       } catch (error) {
         replace(results, h('p', { class: 'muted', text: errorText(error) }));
       }
@@ -848,6 +1073,7 @@ async function renderSearch(ctx: AppContext, shell: Shell): Promise<void> {
   ]);
   shell.view.append(results);
   input.focus();
+  if (initial !== '') submit();
 }
 
 function renderSettings(ctx: AppContext, shell: Shell): void {
@@ -872,6 +1098,15 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
     ctx.toast('Playback preference saved');
   });
 
+  const whatsNew = h('button', { class: 'button', text: "What's new" }, [icon(ICONS.changelog, 16)]);
+  whatsNew.addEventListener('click', () => (location.hash = '#/changelog'));
+
+  const clearLyrics = h('button', { class: 'button', text: 'Clear cached lyrics' });
+  clearLyrics.addEventListener('click', () => {
+    ctx.lyrics.forget();
+    ctx.toast('Cached lyrics cleared');
+  });
+
   const forget = h('button', { class: 'button danger', text: 'Forget credentials' });
   forget.addEventListener('click', () => {
     void (async () => {
@@ -893,7 +1128,7 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
     h('div', { class: 'detail-text settings' }, [
       h('h1', { text: 'Settings' }),
       h('h2', { class: 'section', text: 'Library' }),
-      h('p', { class: 'muted', text: `Server: ${serverLabel}` }),
+      h('p', { class: 'muted wrap-anywhere', text: `Server: ${serverLabel}` }),
       h('p', { class: 'muted', text: `User: ${ctx.settings.username || '—'}` }),
       h('h2', { class: 'section', text: 'Credential storage' }),
       h('p', { class: 'muted', text: ctx.secrets.description }),
@@ -903,9 +1138,31 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
       h('h2', { class: 'section', text: 'Playback and visualiser' }),
       preferenceSelect,
       h('p', { class: 'muted small', text: 'Web Audio does not survive backgrounding on iOS, so the real spectrum is a foreground feature there. Android keeps Web Audio alive while playing.' }),
+      h('h2', { class: 'section', text: 'Lyrics' }),
+      h('p', { class: 'muted small', text: `Lyrics come from your own library — the lyrics file that sits next to the song — and are cached on this device only (${ctx.lyrics.cachedTracks} track${ctx.lyrics.cachedTracks === 1 ? '' : 's'} right now). Nothing is bundled with the app and nothing is fetched from anyone else.` }),
+      h('div', { class: 'row' }, [clearLyrics]),
       h('h2', { class: 'section', text: 'About' }),
       h('p', { class: 'muted', text: `Navilite ${BUILD_ID} · Subsonic API 1.16.1 · ${ctx.platform.native ? `wrapped ${ctx.platform.os} build` : 'browser / PWA'}` }),
-      h('div', { class: 'row' }, [forget]),
+      h('div', { class: 'row' }, [whatsNew, forget]),
+    ]),
+  );
+}
+
+function renderChangelog(shell: Shell): void {
+  replace(
+    shell.view,
+    h('div', { class: 'changelog' }, [
+      h('h1', { text: "What's new" }),
+      h('p', { class: 'muted small', text: 'Every user-visible change, newest last. The same list is in the repository as CHANGELOG.md.' }),
+      ...CHANGELOG.map((release) =>
+        h('section', { class: 'release' }, [
+          h('h2', { class: 'section', text: `Version ${release.version} — ${release.date}` }),
+          h('ul', { class: 'release-items' }, ...release.items.map((item) => h('li', { text: item }))),
+        ]),
+      ),
+      h('div', { class: 'row' }, [
+        h('button', { class: 'button', text: 'Back to settings', onclick: () => (location.hash = '#/settings') }),
+      ]),
     ]),
   );
 }
@@ -927,7 +1184,7 @@ function songRow(
         'aria-label': `Play ${song.title}`,
         onclick: () => {
           void ctx.queue!.play(items, index, context);
-          openNowViaDom();
+          openNow();
         },
       },
       [icon(ICONS.play, 18)],
@@ -964,11 +1221,31 @@ function songRow(
       h('button', { class: 'row-remove', 'aria-label': 'Remove from playlist', onclick: onRemove }, [icon(ICONS.close, 16)]),
     );
   }
+  let rows = ctx.rows.get(song.id);
+  if (!rows) {
+    rows = new Set();
+    ctx.rows.set(song.id, rows);
+  }
+  rows.add(row);
   return row;
 }
 
-function openNowViaDom(): void {
-  document.querySelector('.now')?.classList.remove('hidden');
+/**
+ * The playing track is marked wherever it appears in a list. Cheap and to the point: one
+ * class toggle per visible row, driven from the player-bar update that already runs.
+ */
+function updateRowHighlight(ctx: AppContext, shell: Shell): void {
+  const current = ctx.queue?.currentSong?.id ?? null;
+  if (current === shell.highlighted) {
+    if (current !== null) markRows(ctx, current);
+    return;
+  }
+  for (const [id, rows] of ctx.rows) for (const row of rows) row.classList.toggle('playing', id === current);
+  shell.highlighted = current;
+}
+
+function markRows(ctx: AppContext, id: string): void {
+  for (const row of ctx.rows.get(id) ?? []) row.classList.add('playing');
 }
 
 /* ------------------------------------------------------------- player bar */
@@ -977,6 +1254,7 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   const song = ctx.queue?.currentSong ?? null;
   const visible = song != null;
   shell.playerBar.classList.toggle('hidden', !visible);
+  updateRowHighlight(ctx, shell);
   if (!visible) return;
 
   const coverUrl = ctx.library?.coverUrl(song.coverArt ?? song.albumId, 256) ?? null;
@@ -987,17 +1265,31 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
     shell.barCover.dataset.song = song.id;
     replace(shell.barCover, cover(coverUrl, 'pb-art', song.album ?? song.title));
     replace(shell.nowCover, cover(ctx.library?.coverUrl(song.coverArt ?? song.albumId, 512) ?? null, 'now-art', song.album ?? song.title));
+    shell.lyrics.show(shell.nowMode === 'lyrics' ? song : null);
   }
 
   shell.barTitle.textContent = song.title;
   shell.barSubtitle.textContent = [song.artist, song.album].filter(Boolean).join(' · ');
   shell.nowTitle.textContent = song.title;
   shell.nowSubtitle.textContent = [song.artist, song.album].filter(Boolean).join(' · ');
-  const context = ctx.queue?.queueContext;
-  shell.nowContext.textContent = context ? `Playing from ${context.name}` : '';
+  shell.nowContext.textContent = contextLine(ctx.queue);
 
   replace(shell.barPlay, playIcon(status.state === 'playing'));
-  replace(shell.nowPlay, playIcon(status.state === 'playing', 28));
+  replace(shell.nowPlay, playIcon(status.state === 'playing', 26));
+
+  // Shuffle and repeat are state, not icons that lie: pressed = on, and repeat cycles
+  // off → all → one with the icon following.
+  const shuffle = ctx.queue?.shuffle ?? false;
+  shell.nowShuffle.classList.toggle('on', shuffle);
+  shell.nowShuffle.setAttribute('aria-pressed', String(shuffle));
+  const repeat = ctx.queue?.repeat ?? 'off';
+  shell.nowRepeat.classList.toggle('on', repeat !== 'off');
+  shell.nowRepeat.setAttribute('aria-pressed', String(repeat !== 'off'));
+  shell.nowRepeat.setAttribute('aria-label', repeat === 'off' ? 'Repeat off' : repeat === 'all' ? 'Repeat all' : 'Repeat one');
+  if (shell.nowRepeat.dataset.mode !== repeat) {
+    shell.nowRepeat.dataset.mode = repeat;
+    replace(shell.nowRepeat, icon(repeat === 'one' ? ICONS.repeatOne : ICONS.repeat, 20));
+  }
 
   if (!shell.scrubbing) {
     const ratio = durationMs > 0 ? Math.min(1, positionMs / durationMs) : 0;
@@ -1009,16 +1301,19 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   shell.barDuration.textContent = formatTime((durationMs || 0) / 1000);
   shell.nowDuration.textContent = formatTime((durationMs || 0) / 1000);
 
-  const chip = status.spectrum ? 'Real spectrum' : 'Album-art theme';
   shell.barChip.textContent = status.spectrum ? 'spectrum' : status.backend === 'native' ? 'native audio' : 'theme';
   shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : 'fallback'}`;
-  shell.nowChip.textContent = chip;
-  shell.nowChip.className = `mode-chip ${status.spectrum ? 'live' : 'fallback'}`;
-  shell.nowReason.textContent = status.modeReason;
-  shell.nowReason.className = `now-reason ${status.spectrum ? 'ok' : 'warn'}`;
 
-  if (status.state === 'error' && status.error) {
-    shell.nowReason.textContent = status.error;
-    shell.nowReason.className = 'now-reason warn';
-  }
+  shell.lyrics.position(positionMs);
+}
+
+/** `Playing from {playlist} (x/y)` — x is the track's position in that playlist. */
+function contextLine(queue: PlaybackQueue | null): string {
+  if (!queue) return '';
+  const context = queue.queueContext;
+  const name = context?.name ?? 'your queue';
+  const total = queue.length;
+  const at = queue.songPosition;
+  if (total === 0 || at < 0) return `Playing from ${name}`;
+  return `Playing from ${name} (${at + 1}/${total})`;
 }

@@ -22,6 +22,8 @@ import type {
   Song,
   StarKind,
   Starred2,
+  StructuredLyrics,
+  LegacyLyrics,
 } from './types.ts';
 
 export const API_VERSION = '1.16.1';
@@ -284,6 +286,38 @@ export class SubsonicClient {
   async getPlayQueue(): Promise<PlayQueueResponse | null> {
     const res = await this.call<{ playQueue?: PlayQueueResponse }>('getPlayQueue');
     return res.playQueue ?? null;
+  }
+
+  /**
+   * The lyrics for a track, from the library itself (OpenSubsonic `getLyricsBySongId`).
+   *
+   * This is the call Navidrome answers from the lyrics file next to the audio. A `.lrc`
+   * sidecar comes back with `synced: true` and a `start` per line; a `.txt` sidecar comes
+   * back as the same shape without timings. Several entries can be returned when more than
+   * one sidecar exists for the track — `src/api/lyrics.ts` picks the useful one.
+   *
+   * Throws `SubsonicError` when the server does not implement it, which is why the lyrics
+   * client falls back to `getLyrics` below rather than failing.
+   */
+  async getLyricsBySongId(id: string): Promise<StructuredLyrics[]> {
+    const res = await this.call<{
+      lyricsList?: { structuredLyrics?: StructuredLyrics | StructuredLyrics[] };
+      lyrics?: { structuredLyrics?: StructuredLyrics | StructuredLyrics[] };
+    }>('getLyricsBySongId', { id });
+    const raw = res.lyricsList?.structuredLyrics ?? res.lyrics?.structuredLyrics;
+    if (raw === undefined || raw === null) return [];
+    return Array.isArray(raw) ? raw : [raw];
+  }
+
+  /** The old Subsonic call: a plain blob looked up by artist and title, no timings. */
+  async getLyrics(options: { artist?: string; title?: string } = {}): Promise<LegacyLyrics | null> {
+    const res = await this.call<{ lyrics?: LegacyLyrics }>('getLyrics', {
+      artist: options.artist,
+      title: options.title,
+    });
+    const lyrics = res.lyrics;
+    if (!lyrics || typeof lyrics.value !== 'string' || lyrics.value === '') return null;
+    return lyrics;
   }
 
   /** The audio URL. `size`-less, byte-range friendly, and the same origin whenever possible. */

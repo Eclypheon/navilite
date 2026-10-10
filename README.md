@@ -23,8 +23,13 @@ source, not binaries), and stay far under the ~50 MB a Telegram bot can deliver:
 
 | Artifact | Bytes | Why that size |
 |---|---|---|
-| `artifacts/Navilite-0.1.0-debug.apk` | 8,773,616 (8.4 MiB) | AndroidX + Capacitor core + ExoPlayer (the native audio plugin), plus 17 web payload files. Debug-signed, so it sideloads without any signing setup. |
-| `artifacts/Navilite-0.1.0-unsigned.ipa` | 856,888 (0.8 MiB) | No engine is bundled: WKWebView and AVFoundation are the OS's. Just the arm64 binary and the web payload. Unsigned on purpose (`docs/ios-sideload.md`). |
+| `artifacts/Navilite-1.1.0-debug.apk` | 8,780,443 (8.4 MiB) | AndroidX + Capacitor core + ExoPlayer (the native audio plugin), plus 17 web payload files. Debug-signed, so it sideloads without any signing setup. |
+| `artifacts/Navilite-1.1.0-unsigned.ipa` | 863,802 (0.8 MiB) | No engine is bundled: WKWebView and AVFoundation are the OS's. Just the arm64 binary and the web payload. Unsigned on purpose (`docs/ios-sideload.md`). |
+
+v1.1 adds 8,164 bytes to the APK (+0.09%) and 6,980 to the IPA (+0.81%) over v1.0's
+8,772,279 / 856,822: the lyrics panel, the changelog and the now-playing rebuild — no new
+dependency, and no lyrics text in either file (checked by hash and by grep; `docs/verification.md`
+§9).
 
 ## What it does
 
@@ -35,9 +40,46 @@ source, not binaries), and stay far under the ~50 MB a Telegram bot can deliver:
   frame with `getByteFrequencyData()`, drawn as log-spaced bands with peak caps, over a theme
   derived from the album art (kew's two ideas: spectrum, and colours from the cover).
 - **Playlists and favourites** — create, add, remove, star/unstar (v1 scope, per `DECISIONS.md`).
+- **Lyrics** — the playing track's lyrics, served by your own library from the lyrics file that sits
+  next to the song (`getLyricsBySongId`), romanised on the device where needed, cached per device.
+  Untimed text is fine and is the normal case; a timed `.lrc` file also gets a line-by-line
+  highlight that follows playback. See *Lyrics* below.
 - **Report plays properly** — `scrobble` with `submission=false` on start, `true` once the track
   passes half its length or four minutes. (Navidrome does *not* count a track played because it
   was streamed — only `scrobble` does.) The play queue is pushed with `savePlayQueue`, debounced.
+
+## Lyrics (from your own music folder)
+
+There is no lyrics service in this app and no lyrics in this repo. The words come from the library,
+which reads the file sitting next to the audio:
+
+```
+Music/Alien Lab/Transmission/01 Track.flac
+Music/Alien Lab/Transmission/01 Track.lrc      ← Navidrome reads this and serves it
+```
+
+Navidrome's `LyricsPriority` decides which sidecar wins
+(`.ttml .yaml .yml .elrc .lrc .srt .txt embedded` — `.md` is **not** a supported extension), and the
+app asks for one track at a time with `getLyricsBySongId`. What it does with each answer:
+
+| The library answers | The app shows |
+|---|---|
+| Timed lines (a `.lrc` sidecar) | The lines, with the current one highlighted and scrolled into view as the song plays. |
+| Untimed lines (a `.txt` sidecar) | The same list as plain, scrollable text. This is the normal case for this library and is **not** treated as a failure. |
+| Nothing for this track | `no romaji lyrics for this track yet`. No spinner, no invented text. |
+| Nothing at all before 15 s (slow network) | The same message; a late answer still paints when it arrives. |
+
+Two details worth stating plainly. The kana→romaji converter (`src/lyrics/romanize.ts`) handles
+**kana only** — kanji needs a dictionary the app does not carry, so a line that still contains
+kanji is shown as it is with one line of small print saying so, rather than being passed off as
+romaji; in practice the files are already romaji or English, so it mostly does nothing. And the
+legacy `getLyrics` call (artist + title, no id) is used only when the server lacks the newer
+endpoint, and its answer is discarded unless the artist/title it echoes back match the track that
+is playing — that call cannot tell two songs with the same title apart, and another song's words
+would be worse than none.
+
+The cache is `localStorage` on the device that asked (`src/storage/lyrics.ts`), clearable from
+Settings, with misses expiring in hours so a sidecar written later gets picked up.
 
 ## The honest part: which visualiser you get, and why
 
@@ -122,6 +164,15 @@ the Subsonic API this client uses, checks tokens for real (`md5(password + salt)
 generated PCM whose spectrum is known exactly. That is what makes the visualiser testable — the
 end-to-end check reads the analyser and matches peaks against the frequencies the mock declared.
 
+Its lyrics behaviour stands in for a Navidrome with sidecar files, and its lines are invented for
+the harness (they are not anyone's lyrics, and they ship nowhere):
+
+```bash
+npm run mock -- --lyrics-plain   # every lyric file is untimed (.txt), the normal case here
+npm run mock -- --no-lyrics      # a library with no lyrics at all → the honest empty state
+# default: the first album has a timed .lrc-style sidecar, every other album has none
+```
+
 ## Tests
 
 ```bash
@@ -132,12 +183,22 @@ npm test
 - `test/subsonic.test.ts` — URL/token construction, `star`/`unstar` parameter mapping for songs
   vs albums vs artists, error mapping, scrobble semantics — with `fetch` stubbed.
 - `test/queue.test.ts` — the play-reporting threshold.
+- `test/queue-order.test.ts` — shuffle/repeat order and what happens at the end of a queue.
 - `test/connect-copy.test.ts` — the canonical origin keeps its **`:9443`**, the connect form's
   placeholder never names the bare host, and the door URL round-trips through the normaliser.
+- `test/romanize.test.ts` — the kana→romaji table, digraphs, the sokuon, ん before a vowel, and the
+  rule that kanji is reported as incomplete rather than romanised.
+- `test/lyrics.test.ts` — LRC and plain parsing, the structured/legacy answers, the empty and
+  untimed cases, the wrong-song guard, the per-device cache, and a check that the lyrics client
+  names **no outside service** at all (the owner's rule, enforced by the test).
+- `test/changelog.test.ts` — `src/ui/changelog.ts` and `CHANGELOG.md` are the same document; the
+  in-app page and the file cannot drift apart.
 
 What the tests do *not* cover: anything that needs a device (native playback, the hand-off, the
-Keychain/Keystore path). See `docs/verification.md` for exactly what was verified where, with the
-commands and the observed output.
+Keychain/Keystore path), and live lyrics from the real Navidrome — the pilot sidecar lives on his
+box, so the end-to-end path was exercised against the mock's implementation of the same endpoint.
+See `docs/verification.md` for exactly what was verified where, with the commands and the observed
+output.
 
 ## Building the Android APK
 
