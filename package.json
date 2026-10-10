@@ -17,8 +17,8 @@
     "test": "node --test \"test/*.test.ts\"",
     "icons": "node tools/make-icons.mjs",
     "cap:sync": "npm run build && cap sync",
-    "apk": "npm run build && cap sync android && cd android && ./gradlew assembleDebug",
-    "apk:release": "npm run build && cap sync android && cd android && ./gradlew assembleRelease",
+    "apk": "npm run build && cap sync android && bash tools/build-apk.sh debug",
+    "apk:release": "npm run build && cap sync android && bash tools/build-apk.sh release",
     "ipa:unsigned": "npm run build && cap sync ios && bash tools/build-ios-ipa.sh",
     "ipa:simulator": "npm run build && cap sync ios && bash tools/build-ios-ipa.sh --simulator"
   },

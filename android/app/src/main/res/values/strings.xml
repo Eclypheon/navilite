@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Navilite</string>
+    <string name="title_activity_main">Navilite</string>
+    <string name="package_name">app.navilite</string>
+    <string name="custom_url_scheme">app.navilite</string>
+    <string name="background_channel_name">Background playback</string>
+    <string name="background_channel_description">Keeps the audio playing when Navilite is not on screen</string>
+    <string name="background_notification_title">Navilite is playing</string>
+    <string name="background_notification_text">Audio continues in the background</string>
+</resources>
