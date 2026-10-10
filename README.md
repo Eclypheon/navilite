@@ -11,7 +11,7 @@ plus a 8 kB stylesheet, and the native plugins are code-split so a browser never
 npm install
 npm run mock        # serves the built app + a synthetic Subsonic library on :4533
 npm run build       # dist/ — the PWA, and the payload for both native shells
-npm test            # 16 unit tests: md5 vectors, token auth, response parsing, play rules
+npm test            # 19 unit tests: deployment copy, md5 vectors, token auth, parsing, play rules
 npm run apk          # artifacts/Navilite-<version>-debug.apk
 npm run ipa:unsigned # artifacts/Navilite-<version>-unsigned.ipa
 ```
@@ -79,14 +79,25 @@ can pin either engine if you prefer.
 ## Networking (the part that is not this repo)
 
 The phone reaches the library over **Tailscale**; nothing here needs Navidrome exposed to the
-public internet. The recommended deployment is **one origin**: the reverse proxy serves this
-app's `dist/` and proxies the Subsonic paths to Navidrome, which removes the CORS question
-entirely and gives the PWA the secure context it needs.
+public internet. The deployment is **one origin**: a reverse proxy serves this app's `dist/` and
+proxies the Subsonic paths to Navidrome, which removes the CORS question entirely and gives the
+PWA the secure context it needs.
 
-Host-level work (Caddy, quadlets, ufw, Uptime Kuma) belongs to **Nova**; the exact requirement
-is written up in the kanban task *"Nova: same-origin HTTPS door on the tailnet for Navilite"*.
-It is short: serve `dist/` at `/`, proxy `/rest`, `/api`, `/auth`, `/share` to Navidrome, TLS on
-the tailnet name, and confirm `Access-Control-Allow-Origin` on `/rest/stream` afterwards.
+**The server URL is `https://alienlab.tailbed832.ts.net:9443`** — tailnet-only, HTTPS on the
+node's publicly trusted Let's Encrypt certificate, so the PWA installs from it with nothing to
+install on the phone (Android's user-CA restriction does not apply to a publicly trusted cert).
+It serves `dist/` at `/` and proxies `/rest`, `/api`, `/auth` and `/share` to Navidrome.
+
+Keep the **`:9443`**. The bare name `https://alienlab.tailbed832.ts.net` is port **443** — a
+**public Tailscale Funnel to a different service (wizarr)**, not Navidrome and not this door. With
+no port you get wizarr's page (or a confusing failure), not your library. On the door origin the
+honest answer in the app's connect form is to leave the URL blank (same origin); in the wrapped
+Android/iOS builds, which are not served from that origin, type the full URL **including the port**.
+
+Host-level work (Caddy, quadlets, ufw, Uptime Kuma) belongs to **Nova** and is done: the door is
+`tailscale serve --bg --https=9443 http://127.0.0.1:5702`, with a watchdog that checks the serve
+mapping, the certificate and the app/API every 15 minutes, and no Funnel. `Access-Control-Allow-Origin`
+on `/rest/stream` was confirmed through the proxy afterwards.
 
 Measured on this Navidrome (0.64.2, `Origin` set): `/rest/stream` **does** send
 `Access-Control-Allow-Origin: *` — see `DECISIONS.md`. That is version- and config-dependent, so
@@ -103,7 +114,7 @@ npm run mock            # mock Subsonic library + the built app, one origin, :45
 Or against a real server, with Vite's dev server proxying `/rest` for you:
 
 ```bash
-NAVILITE_DEV_SERVER=https://alienlab.tailbed832.ts.net npm run dev
+NAVILITE_DEV_SERVER=https://alienlab.tailbed832.ts.net:9443 npm run dev
 ```
 
 `tools/mock-subsonic.mjs` is a development tool, not part of the app: it implements the subset of
@@ -121,6 +132,8 @@ npm test
 - `test/subsonic.test.ts` — URL/token construction, `star`/`unstar` parameter mapping for songs
   vs albums vs artists, error mapping, scrobble semantics — with `fetch` stubbed.
 - `test/queue.test.ts` — the play-reporting threshold.
+- `test/connect-copy.test.ts` — the canonical origin keeps its **`:9443`**, the connect form's
+  placeholder never names the bare host, and the door URL round-trips through the normaliser.
 
 What the tests do *not* cover: anything that needs a device (native playback, the hand-off, the
 Keychain/Keystore path). See `docs/verification.md` for exactly what was verified where, with the

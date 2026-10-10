@@ -58,10 +58,12 @@ start.
 
 ## 3. First run
 
-Navilite asks for the **server URL**, **username** and **password**. Over Tailscale that URL is the
-tailnet name (e.g. `https://alienlab.tailbed832.ts.net`) or blank if the app is served from the same
-origin as Navidrome. The password is stored in the **iOS Keychain** — never in the app bundle, never
-in the repo. It is used only to compute the per-request Subsonic token `md5(password + salt)`.
+Navilite asks for the **server URL**, **username** and **password**. Over Tailscale that URL is
+`https://alienlab.tailbed832.ts.net:9443` — or blank when the app is served from that same origin
+(the PWA case). **Keep the `:9443`:** the bare name `https://alienlab.tailbed832.ts.net` is port
+443, a public Tailscale Funnel to a different service, not the library. The password is stored in the
+**iOS Keychain** — never in the app bundle, never in the repo. It is used only to compute the
+per-request Subsonic token `md5(password + salt)`.
 
 ## Adding a signing team to the build instead (optional)
 

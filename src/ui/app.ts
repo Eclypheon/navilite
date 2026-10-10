@@ -7,6 +7,7 @@
  */
 import { SubsonicClient, SubsonicError } from '../api/subsonic.ts';
 import type { Album, Artist, Playlist, QueueContext, QueueItem, Song } from '../api/types.ts';
+import { SERVER_URL_PLACEHOLDER } from '../config.ts';
 import { AudioEngine, type EngineStatus } from '../player/engine.ts';
 import { attachVisualizer } from '../player/visualizer.ts';
 import { DEFAULT_PALETTE, paletteFromArtwork, type Palette } from '../player/palette.ts';
@@ -480,7 +481,7 @@ async function renderConnect(ctx: AppContext, shell: Shell): Promise<void> {
     type: 'url',
     inputmode: 'url',
     autocomplete: 'off',
-    placeholder: 'https://alienlab.tailbed832.ts.net (or leave blank for same origin)',
+    placeholder: SERVER_URL_PLACEHOLDER,
     value: ctx.settings.serverUrl,
   });
   const userInput = h('input', {

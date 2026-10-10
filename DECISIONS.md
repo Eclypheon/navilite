@@ -28,10 +28,17 @@ Locked by the owner on 2026-10-10. Downstream work must respect these unless he 
 
 - **The phone reaches the library over Tailscale.** Do not expose Navidrome to the public
   internet for this app. Tailnet name: `alienlab.tailbed832.ts.net`.
-- Navidrome (0.64.2) is LAN-only today; making it reachable over the tailnet — and over **HTTPS**,
-  which a PWA needs for a secure context (and which matters for the visualiser) — is part of the
-  work. Anything host-level (Caddy, quadlets, ufw, Uptime Kuma) is **Nova's** territory: route it
-  through him rather than changing the box directly.
+- **The canonical origin is `https://alienlab.tailbed832.ts.net:9443`** — tailnet-only, HTTPS on
+  the node's publicly trusted Let's Encrypt certificate, one origin serving this app's `dist/` with
+  `/rest`, `/api`, `/auth`, `/share` proxied to Navidrome. A PWA installs from it with nothing to
+  install on the phone (publicly trusted cert, so Android's user-CA restriction does not apply).
+- **Port 443 is not it.** `https://alienlab.tailbed832.ts.net` with no port is a **public
+  Tailscale Funnel to a different service (wizarr)**. The port is part of the address; a server URL
+  without it is wrong.
+- Navidrome (0.64.2) was LAN-only; the tailnet HTTPS door above is now deployed
+  (`tailscale serve --bg --https=9443 http://127.0.0.1:5702` → Caddy → navidrome:4533). Anything
+  host-level (Caddy, quadlets, ufw, Uptime Kuma) is **Nova's** territory: route it through him
+  rather than changing the box directly.
 
 ## Verified on his instance — contradicts the research brief on one point
 

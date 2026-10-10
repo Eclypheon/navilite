@@ -7,6 +7,9 @@ that was observed; anything unverified is listed as such at the end rather than 
 
 ```
 $ npm test
+✔ the canonical origin is HTTPS on the :9443 door, not port 443
+✔ the Server URL placeholder keeps the port — never the bare host
+✔ the door origin round-trips through the client normaliser
 ✔ matches the RFC 1321 test vectors
 ✔ handles multi-block input and UTF-8
 ✔ agrees with node:crypto on random passwords and salts
@@ -23,7 +26,7 @@ $ npm test
 ✔ scrobble distinguishes now-playing from a real play
 ✔ play queue round-trips ids, current and position
 ✔ a non-JSON body is reported as "this is not a Navidrome"
-ℹ tests 16  ℹ pass 16  ℹ fail 0
+ℹ tests 19  ℹ pass 19  ℹ fail 0
 ```
 
 ## 2. Web build
@@ -32,7 +35,7 @@ $ npm test
 $ npm run build
 dist/index.html                1.09 kB │ gzip:  0.50 kB
 dist/assets/index-*.css        8.39 kB │ gzip:  2.43 kB
-dist/assets/index-*.js        61.75 kB │ gzip: 20.50 kB
+dist/assets/index-*.js        61.76 kB │ gzip: 20.52 kB
 dist/assets/native-*.js        0.77 kB   (code-split: only loaded inside the Capacitor shell)
 dist/assets/web-*.js           0.79 kB
 dist/assets/base-*.js          2.85 kB
@@ -169,11 +172,65 @@ attach the free personal-team signature — see `docs/ios-sideload.md`.
   - the Web Audio ↔ native hand-off at the same position when the app is backgrounded and restored;
   - lock-screen / Now Playing controls (plugin `showNotification`);
   - Keychain and Android Keystore credential storage (`@aparajita/capacitor-secure-storage`).
-- **The real Navidrome was not exercised.** It is LAN-only today and no credential was used; the
-  client was tested against the mock, which implements the same API and the same auth. Nova's card
-  (`t_138d33f8`) builds the tailnet HTTPS door; re-measure `Access-Control-Allow-Origin` on
-  `/rest/stream` through the proxy afterwards.
+- **The real Navidrome was originally exercised only against the mock.** At the time of that pass it
+  was LAN-only and no credential was used; the client was tested against the mock, which implements
+  the same API and the same auth. Since then the tailnet HTTPS door exists
+  (`https://alienlab.tailbed832.ts.net:9443`, host-side card `t_d66d8c1e`) and was verified **from
+  the box**: real Subsonic token auth (`/rest/ping.view` → `status ok`), a `Range` request answered
+  `206` with the whole 29,088,598-byte flac, and `Access-Control-Allow-Origin: *` on
+  `/rest/stream.view` through the proxy — see §8 and `DOOR.md` on the host.
 - **iOS background suspension of Web Audio** is reported behaviour (research §2.4) and is handled in
   code and labelled in the UI, but not observed here — it needs a device.
 - **No simulator run.** No iOS simulator runtime is installed on this machine; the iOS build here is
   a real device (arm64) build.
+
+## 8. The tailnet door, and the placeholder correction (2026-10-10)
+
+The recommended one-origin deployment now exists on the host:
+
+```
+https://alienlab.tailbed832.ts.net:9443
+tailscale serve --bg --https=9443 http://127.0.0.1:5702   # tailscaled TLS -> Caddy :5702 -> navidrome:4533
+```
+
+Verified from the box (host-side card `t_d66d8c1e`, `DOOR.md` on the host): `GET /`, `/sw.js` and
+`/manifest.webmanifest` → 200, unknown paths falling back to the SPA shell; `/rest`, `/api`, `/auth`
+and `/share` proxied to Navidrome 0.64.2; `/rest/ping.view` with a real token → `status ok`;
+`Range` → `206` + `Content-Range`, a whole 29,088,598-byte flac in one request; `Vary: Origin` with
+`Access-Control-Allow-Origin: *` on `/rest/stream.view` when the request carries an `Origin`;
+Let's Encrypt certificate valid to 2026-12-15, renewed by tailscaled; **not** reachable off the
+tailnet (three independent public checkers time out on `:9443` while the same probe reaches Funnel
+`:10000`).
+
+Two corrections came out of that deployment, both in this repo:
+
+1. **The connect form's placeholder named the wrong server.** It read
+   `https://alienlab.tailbed832.ts.net (or leave blank for same origin)` — no port, i.e. **443**,
+   which is a *public Tailscale Funnel to a different service* (wizarr), not the library. It now
+   reads `https://alienlab.tailbed832.ts.net:9443 (or leave blank for same origin)`, sourced from one
+   constant (`src/config.ts`), and `test/connect-copy.test.ts` fails if the port is dropped again.
+   Checked that the guard bites: the old string fails it, the new one passes.
+2. **The URL is written down where a human looks** — `README.md`, `DECISIONS.md`,
+   `docs/ios-sideload.md` — naming `https://alienlab.tailbed832.ts.net:9443` as the canonical origin
+   (tailnet-only, publicly trusted certificate, so the PWA installs from it with nothing to install
+   on the phone, and Android's user-CA restriction does not apply), and stating that port 443 is
+   **not** it.
+
+The rebuilt `dist/` (19 unit tests and `tsc --noEmit` clean before the build) was installed to the
+host's served copy at `/home/k/docker/data/navilite/dist/` — the directory the Caddy container mounts
+read-only at `/srv/navilite` — after snapshotting it to `dist.bak-20261010-235955` (undo: move it
+back). Read back **through the door** over the tailnet:
+
+```
+$ curl -sS -o /dev/null -w 'http=%{http_code} tls=%{ssl_verify_result}\n' https://alienlab.tailbed832.ts.net:9443/
+http=200 tls=0
+$ curl -sS https://alienlab.tailbed832.ts.net:9443/assets/index-Cd0kb3q2.js | grep -oF 'https://alienlab.tailbed832.ts.net:9443 (or leave blank for same origin)'
+https://alienlab.tailbed832.ts.net:9443 (or leave blank for same origin)
+# portless placeholder remaining in the served bundle: 0
+$ curl -sS 'https://alienlab.tailbed832.ts.net:9443/rest/ping.view?v=1.16.1&c=navilite&f=json'
+{"subsonic-response":{"status":"failed","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2 (10114574)",...,"error":{"code":10,"message":"missing parameter: 'u'"}}}
+```
+
+(The Subsonic probe carries no credentials on purpose, so Navidrome's error 10 is the expected
+answer — it proves the same-origin proxy is still wired after the file swap. `/sw.js`,
+`/manifest.webmanifest`, the icons, and `/favicon.svg` all returned 200 over the door too.)
