@@ -33,6 +33,34 @@ Locked by the owner on 2026-10-10. Downstream work must respect these unless he 
   work. Anything host-level (Caddy, quadlets, ufw, Uptime Kuma) is **Nova's** territory: route it
   through him rather than changing the box directly.
 
+## Verified on his instance — contradicts the research brief on one point
+
+Measured 2026-10-10 on Navidrome **0.64.2 as configured here**, with an `Origin` header set (i.e. the
+exact situation a browser or a Capacitor webview is in):
+
+```
+$ curl -D - -H "Origin: https://navilite.example" \
+    http://127.0.0.1:4533/rest/stream.view?id=1&u=x&t=x&s=x&v=1.16.1&c=navilite
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+Access-Control-Expose-Headers: X-Content-Duration, X-Total-Count, X-Nd-Authorization
+Vary: Origin
+```
+
+`Access-Control-Allow-Origin: *` is present on **`/rest/stream`**, on `/rest/ping.view`, and on `/`.
+The research document's claim that Navidrome "does not send ACAO on `/rest/*` by default" is **wrong
+for this instance** (it matches the hedging in the client it cites — the stream endpoint *often*
+doesn't, not *never*).
+
+**Consequences for the build:**
+
+- The same-origin proxy is still the right design (one URL, no CORS class of bugs, cleaner TLS), but
+  it is **not** the hard blocker the research implied. A real-spectrum `AnalyserNode` is not
+  precluded here on CORS grounds.
+- The header set is **version- and config-dependent**: re-measure after any Navidrome upgrade before
+  relying on it, and keep the same-origin deployment as the thing that makes the question moot.
+- Note `Vary: Origin` — whatever emits this is a real CORS middleware, not an accident.
+
 ## Ownership
 
 - Research: **Mugger** (`researcher`) — modality verdict in flight (`t_4c24f452`).
