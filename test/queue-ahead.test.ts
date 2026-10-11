@@ -54,9 +54,15 @@ interface Prefetch {
 function stubEngine(): {
   engine: AudioEngine;
   plays: TrackRequest[];
+  /** Every URL the queue asked the engine to get ready while this one plays (v1.9.1). */
+  prepares: TrackRequest[];
+  /** How many times the queue threw the prepared track away. */
+  discards: number;
   releasePlay: () => void;
 } {
   const plays: TrackRequest[] = [];
+  const prepares: TrackRequest[] = [];
+  let discards = 0;
   let engineState: 'idle' | 'playing' = 'idle';
   let release: (() => void) | null = null;
   const engine = {
@@ -83,6 +89,12 @@ function stubEngine(): {
         };
       });
     },
+    prepareNext: async (track: TrackRequest) => {
+      prepares.push(track);
+    },
+    discardPrepared: async () => {
+      discards += 1;
+    },
     pause: async () => {},
     seek: async () => {},
     resume: async () => {},
@@ -92,6 +104,10 @@ function stubEngine(): {
   return {
     engine: engine as unknown as AudioEngine,
     plays,
+    prepares,
+    get discards() {
+      return discards;
+    },
     releasePlay: () => release?.(),
   };
 }
@@ -147,7 +163,7 @@ test('a tap paints the selection and the loading state before anything is reques
 });
 
 test('the next track is requested before the current one ends', async () => {
-  const { engine, releasePlay } = stubEngine();
+  const { engine, releasePlay, prepares } = stubEngine();
   const { library, prefetches } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
 
@@ -162,6 +178,71 @@ test('the next track is requested before the current one ends', async () => {
   assert.equal(prefetches[0]!.url, cappedUrlOf('song-2'), 'and it is the next track in this queue, not another');
   assert.equal(prefetches[0]!.signal.aborted, false, 'it is still in flight — the current track is still playing');
   assert.equal(queue.currentSong?.id, 'song-1', 'and none of this changed what is playing');
+  /*
+   * v1.9.1 — and the same track is prepared **on the player**, not only measured: the engine holds
+   * the next track buffered and silent, which is what makes the track boundary instant. The bytes
+   * v1.9.0 fetched in the WebView were never the player's, whatever the release said.
+   */
+  assert.equal(prepares.length, 1, 'the next track was handed to the engine to get ready');
+  assert.equal(prepares[0]!.url, cappedUrlOf('song-2'), 'under the URL it will be played with, bound now');
+  assert.equal(prepares[0]!.title, 'Track song-2', 'with the metadata the lock-screen card will need');
+});
+
+test('ten taps in a row each paint the row he touched, and the waiting state never clears itself', async () => {
+  const { engine, releasePlay } = stubEngine();
+  const { library } = stubLibrary();
+  const queue = new PlaybackQueue(engine, library);
+  const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
+  const items = queueOf(...ids);
+  const painted: string[] = [];
+  let paints = 0;
+  queue.onChanged = () => {
+    paints += 1;
+  };
+
+  for (let i = 0; i < ids.length; i += 1) {
+    /*
+     * The tap: `select` is synchronous and this read happens in the same turn — no await between
+     * them, so what is read is what the screen was given.
+     */
+    queue.select(items, i, CONTEXT);
+    painted.push(queue.currentSong?.id ?? 'nothing');
+    assert.equal(queue.isLoading, true, `tap ${i + 1}: the row is drawn as waiting`);
+    void queue.start();
+    releasePlay();
+    await tick();
+    await tick();
+    assert.equal(queue.isLoading, false, `tap ${i + 1}: and it settles when the engine answers`);
+  }
+
+  assert.deepEqual(painted, ids, `${ids.length} consecutive taps, ${painted.length} painted selections`);
+  assert.ok(paints >= ids.length * 2, `every tap repainted the screen — ${paints} repaints for ${ids.length} taps`);
+});
+
+test('a second tap on the row whose load is still in flight is not a missed tap', async () => {
+  const { engine, releasePlay, plays, prepares } = stubEngine();
+  const { library } = stubLibrary();
+  const queue = new PlaybackQueue(engine, library);
+  const items = queueOf('song-1', 'song-2');
+
+  queue.select(items, 0, CONTEXT);
+  void queue.start();
+  await tick();
+  assert.equal(plays.length, 1, 'the first tap asked the engine for the stream');
+
+  // …and he taps the same row again, while that load has not answered.
+  queue.select(items, 0, CONTEXT);
+  void queue.start();
+  await tick();
+  assert.equal(plays.length, 1, 'the second tap is the same request, not a second one');
+  assert.equal(queue.isLoading, true, 'and the row stays drawn as waiting rather than settling on the instant');
+
+  releasePlay();
+  await tick();
+  await tick();
+  assert.equal(queue.isLoading, false, 'the state comes off when the load it was waiting for answers');
+  assert.equal(queue.currentSong?.id, 'song-1', 'and what is playing is the row he touched');
+  assert.equal(prepares.length, 1, 'the look-ahead ran once, for the track that follows it');
 });
 
 test('a rapid double tap leaves one fetch in flight, for the track after the one he chose', async () => {

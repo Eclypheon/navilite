@@ -207,4 +207,14 @@ export const CHANGELOG: ChangelogRelease[] = [
       'Mobile data gets a smaller stream, and it tells you so. Over a connection that is not your home wifi the app asks your server to send a smaller version of the song instead of the full-size original — the bar shows the number while it is doing that — because asking for the original over a relay makes it wait. It starts modest on a connection it has not measured yet, raises the number when it has measured the connection doing better, and asks for nothing smaller at all once the link is fast.',
     ],
   },
+  {
+    version: '1.9.1',
+    date: '2026-10-12',
+    items: [
+      'The next song is loaded while the current one is still playing, so it starts the instant the current one ends. The whole length of a track is now spent getting the one after it ready on the player itself, and when the track finishes the app switches to what is already waiting instead of fetching anything — that is the difference between "instant" and the wait you had.',
+      'The seek bar no longer stops the playlist moving on by itself. On some songs the app was left waiting for an answer from the player that never came, and while it waited the end of a track was ignored — so a track that finished after a seek did nothing at all, for the rest of the session. Seeking is now a thing the app waits for only very briefly, and a track that ends after a seek moves the queue on as it always should.',
+      'Tapping a row always paints what you touched. Tapping the song that was already being fetched used to light the row and then settle it with nothing sent at all, which looked exactly like a tap the app had missed; the row now stays lit until that song is really on its way.',
+      'The visualiser shows the new song from its first moment, and the sound no longer waits behind it. Working out which track to measure used to hold up the app while the new stream was being fetched, which is why the bars stayed dark through that gap and why the start was slower than a plain tap.',
+    ],
+  },
 ];

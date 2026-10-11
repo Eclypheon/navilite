@@ -94,6 +94,27 @@ doesn't, not *never*).
   handles **kana only** and a kana line is romanised as a safety net; the expected input is already
   romaji or English, written by Navi.
 
+## The queue and the track boundary (owner's standard, 2026-10-12)
+
+- **One engine, and the prepared track is not a second one.** v1.7.6 deleted the second `AVPlayer`;
+  it does not come back. The queue keeps **one** track ahead, loaded on the *same* plugin under a
+  second asset id (`navilite-next`), and nothing ever sends that asset `play`: it is buffered and
+  silent, never tapped for the spectrum, never in the engine's state machine. At a track boundary it
+  is *adopted* — played and renamed as the audible slot — so the boundary fetches nothing. Three
+  attempts at "prefetch" before this one measured a request that the audible player could not read
+  (`library.prefetch` still fetches, but only to measure the link); do not go back to that.
+- **One track ahead, not two.** Two prepared items would contend for a relay link that the audible
+  stream is already using.
+- **The URL is bound when the track is prepared** and used unchanged at the boundary: `maxBitRate` is
+  part of the stream URL, and building it twice (once to warm, once to play) asks Navidrome for two
+  different transcodes of the same file.
+- **A seek can never change whether the queue advances.** There is no counter between the seek and
+  the end of a track: the report window (`reportsMutedUntil`) is a deadline, so a plugin seek whose
+  promise never settles cannot hold the end-of-track doors shut. The end-of-track reading in
+  `onState` is deliberately checked *before* that window.
+- **A tap is a state transition, and so is an advance.** Both move the cursor, set the loading state
+  and redraw; a track that ends must not look like a track that never started.
+
 ## Ownership
 
 - Research: **Mugger** (`researcher`) — modality verdict in flight (`t_4c24f452`).

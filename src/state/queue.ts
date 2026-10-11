@@ -119,8 +119,29 @@ export class PlaybackQueue {
   private playToken = 0;
   /** v1.9.0: the tap has painted and the engine has not answered yet. See `select` and `isLoading`. */
   private loading = false;
-  /** v1.9.0: the one prefetch in flight, and the URL it is pulling (queue-ahead). */
+  /** v1.9.0: the one prefetch in flight, and the URL it is pulling (the link measurement). */
   private prefetch: { url: string; controller: AbortController } | null = null;
+  /**
+   * v1.9.1: the track after the current one, and the **exact URL** it was prepared under.
+   *
+   * This is the queue's look-ahead, and its one invariant is that `prepared.songId` is the song at
+   * `order[cursor + 1]` — anything else is discarded rather than left buffering. The URL is bound
+   * here at prepare time and used again, unchanged, as the play request's URL: the transcode key
+   * (`maxBitRate`) is part of the string, and v1.9.0 built it twice — once for the prefetch and once
+   * at the boundary, from a rate that had *changed* in between — so Navidrome was asked to transcode
+   * the same file twice, the second time from scratch, at the moment the listener was waiting for
+   * sound.
+   */
+  private prepared: { songId: string; url: string } | null = null;
+  /**
+   * v1.9.1: the song the engine has been asked for and has not answered yet.
+   *
+   * A second tap on that row is not a second request — the load is already running for that very
+   * track — but it is also not nothing: the row must stay drawn as waiting until that load answers,
+   * which is what the owner saw as *"tapping a row also still does not select it instantly 100% of
+   * the time"*.
+   */
+  private inFlightSongId: string | null = null;
   /** v1.9.0: what the link has been measured doing. Read by the stream URL and by the player bar. */
   private readonly rate = new ByteRate();
 
@@ -210,6 +231,18 @@ export class PlaybackQueue {
     this.loading = true;
     // Whatever was being buffered for where the listener *was* is not where he is now.
     this.cancelPrefetch();
+    /*
+     * And the prepared slot follows the same rule (v1.9.1) — with one exception that matters.
+     *
+     * A prepared track that is neither the track he touched nor the track that now follows it is
+     * buffering something nobody is going to hear: on his link that is a second download competing
+     * with the very stream he is waiting for, so it is thrown away. When it *is* one of those two,
+     * it is kept — and that is the case the exception exists for: he taps the row that was already
+     * being got ready, so there is nothing to fetch at all and the track starts in a seek's time.
+     */
+    const touched = this.currentSong?.id ?? null;
+    const follows = this.nextSongId();
+    if (this.prepared && this.prepared.songId !== touched && this.prepared.songId !== follows) this.cancelPrepared();
     this.onChanged?.();
   }
 
@@ -364,6 +397,7 @@ export class PlaybackQueue {
     this.pendingStartMs = 0;
     this.loading = false;
     this.cancelPrefetch();
+    this.cancelPrepared();
     clearSnapshot();
     await this.engine.stop();
     this.onChanged?.();
@@ -391,7 +425,22 @@ export class PlaybackQueue {
       await this.engine.resume();
       return;
     }
+    /*
+     * v1.9.1 — an advance crosses **the same transition a tap does**.
+     *
+     * The owner's *"i let a song end normally the next one takes 40s to start"* was two things at
+     * once: a cold fetch (nothing had been prepared) and a screen that showed no sign of anything
+     * happening, because this path never set the loading state — only `select` did. So a track that
+     * ended moved the queue and then looked exactly like a track that had never started.
+     *
+     * The probe for the track being *left* is cancelled here too: it is a request for a stream
+     * nobody is waiting for any more, and it would otherwise run alongside the one that matters on a
+     * link with no room for both.
+     */
+    this.cancelPrefetch();
     this.cursor = plan.cursor;
+    this.loading = true;
+    this.onChanged?.();
     await this.startCurrent();
   }
 
@@ -399,6 +448,21 @@ export class PlaybackQueue {
     const item = this.current;
     if (!item) return;
     const song = item.song;
+    /*
+     * A second start for a track whose load is still in flight is not a second load (v1.9.1).
+     *
+     * It is the same request — and it is answered by keeping the waiting state it painted rather
+     * than by clearing it on the instant. `select` has already painted the row and set the loading
+     * state; nothing else is sent, and the load that is running is the one that will clear it. This
+     * is the intermittent half of *"tapping a row also still does not select it instantly 100% of the
+     * time"*: a re-tap of a row whose load had not answered yet used to paint, then clear itself
+     * with no engine work at all, which reads exactly like a missed tap.
+     */
+    if (this.inFlightSongId === song.id) {
+      this.loading = true;
+      this.onChanged?.();
+      return;
+    }
     const startMs = this.pendingStartMs;
     this.pendingStartMs = 0;
     this.playedMs = 0;
@@ -409,10 +473,18 @@ export class PlaybackQueue {
     this.playToken += 1;
     const token = this.playToken;
     const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
+    /*
+     * **The URL the track was prepared under is the URL it is played with** (v1.9.1).
+     *
+     * Same string, so Navidrome is asked for the transcode it has already started rather than for a
+     * second one at a rate the link measurement moved in the meantime — and so the asset that is
+     * already buffered is the asset that becomes audible.
+     */
+    const preparedUrl = this.prepared?.songId === song.id ? this.prepared.url : null;
     const request: TrackRequest = {
       id: song.id,
       // The bitrate the link has earned: a measured slow link gets a smaller stream (v1.9.0).
-      url: this.library.streamUrl(song, this.rate.maxBitRate),
+      url: preparedUrl ?? this.library.streamUrl(song, this.rate.maxBitRate),
       crossOrigin: this.library.crossOrigin,
       title: song.title,
       artist: song.artist ?? 'Unknown artist',
@@ -420,12 +492,22 @@ export class PlaybackQueue {
       artworkUrl,
       durationMs: (song.duration ?? 0) * 1000,
     };
+    this.inFlightSongId = song.id;
     this.onChanged?.();
     await this.engine.play(request, startMs);
+    this.inFlightSongId = null;
+    if (preparedUrl !== null) {
+      /*
+       * That play consumed the prepared slot — adopted, it is the audible asset now; loaded, it was
+       * overwritten. Either way there is no prepared track any more, and `prepareNext` below is what
+       * fills the slot again, with the track that now follows.
+       */
+      this.prepared = null;
+    }
     if (token !== this.playToken) return;
     /*
      * The engine has the stream. The tap is answered, so the loading state comes off with this
-     * same redraw — and the queue-ahead starts here rather than anywhere else, because "the next
+     * same redraw — and the look-ahead starts here rather than anywhere else, because "the next
      * track" only means something once the current one is actually the current one.
      */
     this.loading = false;
@@ -435,26 +517,57 @@ export class PlaybackQueue {
     // A new track, at a known position: the snapshot is written now rather than on the next tick.
     this.persistSnapshot(true);
     this.onChanged?.();
-    this.prefetchNext();
+    this.prepareNext();
+  }
+
+  /** The song after the one playing, in the play order — `null` at the end of the queue. */
+  private nextSongId(): string | null {
+    return this.items[this.order[this.cursor + 1]]?.song.id ?? null;
   }
 
   /**
-   * Pull the next track's head while this one plays (v1.9.0, queue-ahead).
+   * Get the next track ready on the player, while this one plays (v1.9.1).
    *
-   * Exactly one of these is in flight at any moment, and it is always for the item that follows
-   * the one the listener actually chose — `select` cancels the one that belonged to where he was,
-   * which is what a rapid double tap has to leave behind: no stale fetch, and a single live one.
-   * Nothing here reads or writes the queue's order; the prefetch cannot move what is playing.
+   * Two things happen here and they are deliberately different in kind:
+   *
+   *   1. **The player is prepared.** The track after this one is loaded by the plugin itself, under
+   *      its own asset id, in the player that is already running — buffered, silent, never played.
+   *      At the track boundary that asset is adopted, so the next track starts in a seek's time:
+   *      this is what "the whole previous track was available to prepare the next one" buys.
+   *   2. **The link is measured.** The WebView request that v1.9.0 called a prefetch is kept for the
+   *      one thing it can honestly do — a real throughput reading, which is what decides whether the
+   *      next stream asks for a smaller transcode. Its bytes are not the player's bytes and never
+   *      were (`library.prefetch` says so in full).
+   *
+   * Exactly one of each is in flight at any moment, both are for the item that follows the one the
+   * listener actually chose, and neither can move the queue: nothing here reads or writes `order`.
    */
-  private prefetchNext(): void {
+  private prepareNext(): void {
     const next = this.items[this.order[this.cursor + 1]];
     if (!next) {
-      this.cancelPrefetch();
+      this.cancelPrepared();
       return;
     }
     const url = this.library.streamUrl(next.song, this.rate.maxBitRate);
-    // Already buffering exactly this: a second request would be the same bytes twice.
-    if (this.prefetch?.url === url) return;
+    // Already holding exactly this, under exactly this URL: preparing it twice is the same work.
+    if (this.prepared?.songId === next.song.id && this.prepared.url === url) return;
+    this.cancelPrepared();
+    this.prepared = { songId: next.song.id, url };
+    void this.engine.prepareNext({
+      id: next.song.id,
+      url,
+      crossOrigin: this.library.crossOrigin,
+      title: next.song.title,
+      artist: next.song.artist ?? 'Unknown artist',
+      album: next.song.album ?? '',
+      artworkUrl: this.library.coverUrl(next.song.coverArt ?? next.song.albumId, 512),
+      durationMs: (next.song.duration ?? 0) * 1000,
+    });
+    this.measureLink(url);
+  }
+
+  /** The link measurement, and nothing else: one request at a time, aborted when it moves on. */
+  private measureLink(url: string): void {
     this.cancelPrefetch();
     const controller = new AbortController();
     this.prefetch = { url, controller };
@@ -476,6 +589,12 @@ export class PlaybackQueue {
   private cancelPrefetch(): void {
     this.prefetch?.controller.abort();
     this.prefetch = null;
+  }
+
+  /** Drop the prepared track, on this side and on the player's. */
+  private cancelPrepared(): void {
+    this.prepared = null;
+    void this.engine.discardPrepared?.();
   }
 
   private reportNowPlaying(song: Song): void {
