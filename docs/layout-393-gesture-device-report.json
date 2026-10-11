@@ -1,0 +1,1813 @@
+{
+  "device": {
+    "name": "iPhone 15 Pro",
+    "width": 393,
+    "height": 852,
+    "deviceScaleFactor": 3,
+    "safeAreaTop": 59,
+    "safeAreaBottom": 34
+  },
+  "environment": {
+    "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1",
+    "innerWidth": 393,
+    "innerHeight": 695,
+    "outerWidth": 393,
+    "outerHeight": 852,
+    "screenWidth": 393,
+    "screenHeight": 852,
+    "devicePixelRatio": 3,
+    "visualViewportWidth": 393,
+    "visualViewportScale": 1,
+    "standalone": false,
+    "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "safeAreaInsets": {
+      "top": "0px",
+      "right": "0px",
+      "bottom": "0px",
+      "left": "0px"
+    },
+    "documentClientWidth": 393,
+    "documentScrollWidth": 393,
+    "bodyScrollWidth": 393
+  },
+  "states": {},
+  "gestureOnly": true,
+  "gestures": {
+    "device": {
+      "width": 393,
+      "height": 695,
+      "devicePixelRatio": 3
+    },
+    "input": "TouchEvent dispatched in the page (see the note above fingerDrag)",
+    "inputSupport": {
+      "Touch": "function",
+      "TouchEvent": "function",
+      "PointerEvent": "function",
+      "touchPoints": 5,
+      "canConstructTouch": true
+    },
+    "steps": {
+      "diagonalOnList": {
+        "scrollTopBefore": 400,
+        "pagerBefore": {
+          "position": 0,
+          "offset": 0,
+          "dragging": false,
+          "settled": true,
+          "translate": {
+            "list": 0,
+            "overlay": 0,
+            "strip": 0
+          },
+          "mode": "playlist"
+        },
+        "drag": {
+          "target": "main#view > div.list:nth-of-type(2) > div.row-shell:nth-of-type(13) > button.row.song:nth-of-type(1)",
+          "from": {
+            "x": 300,
+            "y": 600
+          },
+          "to": {
+            "x": 100,
+            "y": 360
+          },
+          "ms": 85,
+          "prevented": [
+            false,
+            false,
+            false,
+            false
+          ],
+          "samples": [
+            {
+              "x": 250,
+              "y": 540,
+              "pager": {
+                "position": 0,
+                "offset": 0,
+                "dragging": false,
+                "settled": true,
+                "translate": {
+                  "list": 0,
+                  "overlay": 0,
+                  "strip": 0
+                },
+                "mode": "playlist"
+              },
+              "geometry": {
+                "route": "#/playlist/pl-stress-long",
+                "nowHidden": true,
+                "pager": {
+                  "position": 0,
+                  "offset": 0,
+                  "dragging": false,
+                  "settled": true,
+                  "translate": {
+                    "list": 0,
+                    "overlay": 0,
+                    "strip": 0
+                  },
+                  "mode": "playlist"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": 0,
+                  "top": 58,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Spectrum",
+                "context": null,
+                "transport": 5
+              }
+            },
+            {
+              "x": 200,
+              "y": 480,
+              "pager": {
+                "position": 0,
+                "offset": 0,
+                "dragging": false,
+                "settled": true,
+                "translate": {
+                  "list": 0,
+                  "overlay": 0,
+                  "strip": 0
+                },
+                "mode": "playlist"
+              },
+              "geometry": {
+                "route": "#/playlist/pl-stress-long",
+                "nowHidden": true,
+                "pager": {
+                  "position": 0,
+                  "offset": 0,
+                  "dragging": false,
+                  "settled": true,
+                  "translate": {
+                    "list": 0,
+                    "overlay": 0,
+                    "strip": 0
+                  },
+                  "mode": "playlist"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": 0,
+                  "top": 58,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Spectrum",
+                "context": null,
+                "transport": 5
+              }
+            },
+            {
+              "x": 150,
+              "y": 420,
+              "pager": {
+                "position": 0,
+                "offset": 0,
+                "dragging": false,
+                "settled": true,
+                "translate": {
+                  "list": 0,
+                  "overlay": 0,
+                  "strip": 0
+                },
+                "mode": "playlist"
+              },
+              "geometry": {
+                "route": "#/playlist/pl-stress-long",
+                "nowHidden": true,
+                "pager": {
+                  "position": 0,
+                  "offset": 0,
+                  "dragging": false,
+                  "settled": true,
+                  "translate": {
+                    "list": 0,
+                    "overlay": 0,
+                    "strip": 0
+                  },
+                  "mode": "playlist"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": 0,
+                  "top": 58,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Spectrum",
+                "context": null,
+                "transport": 5
+              }
+            },
+            {
+              "x": 100,
+              "y": 360,
+              "pager": {
+                "position": 0,
+                "offset": 0,
+                "dragging": false,
+                "settled": true,
+                "translate": {
+                  "list": 0,
+                  "overlay": 0,
+                  "strip": 0
+                },
+                "mode": "playlist"
+              },
+              "geometry": {
+                "route": "#/playlist/pl-stress-long",
+                "nowHidden": true,
+                "pager": {
+                  "position": 0,
+                  "offset": 0,
+                  "dragging": false,
+                  "settled": true,
+                  "translate": {
+                    "list": 0,
+                    "overlay": 0,
+                    "strip": 0
+                  },
+                  "mode": "playlist"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 0,
+                  "top": 0,
+                  "right": 0,
+                  "bottom": 0,
+                  "width": 0,
+                  "height": 0,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 0,
+                  "clientHeight": 0
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": 0,
+                  "top": 58,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Spectrum",
+                "context": null,
+                "transport": 5
+              }
+            }
+          ]
+        },
+        "scrollTopAfter": 400,
+        "pagerAfter": {
+          "position": 0,
+          "offset": 0,
+          "dragging": false,
+          "settled": true,
+          "translate": {
+            "list": 0,
+            "overlay": 0,
+            "strip": 0
+          },
+          "mode": "playlist"
+        },
+        "listTranslate": 0
+      },
+      "follow": {
+        "y": 268,
+        "travelled": 177,
+        "drag": {
+          "target": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "from": {
+            "x": 330,
+            "y": 268
+          },
+          "to": {
+            "x": 153,
+            "y": 268
+          },
+          "ms": 135,
+          "prevented": [
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "samples": [
+            {
+              "x": 295,
+              "y": 268,
+              "pager": {
+                "position": 1,
+                "offset": 1.089,
+                "dragging": true,
+                "settled": false,
+                "translate": {
+                  "list": -393,
+                  "overlay": 0,
+                  "strip": -35
+                },
+                "mode": "spectrum"
+              },
+              "geometry": {
+                "route": "#/now",
+                "nowHidden": false,
+                "pager": {
+                  "position": 1,
+                  "offset": 1.089,
+                  "dragging": true,
+                  "settled": false,
+                  "translate": {
+                    "list": -393,
+                    "overlay": 0,
+                    "strip": -35
+                  },
+                  "mode": "spectrum"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -35,
+                  "top": 56,
+                  "right": 358,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -35, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -35,
+                  "top": 56,
+                  "right": 358,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 358,
+                  "top": 56,
+                  "right": 751,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 358,
+                  "top": 56,
+                  "right": 751,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": -393,
+                  "top": 58,
+                  "right": 0,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            },
+            {
+              "x": 259,
+              "y": 268,
+              "pager": {
+                "position": 1,
+                "offset": 1.181,
+                "dragging": true,
+                "settled": false,
+                "translate": {
+                  "list": -393,
+                  "overlay": 0,
+                  "strip": -71
+                },
+                "mode": "spectrum"
+              },
+              "geometry": {
+                "route": "#/now",
+                "nowHidden": false,
+                "pager": {
+                  "position": 1,
+                  "offset": 1.181,
+                  "dragging": true,
+                  "settled": false,
+                  "translate": {
+                    "list": -393,
+                    "overlay": 0,
+                    "strip": -71
+                  },
+                  "mode": "spectrum"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -71,
+                  "top": 56,
+                  "right": 322,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -71, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -71,
+                  "top": 56,
+                  "right": 322,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 322,
+                  "top": 56,
+                  "right": 715,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 322,
+                  "top": 56,
+                  "right": 715,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": -393,
+                  "top": 58,
+                  "right": 0,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            },
+            {
+              "x": 224,
+              "y": 268,
+              "pager": {
+                "position": 1,
+                "offset": 1.27,
+                "dragging": true,
+                "settled": false,
+                "translate": {
+                  "list": -393,
+                  "overlay": 0,
+                  "strip": -106
+                },
+                "mode": "spectrum"
+              },
+              "geometry": {
+                "route": "#/now",
+                "nowHidden": false,
+                "pager": {
+                  "position": 1,
+                  "offset": 1.27,
+                  "dragging": true,
+                  "settled": false,
+                  "translate": {
+                    "list": -393,
+                    "overlay": 0,
+                    "strip": -106
+                  },
+                  "mode": "spectrum"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -106,
+                  "top": 56,
+                  "right": 287,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -106, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -106,
+                  "top": 56,
+                  "right": 287,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 287,
+                  "top": 56,
+                  "right": 680,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 287,
+                  "top": 56,
+                  "right": 680,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": -393,
+                  "top": 58,
+                  "right": 0,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            },
+            {
+              "x": 188,
+              "y": 268,
+              "pager": {
+                "position": 1,
+                "offset": 1.361,
+                "dragging": true,
+                "settled": false,
+                "translate": {
+                  "list": -393,
+                  "overlay": 0,
+                  "strip": -142
+                },
+                "mode": "spectrum"
+              },
+              "geometry": {
+                "route": "#/now",
+                "nowHidden": false,
+                "pager": {
+                  "position": 1,
+                  "offset": 1.361,
+                  "dragging": true,
+                  "settled": false,
+                  "translate": {
+                    "list": -393,
+                    "overlay": 0,
+                    "strip": -142
+                  },
+                  "mode": "spectrum"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -142,
+                  "top": 56,
+                  "right": 251,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -142, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -142,
+                  "top": 56,
+                  "right": 251,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 251,
+                  "top": 56,
+                  "right": 644,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 251,
+                  "top": 56,
+                  "right": 644,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": -393,
+                  "top": 58,
+                  "right": 0,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            },
+            {
+              "x": 153,
+              "y": 268,
+              "pager": {
+                "position": 1,
+                "offset": 1.45,
+                "dragging": true,
+                "settled": false,
+                "translate": {
+                  "list": -393,
+                  "overlay": 0,
+                  "strip": -177
+                },
+                "mode": "spectrum"
+              },
+              "geometry": {
+                "route": "#/now",
+                "nowHidden": false,
+                "pager": {
+                  "position": 1,
+                  "offset": 1.45,
+                  "dragging": true,
+                  "settled": false,
+                  "translate": {
+                    "list": -393,
+                    "overlay": 0,
+                    "strip": -177
+                  },
+                  "mode": "spectrum"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -177,
+                  "top": 56,
+                  "right": 216,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -177, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -177,
+                  "top": 56,
+                  "right": 216,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 216,
+                  "top": 56,
+                  "right": 609,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 216,
+                  "top": 56,
+                  "right": 609,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": -393,
+                  "top": 58,
+                  "right": 0,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            }
+          ]
+        },
+        "expected": [
+          1.089058524173028,
+          1.1806615776081424,
+          1.2697201017811706,
+          1.361323155216285,
+          1.450381679389313
+        ],
+        "offsetErrorPx": 0.1500000000000068,
+        "stripErrorPx": 4.263256414560601e-14,
+        "tilingWorstPx": 0,
+        "monotonic": true,
+        "rest": {
+          "position": 2,
+          "route": "#/now/lyrics",
+          "strip": -393
+        }
+      },
+      "shortDrag": {
+        "offsets": [
+          2,
+          2.041,
+          2.059,
+          2.079,
+          2.099,
+          2.12
+        ],
+        "ms": 375,
+        "rest": {
+          "position": 2,
+          "route": "#/now/lyrics"
+        }
+      },
+      "diagonalOnLyrics": {
+        "drag": {
+          "target": "div.now-pages:nth-of-type(2) > div.now-page.now-page-lyrics:nth-of-type(2) > div.now-lyrics > div.lyrics",
+          "from": {
+            "x": 300,
+            "y": 388
+          },
+          "to": {
+            "x": 100,
+            "y": 148
+          },
+          "ms": 85,
+          "prevented": [
+            false,
+            false,
+            false,
+            false
+          ],
+          "samples": [
+            {
+              "x": 250,
+              "y": 328,
+              "pager": {
+                "position": 2,
+                "offset": 2,
+                "dragging": false,
+                "settled": true,
+                "translate": {
+                  "list": 393,
+                  "overlay": 0,
+                  "strip": -393
+                },
+                "mode": "lyrics"
+              },
+              "geometry": {
+                "route": "#/now/lyrics",
+                "nowHidden": false,
+                "pager": {
+                  "position": 2,
+                  "offset": 2,
+                  "dragging": false,
+                  "settled": true,
+                  "translate": {
+                    "list": 393,
+                    "overlay": 0,
+                    "strip": -393
+                  },
+                  "mode": "lyrics"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -393,
+                  "top": 56,
+                  "right": 0,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -393,
+                  "top": 56,
+                  "right": 0,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 0,
+                  "top": 56,
+                  "right": 393,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 0,
+                  "top": 56,
+                  "right": 393,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": 393,
+                  "top": 58,
+                  "right": 786,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, 393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            },
+            {
+              "x": 200,
+              "y": 268,
+              "pager": {
+                "position": 2,
+                "offset": 2,
+                "dragging": false,
+                "settled": true,
+                "translate": {
+                  "list": 393,
+                  "overlay": 0,
+                  "strip": -393
+                },
+                "mode": "lyrics"
+              },
+              "geometry": {
+                "route": "#/now/lyrics",
+                "nowHidden": false,
+                "pager": {
+                  "position": 2,
+                  "offset": 2,
+                  "dragging": false,
+                  "settled": true,
+                  "translate": {
+                    "list": 393,
+                    "overlay": 0,
+                    "strip": -393
+                  },
+                  "mode": "lyrics"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -393,
+                  "top": 56,
+                  "right": 0,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -393,
+                  "top": 56,
+                  "right": 0,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 0,
+                  "top": 56,
+                  "right": 393,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 0,
+                  "top": 56,
+                  "right": 393,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": 393,
+                  "top": 58,
+                  "right": 786,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, 393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            },
+            {
+              "x": 150,
+              "y": 208,
+              "pager": {
+                "position": 2,
+                "offset": 2,
+                "dragging": false,
+                "settled": true,
+                "translate": {
+                  "list": 393,
+                  "overlay": 0,
+                  "strip": -393
+                },
+                "mode": "lyrics"
+              },
+              "geometry": {
+                "route": "#/now/lyrics",
+                "nowHidden": false,
+                "pager": {
+                  "position": 2,
+                  "offset": 2,
+                  "dragging": false,
+                  "settled": true,
+                  "translate": {
+                    "list": 393,
+                    "overlay": 0,
+                    "strip": -393
+                  },
+                  "mode": "lyrics"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -393,
+                  "top": 56,
+                  "right": 0,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -393,
+                  "top": 56,
+                  "right": 0,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 0,
+                  "top": 56,
+                  "right": 393,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 0,
+                  "top": 56,
+                  "right": 393,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": 393,
+                  "top": 58,
+                  "right": 786,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, 393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            },
+            {
+              "x": 100,
+              "y": 148,
+              "pager": {
+                "position": 2,
+                "offset": 2,
+                "dragging": false,
+                "settled": true,
+                "translate": {
+                  "list": 393,
+                  "overlay": 0,
+                  "strip": -393
+                },
+                "mode": "lyrics"
+              },
+              "geometry": {
+                "route": "#/now/lyrics",
+                "nowHidden": false,
+                "pager": {
+                  "position": 2,
+                  "offset": 2,
+                  "dragging": false,
+                  "settled": true,
+                  "translate": {
+                    "list": 393,
+                    "overlay": 0,
+                    "strip": -393
+                  },
+                  "mode": "lyrics"
+                },
+                "now": {
+                  "selector": ".now",
+                  "left": 0,
+                  "top": 0,
+                  "right": 393,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 695,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 695,
+                  "clientHeight": 695
+                },
+                "pages": {
+                  "selector": ".now-pages",
+                  "left": -393,
+                  "top": 56,
+                  "right": 0,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "matrix(1, 0, 0, 1, -393, 0)",
+                  "overflow": "visible",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "spectrum": {
+                  "selector": ".now-page-spectrum",
+                  "left": -393,
+                  "top": 56,
+                  "right": 0,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 455,
+                  "clientHeight": 423
+                },
+                "lyricsPane": {
+                  "selector": ".now-page-lyrics",
+                  "left": 0,
+                  "top": 56,
+                  "right": 393,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "clip",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "panel": {
+                  "selector": ".lyrics",
+                  "left": 0,
+                  "top": 56,
+                  "right": 393,
+                  "bottom": 479,
+                  "width": 393,
+                  "height": 423,
+                  "translate": "none",
+                  "overflow": "auto",
+                  "scrollTop": 0,
+                  "scrollHeight": 423,
+                  "clientHeight": 423
+                },
+                "list": {
+                  "selector": ".view-scroll",
+                  "left": 393,
+                  "top": 58,
+                  "right": 786,
+                  "bottom": 695,
+                  "width": 393,
+                  "height": 637,
+                  "translate": "matrix(1, 0, 0, 1, 393, 0)",
+                  "overflow": "hidden",
+                  "scrollTop": 400,
+                  "scrollHeight": 2297,
+                  "clientHeight": 637
+                },
+                "activePill": "Lyrics",
+                "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+                "transport": 5
+              }
+            }
+          ]
+        },
+        "paneFound": true,
+        "pagerBefore": {
+          "position": 2,
+          "offset": 2,
+          "dragging": false,
+          "settled": true,
+          "translate": {
+            "list": 393,
+            "overlay": 0,
+            "strip": -393
+          },
+          "mode": "lyrics"
+        },
+        "pagerAfter": {
+          "position": 2,
+          "offset": 2,
+          "dragging": false,
+          "settled": true,
+          "translate": {
+            "list": 393,
+            "overlay": 0,
+            "strip": -393
+          },
+          "mode": "lyrics"
+        }
+      },
+      "flick": {
+        "flick": {
+          "ms": 29,
+          "offsets": [
+            2.066,
+            2.132,
+            2.198
+          ]
+        },
+        "rest": {
+          "position": 0,
+          "route": "#/playlist/pl-stress-long"
+        }
+      },
+      "ring": [
+        {
+          "from": 340,
+          "to": 40,
+          "position": 1,
+          "route": "#/now",
+          "tilingWorstPx": 0,
+          "listTranslate": [],
+          "offsets": [],
+          "unavailable": null
+        },
+        {
+          "from": 340,
+          "to": 40,
+          "position": 2,
+          "route": "#/now/lyrics",
+          "tilingWorstPx": 0,
+          "listTranslate": [],
+          "offsets": [],
+          "unavailable": null
+        },
+        {
+          "from": 340,
+          "to": 40,
+          "position": 0,
+          "route": "#/playlist/pl-stress-long",
+          "tilingWorstPx": 0,
+          "listTranslate": [],
+          "offsets": [],
+          "unavailable": null
+        },
+        {
+          "from": 40,
+          "to": 340,
+          "position": 2,
+          "route": "#/now/lyrics",
+          "tilingWorstPx": 0,
+          "listTranslate": [],
+          "offsets": [],
+          "unavailable": null
+        }
+      ]
+    },
+    "finalRoute": "#/now/lyrics"
+  },
+  "probe": {
+    "source": "page",
+    "href": "http://127.0.0.1:4597/#/now/lyrics",
+    "at": "2026-10-11T04:58:23.530Z"
+  }
+}

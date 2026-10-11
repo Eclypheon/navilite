@@ -29,7 +29,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, cpSync } 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { formatReport, formatScrollContainment } from './layout-audit.mjs';
+import { formatReport, formatScrollContainment, formatFocusSettings, formatSettingsOverflow, formatDeviceGestures } from './layout-audit.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -61,6 +61,12 @@ const WAIT_SECONDS = Number(argv.get('wait') ?? 180);
  * consider visible — and the Simulator window is behind the terminal for most of a headless run —
  * so a four-minute walk can stop half way with no report at all. The short scenario finishes well
  * inside that budget; the walk itself is covered by the 393 suite, which runs it in Chrome.
+ *
+ * `focus` measures the owner's two v1.5 reports on their own (the settings focus-zoom and the first
+ * lyric line); `settings-overflow` takes the settings screen's sideways content apart, rule by rule,
+ * in the shipping engine (v1.5 follow-up, docs/verification.md §14.1); `gesture` runs the pager's
+ * gestures in this engine and posts the readings `tools/pager-check.mjs --device` judges
+ * (§14.2). All three are short for the same reason `scroll` is.
  */
 const SCENARIO = argv.get('scenario') ?? 'walk-and-scroll';
 // Default: the workspace build. `--dist` points the probe at some other payload — an older
@@ -226,6 +232,42 @@ function buildProbeBundle() {
         beat('connected; running the scroll-containment scenario on its own');
         return { device: audit.DEVICE, environment: audit.environment(), states: {}, scrollOnly: true };
       }
+      if (cfg.scenario === 'settings-overflow') {
+        /*
+         * The v1.5 follow-up's first question, on its own: the settings scroll surface still carried
+         * 301 px of sideways content with the playback dropdown focused, and no run had named the
+         * element it came from. Short like the focus scenario, and for the same reason — Safari in
+         * the simulator freezes a tab it cannot see, and this has to finish well inside that budget.
+         */
+        partial = { device: audit.DEVICE, environment: audit.environment(), states: {}, settingsOverflowOnly: true };
+        beat('connected; taking the settings screen apart');
+        location.hash = '#/settings';
+        return audit
+          .waitFor("Boolean(document.querySelector('select.field'))", 'the playback select', 20000)
+          .then(function () {
+            return audit.settingsOverflowProbe();
+          })
+          .then(function (probe) {
+            partial.settingsOverflow = probe;
+            beat('settings: surface ' + probe.baseline.surfaceOverflow + ' px of sideways content, widest ' + (probe.baseline.widest ? probe.baseline.widest.selector : 'none'));
+            return partial;
+          });
+      }
+      if (cfg.scenario === 'gesture') {
+        /*
+         * The v1.5 follow-up's second question: the gestures have never been measured in the engine
+         * that ships. No CDP reaches a simulator's Safari, so the sweep drives the app's own
+         * listeners with TouchEvents from inside the page and posts what it measured — see the
+         * note above fingerDrag in layout-probe-browser.js for what that can and cannot show.
+         */
+        partial = { device: audit.DEVICE, environment: audit.environment(), states: {}, gestureOnly: true };
+        beat('connected; running the gestures in this engine');
+        return audit.deviceGestureSweep().then(function (sweep) {
+          partial.gestures = sweep;
+          beat('the gesture sweep finished');
+          return partial;
+        });
+      }
       if (cfg.scenario === 'focus') {
         /*
          * The owner's two reports, in real WebKit, on their own.
@@ -285,7 +327,7 @@ function buildProbeBundle() {
       });
     })
     .then(function (report) {
-      if (report.focusOnly) return report;
+      if (report.focusOnly || report.settingsOverflowOnly || report.gestureOnly) return report;
       beat('layout walk done; running the v1.4 scroll-containment scenario');
       return audit.scrollContainment().then(
         function (scroll) {
@@ -366,29 +408,45 @@ async function reportCount() {
   return body.count;
 }
 
-async function latestReport() {
-  const response = await fetch(`http://127.0.0.1:${PORT}/__reports`);
-  const body = await response.json();
-  return body.reports[body.reports.length - 1];
+/**
+ * The mock stores each post as `{ receivedAt, report }`, so the reading is one level down.
+ *
+ * v1.5 shipped with this harness reading the wrapper as if it were the report: `report.device` was
+ * always undefined, every run ended in "no report arrived" *after* the page had posted its full
+ * report, and the only way to see the numbers was to fetch `/__reports` by hand. That is why the
+ * 301 px reading in the v1.5 handoff came with no element named — the field that names it was in a
+ * report nothing printed.
+ */
+function unwrap(entry) {
+  return entry && entry.report ? entry.report : entry;
 }
+
 
 async function waitForReport(existing) {
   const deadline = Date.now() + WAIT_SECONDS * 1000;
   let seen = existing;
   while (Date.now() < deadline) {
-    const count = await reportCount();
-    if (count > seen) {
-      seen = count;
-      const report = await latestReport();
+    const counted = await reportCount();
+    if (counted > seen) {
+      const response = await fetch(`http://127.0.0.1:${PORT}/__reports`);
+      const body = await response.json();
+      const reports = body.reports ?? [];
       /*
-       * A progress beat is not a report.
+       * Every entry posted since the last look, in order — not just the newest one.
        *
-       * The bootstrap posts one `beat` per step so a caller can watch a run it cannot see, and the
-       * last post of the run is the report itself (`device` and the readings, or `error`). Treating
-       * the first beat as the answer makes every device run "fail" the moment the app connects.
+       * A progress beat is not a report: the bootstrap posts one `beat` per step so a caller can
+       * watch a run it cannot see, and the last post of the run is the report itself (`device` and
+       * the readings, or `error`). But the page posts its report and the beat that follows it in the
+       * same millisecond, so reading only the newest entry when the count moves *after* both have
+       * landed reads the beat, sets `seen` past the report, and waits out the whole timeout with the
+       * answer sitting in the store — which is exactly how the v1.5 card lost its 301 px report.
        */
-      if (report && (report.device || report.error)) return report;
-      process.stdout.write(`  beat: ${report?.progress ?? JSON.stringify(report)}\n`);
+      for (let index = seen; index < reports.length; index += 1) {
+        const report = unwrap(reports[index]);
+        if (report && (report.device || report.error)) return report;
+        process.stdout.write(`  beat: ${report?.progress ?? JSON.stringify(report)}\n`);
+      }
+      seen = reports.length;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
@@ -448,7 +506,7 @@ async function main() {
       process.exitCode = 2;
       return;
     }
-    const report = received.report;
+    const report = unwrap(received);
     if (report.error) {
       process.stdout.write(`the probe failed: ${report.error}\n`);
       if (report.stack) process.stdout.write(`${report.stack}\n`);
@@ -492,8 +550,25 @@ async function main() {
       throw new Error(`the probe posted no layout readings${report?.error ? `: ${report.error}` : ''}`);
     }
     const scrollOnly = report.scrollOnly === true;
+    const focusOnly = report.focusOnly === true;
+    const settingsOnly = report.settingsOverflowOnly === true;
+    const gestureOnly = report.gestureOnly === true;
     let failures = 0;
-    if (!scrollOnly) {
+    if (focusOnly) {
+      // The owner's two v1.5 reports, measured on their own: the settings focus-zoom and the first
+      // lyric line. Both are readings, and both are failures when they come back wrong.
+      const formatted = formatFocusSettings(report);
+      failures = formatted.failures;
+      process.stdout.write(`${formatted.text}\n`);
+    } else if (settingsOnly) {
+      const formatted = formatSettingsOverflow(report.settingsOverflow);
+      failures = formatted.failures;
+      process.stdout.write(`${formatted.text}\n`);
+    } else if (gestureOnly) {
+      const formatted = formatDeviceGestures(report.gestures);
+      failures = formatted.failures;
+      process.stdout.write(`${formatted.text}\n`);
+    } else if (!scrollOnly) {
       const formatted = formatReport(report, 'real iOS WebKit — env() comes from the OS');
       failures = formatted.failures;
       process.stdout.write(`${formatted.text}\n`);
@@ -503,11 +578,27 @@ async function main() {
       process.stdout.write(`  innerWidth ${env.innerWidth} · innerHeight ${env.innerHeight} · dpr ${env.devicePixelRatio} · visualViewport ${env.visualViewportWidth} (scale ${env.visualViewportScale})\n`);
       process.stdout.write('  (scroll scenario only — the route walk is covered by the 393 suite, which runs it in Chrome)\n\n');
     }
-    const scrollLines = formatScrollContainment(report.scroll);
-    process.stdout.write(`${scrollLines.join('\n')}\n`);
-    const scrollFailed = Boolean(report.scroll) && (Boolean(report.scroll.error) || report.scroll.passed === false);
-    const out = join(root, 'docs', scrollOnly ? 'layout-393-scroll-device-report.json' : 'layout-393-device-report.json');
+    let scrollFailed = false;
+    if (!focusOnly && !settingsOnly && !gestureOnly) {
+      const scrollLines = formatScrollContainment(report.scroll);
+      process.stdout.write(`${scrollLines.join('\n')}\n`);
+      scrollFailed = Boolean(report.scroll) && (Boolean(report.scroll.error) || report.scroll.passed === false);
+    }
+    const reportName = scrollOnly
+      ? 'layout-393-scroll-device-report.json'
+      : focusOnly
+        ? 'layout-393-focus-device-report.json'
+        : settingsOnly
+          ? 'layout-393-settings-overflow-device-report.json'
+          : gestureOnly
+            ? 'layout-393-gesture-device-report.json'
+            : 'layout-393-device-report.json';
+    const out = join(root, 'docs', reportName);
     writeFileSync(out, JSON.stringify(report, null, 2));
+    // `--json` is for a caller that wants the readings rather than the prose: `tools/pager-check.mjs
+    // --device` runs this command and judges the sweep itself, so both drivers print the same labels.
+    const jsonCopy = argv.get('json');
+    if (jsonCopy) writeFileSync(jsonCopy, JSON.stringify(report, null, 2));
     process.stdout.write(`\nraw measurements: ${out}\n`);
     process.exitCode = failures === 0 && !scrollFailed ? 0 : 1;
   } finally {

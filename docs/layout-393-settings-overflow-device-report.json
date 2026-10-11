@@ -1,0 +1,287 @@
+{
+  "device": {
+    "name": "iPhone 15 Pro",
+    "width": 393,
+    "height": 852,
+    "deviceScaleFactor": 3,
+    "safeAreaTop": 59,
+    "safeAreaBottom": 34
+  },
+  "environment": {
+    "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1",
+    "innerWidth": 393,
+    "innerHeight": 695,
+    "outerWidth": 393,
+    "outerHeight": 852,
+    "screenWidth": 393,
+    "screenHeight": 852,
+    "devicePixelRatio": 3,
+    "visualViewportWidth": 393,
+    "visualViewportScale": 1,
+    "standalone": false,
+    "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "safeAreaInsets": {
+      "top": "0px",
+      "right": "0px",
+      "bottom": "0px",
+      "left": "0px"
+    },
+    "documentClientWidth": 393,
+    "documentScrollWidth": 393,
+    "bodyScrollWidth": 393
+  },
+  "states": {},
+  "settingsOverflowOnly": true,
+  "settingsOverflow": {
+    "fontSize": "16px",
+    "select": {
+      "selector": "select.field",
+      "clientWidth": 363,
+      "scrollWidth": 689,
+      "rectWidth": 365,
+      "overflow": 326
+    },
+    "options": [
+      {
+        "index": 0,
+        "selected": false,
+        "width": 564.58,
+        "text": "Automatic — real spectrum in the foreground, native engine i"
+      },
+      {
+        "index": 1,
+        "selected": true,
+        "width": 668.72,
+        "text": "Web Audio only — always the real spectrum (background playba"
+      },
+      {
+        "index": 2,
+        "selected": false,
+        "width": 638.38,
+        "text": "Native engine only — background and lock screen first, visua"
+      }
+    ],
+    "baseline": {
+      "surfaceOverflow": 0,
+      "widest": {
+        "overflow": 326,
+        "selector": "main#view > div.detail-text.settings > select.field.inline",
+        "clientWidth": 363,
+        "scrollWidth": 689,
+        "rectWidth": 365
+      },
+      "sideScroll": {
+        "selector": "div#app > div.view-scroll:nth-of-type(1)",
+        "overflowX": "auto",
+        "overflowY": "auto",
+        "clientWidth": 393,
+        "scrollWidth": 393,
+        "sideScroll": 0,
+        "restoredTo": 0
+      }
+    },
+    "candidates": [
+      {
+        "label": "baseline (the shipping CSS)",
+        "css": null,
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "auto",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": "the pre-fix control: select.field { overflow: visible }",
+        "css": "select.field { overflow: visible; }",
+        "control": true,
+        "surfaceOverflow": 301,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+316 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "auto",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 694,
+          "sideScroll": 301,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": "select.field { overflow: hidden }",
+        "css": "select.field { overflow: hidden; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "auto",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": "select.field { overflow-x: hidden }",
+        "css": "select.field { overflow-x: hidden; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "auto",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": "select.field { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }",
+        "css": "select.field { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "auto",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": "select.field { contain: inline-size }",
+        "css": "select.field { contain: inline-size; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "auto",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": "select.field { appearance: none }",
+        "css": "select.field { appearance: none; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "auto",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": ".field.inline { width: 100% }",
+        "css": ".field.inline { width: 100%; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "auto",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": ".view-scroll { overflow-x: hidden }",
+        "css": ".view-scroll { overflow-x: hidden; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "hidden",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": ".view-scroll { overflow-x: clip }",
+        "css": ".view-scroll { overflow-x: clip; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "hidden",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      },
+      {
+        "label": "the two together: select.field { overflow: hidden } + .view-scroll { overflow-x: hidden }",
+        "css": "select.field { overflow: hidden; } .view-scroll { overflow-x: hidden; }",
+        "control": false,
+        "surfaceOverflow": 0,
+        "widest": "main#view > div.detail-text.settings > select.field.inline (+326 px)",
+        "sideScroll": {
+          "selector": "div#app > div.view-scroll:nth-of-type(1)",
+          "overflowX": "hidden",
+          "overflowY": "auto",
+          "clientWidth": 393,
+          "scrollWidth": 393,
+          "sideScroll": 0,
+          "restoredTo": 0
+        }
+      }
+    ],
+    "restored": {
+      "surfaceOverflow": 0,
+      "widest": {
+        "overflow": 326,
+        "selector": "main#view > div.detail-text.settings > select.field.inline",
+        "clientWidth": 363,
+        "scrollWidth": 689,
+        "rectWidth": 365
+      },
+      "sideScroll": {
+        "selector": "div#app > div.view-scroll:nth-of-type(1)",
+        "overflowX": "auto",
+        "overflowY": "auto",
+        "clientWidth": 393,
+        "scrollWidth": 393,
+        "sideScroll": 0,
+        "restoredTo": 0
+      }
+    },
+    "restoredMatchesBaseline": true
+  },
+  "probe": {
+    "source": "page",
+    "href": "http://127.0.0.1:4598/#/settings",
+    "at": "2026-10-11T04:55:53.619Z"
+  }
+}

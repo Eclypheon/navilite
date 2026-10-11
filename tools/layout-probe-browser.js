@@ -278,6 +278,152 @@
     });
   }
 
+  /**
+   * Can the surface actually be dragged sideways, and by how much?
+   *
+   * v1.5 follow-up. A `scrollWidth` larger than a `clientWidth` is a *claim* that there is
+   * something to scroll; what the owner can do with his finger is the test. An element with a
+   * scrollable overflow region is scrollable by pointer, by touch and by script, so pushing it and
+   * reading where it landed is the reading that says "draggable" without an assumption. `overflowX`
+   * comes with it, because `hidden` and `clip` are the two values that put a box out of a finger's
+   * reach, and only the second one also takes it out of a script's.
+   */
+  function surfaceSideScroll(surface) {
+    var box = surface || scrollSurfaces().scroller;
+    if (!box) return null;
+    var style = getComputedStyle(box);
+    var before = box.scrollLeft;
+    box.scrollLeft = 9999;
+    var reached = box.scrollLeft;
+    box.scrollLeft = before;
+    return {
+      selector: selectorFor(box),
+      overflowX: style.overflowX,
+      overflowY: style.overflowY,
+      clientWidth: box.clientWidth,
+      scrollWidth: box.scrollWidth,
+      /** How far a push actually moved it, in px: 0 means there is nothing to scroll. */
+      sideScroll: round2(reached),
+      restoredTo: round2(box.scrollLeft),
+    };
+  }
+
+  /**
+   * The settings screen's 301 px, taken apart.
+   *
+   * The v1.5 run measured the settings scroll surface at `393 -> 694 px` with the playback dropdown
+   * focused, named no element, and left it open. `widestWhileFocused` names the element the width
+   * comes from; this goes one step further and *tests candidates in the shipping engine, in one
+   * run*: each rule is applied to the live page, the surface is re-measured and pushed sideways, and
+   * the rule is removed again — so the answer is a measurement rather than a belief about what
+   * WebKit does with a `<select>` whose content is wider than its box.
+   *
+   * The option labels are measured with a hidden ruler at the select's own font, because "the
+   * longest option is 671 px of text" is the other half of the story and it is checkable.
+   */
+  function settingsOverflowProbe(candidates) {
+    var select = document.querySelector('select.field');
+    var surface = scrollSurfaces().scroller;
+    if (!select || !surface) {
+      return Promise.reject(new Error('no playback select or no scroll surface to measure'));
+    }
+    var style = document.createElement('style');
+    style.setAttribute('data-probe', 'settings-overflow');
+    document.head.appendChild(style);
+
+    var sample = function () {
+      // Force layout, then read the surface, its widest descendant, and its real side-scroll.
+      void surface.offsetWidth;
+      return {
+        surfaceOverflow: horizontalOverflowOf(surface),
+        widest: widestInsideSurface(),
+        sideScroll: surfaceSideScroll(surface),
+      };
+    };
+
+    var baseline = sample();
+    var rules = candidates || [
+      { label: 'baseline (the shipping CSS)', css: '' },
+      {
+        label: 'the pre-fix control: select.field { overflow: visible }',
+        css: 'select.field { overflow: visible; }',
+        control: true,
+      },
+      { label: 'select.field { overflow: hidden }', css: 'select.field { overflow: hidden; }' },
+      { label: 'select.field { overflow-x: hidden }', css: 'select.field { overflow-x: hidden; }' },
+      {
+        label: 'select.field { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }',
+        css: 'select.field { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      },
+      { label: 'select.field { contain: inline-size }', css: 'select.field { contain: inline-size; }' },
+      { label: 'select.field { appearance: none }', css: 'select.field { appearance: none; }' },
+      { label: '.field.inline { width: 100% }', css: '.field.inline { width: 100%; }' },
+      { label: '.view-scroll { overflow-x: hidden }', css: '.view-scroll { overflow-x: hidden; }' },
+      { label: '.view-scroll { overflow-x: clip }', css: '.view-scroll { overflow-x: clip; }' },
+      {
+        label: 'the two together: select.field { overflow: hidden } + .view-scroll { overflow-x: hidden }',
+        css: 'select.field { overflow: hidden; } .view-scroll { overflow-x: hidden; }',
+      },
+    ];
+    var results = [];
+    for (var i = 0; i < rules.length; i += 1) {
+      style.textContent = rules[i].css;
+      var reading = sample();
+      results.push({
+        label: rules[i].label,
+        css: rules[i].css || null,
+        control: rules[i].control === true,
+        surfaceOverflow: reading.surfaceOverflow,
+        widest: reading.widest ? reading.widest.selector + ' (+' + reading.widest.overflow + ' px)' : null,
+        sideScroll: reading.sideScroll,
+      });
+    }
+    style.textContent = '';
+    var restored = sample();
+    style.remove();
+
+    /* The labels themselves: a ruler at the select's own font, so the widest option is a number. */
+    var computed = getComputedStyle(select);
+    var ruler = document.createElement('span');
+    ruler.setAttribute('aria-hidden', 'true');
+    ruler.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;';
+    ruler.style.fontFamily = computed.fontFamily;
+    ruler.style.fontSize = computed.fontSize;
+    ruler.style.fontWeight = computed.fontWeight;
+    ruler.style.fontStyle = computed.fontStyle;
+    ruler.style.letterSpacing = computed.letterSpacing;
+    document.body.appendChild(ruler);
+    var options = [];
+    for (var oi = 0; oi < select.options.length; oi += 1) {
+      ruler.textContent = select.options[oi].textContent || '';
+      options.push({
+        index: oi,
+        selected: select.options[oi].selected,
+        width: round2(ruler.getBoundingClientRect().width),
+        text: (select.options[oi].textContent || '').slice(0, 60),
+      });
+    }
+    ruler.remove();
+
+    return Promise.resolve({
+      fontSize: computed.fontSize,
+      select: {
+        selector: 'select.field',
+        clientWidth: select.clientWidth,
+        scrollWidth: select.scrollWidth,
+        rectWidth: round2(select.getBoundingClientRect().width),
+        overflow: horizontalOverflowOf(select),
+      },
+      options: options,
+      baseline: baseline,
+      candidates: results,
+      /** The same reading with every rule removed: a candidate that only "worked" because the page
+       * was left in a changed state shows up here. */
+      restored: restored,
+      restoredMatchesBaseline: restored.surfaceOverflow === baseline.surfaceOverflow,
+    });
+  }
+
   /** Is the document wider than the viewport, and if so, which element did it? */
   function measure() {
     var vw = window.innerWidth;
@@ -1539,6 +1685,349 @@
       });
   }
 
+  /* ------------------------------------------- the gestures, in the shipping engine (v1.5 follow-up) */
+
+  /**
+   * The owner's two v1.5 reports are about a *finger*, and every number in `docs/verification.md`
+   * §13.3 comes from Chrome's `Input.dispatchTouchEvent` at 393x852. A simulator has no CDP, so
+   * between "Chrome says the axis lock holds" and "Safari on the phone does" there was an engine
+   * and an input path nobody had run. This is that path: the same gestures, dispatched as real
+   * `TouchEvent`s inside Safari in the simulator, with the geometry read between the moves.
+   *
+   * What it can and cannot see, stated rather than implied. The events go straight to the page's
+   * listeners, so what is measured is the *app's* behaviour in the shipping engine: the axis lock,
+   * the finger-following transform, the tiling, the snap and the route. What an untrusted event
+   * cannot do is have a default action, so the browser's own half — the scroll a vertical drag
+   * would produce, and Safari's edge-swipe on a gesture that starts at the screen edge — is not
+   * reproduced here and is still Chrome's (and the owner's thumb's) to confirm. The one thing this
+   * can say about the axis lock's other half is `defaultPrevented`: the claim is that a vertical
+   * gesture is handed back *untouched*, and an untouched gesture is exactly what `false` here means.
+   */
+
+  /**
+   * Which input constructors this engine actually has — the precondition of the in-page path.
+   *
+   * `new Touch(...)` and `new TouchEvent(...)` are the two the sweep needs, and they are not
+   * universal: WebKit exposes them from Safari 14 on, and a page that finds them missing has no
+   * in-page gesture path at all. Reported once per run so a failure says *why*.
+   */
+  function inputSupport() {
+    return {
+      Touch: typeof Touch,
+      TouchEvent: typeof TouchEvent,
+      PointerEvent: typeof PointerEvent,
+      touchPoints: typeof navigator.maxTouchPoints === 'number' ? navigator.maxTouchPoints : null,
+      canConstructTouch: (function () {
+        try {
+          return typeof Touch === 'function' && typeof TouchEvent === 'function' && !!new TouchEvent('touchstart', { bubbles: true });
+        } catch (error) {
+          return 'throws: ' + error.message;
+        }
+      })(),
+    };
+  }
+
+  function delay(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  /**
+   * The x of a `matrix(1, 0, 0, 1, x, 0)` transform, or 0 for `none`.
+   *
+   * Takes an element *or* the box `nowGeometry()` returns for one — the boxes carry the computed
+   * transform already, and reading it from the box is what keeps `getComputedStyle` out of a loop
+   * that runs once per move of every gesture.
+   */
+  function translateXOf(target) {
+    var value = '';
+    if (target && target.nodeType === 1) value = getComputedStyle(target).transform;
+    else if (target && typeof target.translate === 'string') value = target.translate;
+    var match = /matrix\(1, 0, 0, 1, (-?[\d.]+), 0\)/.exec(String(value));
+    return match ? Number(match[1]) : 0;
+  }
+
+  /**
+   * One finger, inside the page: down, `steps` even moves, up — sampling as it goes.
+   *
+   * `target` is what is under the finger, resolved with `elementFromPoint` so the event travels the
+   * path it really would (and lands on a `<select>` or a range input if the coordinates are wrong,
+   * which the report then shows instead of hiding).
+   */
+  function fingerDrag(options) {
+    var from = options.from;
+    var to = options.to;
+    var steps = options.steps || 5;
+    var gapMs = typeof options.gapMs === 'number' ? options.gapMs : 20;
+    var sampleEvery = typeof options.sampleEvery === 'number' ? options.sampleEvery : 1;
+    var target = document.elementFromPoint(Math.round(from.x), Math.round(from.y)) || document.querySelector('#app');
+    if (!target || typeof Touch !== 'function' || typeof TouchEvent !== 'function') {
+      /*
+       * Reported, not swallowed. A build whose engine cannot construct a `Touch` has no in-page
+       * gesture path at all, and a null here used to surface as "undefined is not an object" three
+       * frames later — which says nothing about which constructor was missing.
+       */
+      return Promise.resolve({
+        unavailable: inputSupport(),
+        target: target ? selectorFor(target) : null,
+      });
+    }
+    var identifier = 11;
+    var point = function (x, y) {
+      return new Touch({ identifier: identifier, target: target, clientX: Math.round(x), clientY: Math.round(y) });
+    };
+    var fire = function (type, x, y, touches) {
+      var event = new TouchEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        touches: touches,
+        targetTouches: touches,
+        changedTouches: [point(x, y)],
+      });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    var samples = [];
+    var prevented = [];
+    return new Promise(function (resolve) {
+      var started = performance.now();
+      fire('touchstart', from.x, from.y, [point(from.x, from.y)]);
+      var send = function (index) {
+        if (index > steps) {
+          fire('touchend', to.x, to.y, []);
+          resolve({
+            target: selectorFor(target),
+            from: { x: Math.round(from.x), y: Math.round(from.y) },
+            to: { x: Math.round(to.x), y: Math.round(to.y) },
+            ms: Math.round(performance.now() - started),
+            /** Whether anything called `preventDefault` on a move: the axis lock's own claim. */
+            prevented: prevented,
+            samples: samples,
+          });
+          return;
+        }
+        var x = from.x + ((to.x - from.x) * index) / steps;
+        var y = from.y + ((to.y - from.y) * index) / steps;
+        setTimeout(function () {
+          prevented.push(fire('touchmove', x, y, [point(x, y)]));
+          if (sampleEvery === 0 ? index === steps : index % sampleEvery === 0) {
+            samples.push({
+              x: Math.round(x),
+              y: Math.round(y),
+              pager: pagerState(),
+              geometry: nowGeometry(),
+            });
+          }
+          send(index + 1);
+        }, gapMs);
+      };
+      send(1);
+    });
+  }
+
+  /** The centre of a box, kept clear of the very top and the very bottom of the screen. */
+  function centreOf(selector, fromTop) {
+    var el = document.querySelector(selector);
+    var rect = el ? el.getBoundingClientRect() : null;
+    var height = window.innerHeight;
+    var middle = rect ? rect.top + rect.height / 2 : height / 2;
+    var y = typeof fromTop === 'number' ? rect.top + rect.height * fromTop : middle;
+    return Math.max(60, Math.min(height - 60, Math.round(y)));
+  }
+
+  /**
+   * The whole sweep, self-driven, so the device harness has nothing to do but wait for the report.
+   *
+   * The order is the ring's, and each step waits for the pager to settle before the next gesture, so
+   * every sample belongs to the gesture it is under.
+   */
+  function deviceGestureSweep() {
+    if (!pagerState()) {
+      // A build with no pager (the v1.4 payload the same harness is run against) has no gestures to
+      // measure; saying so beats reporting zeroes as if they were readings.
+      return Promise.resolve({ unsupported: 'this build has no pager' });
+    }
+    var width = window.innerWidth;
+    var height = window.innerHeight;
+    var out = {
+      device: { width: width, height: height, devicePixelRatio: window.devicePixelRatio },
+      input: 'TouchEvent dispatched in the page (see the note above fingerDrag)',
+      inputSupport: inputSupport(),
+      steps: {},
+    };
+    /*
+     * "Settled" has to mean *at rest on a pane*, not "some frames have passed".
+     *
+     * The pager's own `settled` goes true the moment a gesture ends, and its snap animation then
+     * runs for up to 340 ms — so a reading taken three frames later measures the animation, not the
+     * screen. The first device run did exactly that: it caught the opening drag mid-flight at
+     * offset 1.09 and every reading after it inherited the moving pager. The offset being an
+     * integer is what a pane at rest looks like from outside.
+     */
+    var settle = function () {
+      return waitFor(
+        "(function(){var p=window.__navilite.pager();return Boolean(p)&&p.settled===true&&Math.abs(p.offset-Math.round(p.offset))<0.01;})()",
+        'the pager to come to rest on a pane',
+        5000,
+      ).then(function () {
+        return nextFrames(2);
+      });
+    };
+
+    /* 1. The axis lock on the playlist: 200 px across, 240 px up. Mostly vertical. */
+    return prepareScroll()
+      .then(function (before) {
+        var pagerBefore = pagerState();
+        out.steps.diagonalOnList = { scrollTopBefore: round2(before.scrollTop), pagerBefore: pagerBefore };
+        return fingerDrag({ from: { x: 300, y: 600 }, to: { x: 100, y: 360 }, steps: 4, gapMs: 20 });
+      })
+      .then(function (drag) {
+        return settle().then(function () {
+          var state = scrollState();
+          out.steps.diagonalOnList.drag = drag;
+          out.steps.diagonalOnList.scrollTopAfter = round2(state.scrollTop);
+          out.steps.diagonalOnList.pagerAfter = pagerState();
+          out.steps.diagonalOnList.listTranslate = translateXOf(scrollSurfaces().scroller);
+        });
+      })
+      /* 2. Onto the now screen, on the spectrum pane, through the app's own tap. */
+      .then(function () {
+        return openNowFromList();
+      })
+      .then(function () {
+        /* 3. Spectrum -> lyrics: does the pane follow the finger, and do the two tile? */
+        var travelled = 0.45 * width;
+        var y = centreOf('.now-page-spectrum');
+        return fingerDrag({ from: { x: Math.round(width * 0.84), y: y }, to: { x: Math.round(width * 0.84 - travelled), y: y }, steps: 5, gapMs: 24 }).then(function (drag) {
+          out.steps.follow = { y: y, travelled: Math.round(travelled), drag: drag };
+          var samples = drag.samples || [];
+          var expected = samples.map(function (sample) {
+            return 1 + (Math.round(width * 0.84) - sample.x) / width;
+          });
+          out.steps.follow.expected = expected;
+          out.steps.follow.offsetErrorPx = samples.reduce(function (worst, sample, index) {
+            return Math.max(worst, Math.abs((sample.pager ? sample.pager.offset : 0) - expected[index]) * width);
+          }, 0);
+          out.steps.follow.stripErrorPx = samples.reduce(function (worst, sample, index) {
+            var stripX = translateXOf(sample.geometry.pages);
+            return Math.max(worst, Math.abs(stripX + (expected[index] - 1) * width));
+          }, 0);
+          out.steps.follow.tilingWorstPx = samples.reduce(function (worst, sample) {
+            var g = sample.geometry;
+            return Math.max(
+              worst,
+              Math.abs(g.spectrum.right - g.lyricsPane.left),
+              Math.abs(g.now.left),
+              Math.abs(g.now.right - width),
+            );
+          }, 0);
+          out.steps.follow.monotonic = samples.every(function (sample, index) {
+            return index === 0 || (sample.pager ? sample.pager.offset : 0) > (samples[index - 1].pager ? samples[index - 1].pager.offset : 0);
+          });
+          return settle().then(function () {
+            var rest = nowGeometry();
+            out.steps.follow.rest = { position: rest.pager ? rest.pager.position : null, route: rest.route, strip: translateXOf(rest.pages) };
+          });
+        });
+      })
+      /* 4. A short drag moves the pane under the finger and snaps back to the one it started on.
+       *
+       *    Deliberately slow, and slower than the Chrome harness has to be. That harness drives the
+       *    input pipeline, which costs a round trip per move, so its "fast" gesture is already slow;
+       *    this one drives the listeners at a real finger's cadence, where the same 0.12 panes at
+       *    30 ms would be a flick — and a flick that commits is correct behaviour, not a failure. So
+       *    the gesture is slowed until distance is all there is, and the check is about distance. */
+      .then(function () {
+        var y = centreOf('.now-page-lyrics');
+        return fingerDrag({ from: { x: Math.round(width * 0.84), y: y }, to: { x: Math.round(width * 0.84 - 0.12 * width), y: y }, steps: 6, gapMs: 60 }).then(function (drag) {
+          return settle().then(function () {
+            var rest = nowGeometry();
+            out.steps.shortDrag = {
+              offsets: drag.samples.map(function (sample) {
+                return sample.pager ? sample.pager.offset : null;
+              }),
+              ms: drag.ms,
+              rest: { position: rest.pager ? rest.pager.position : null, route: rest.route },
+            };
+          });
+        });
+      })
+      /* 5. The same shape, over the lyrics: a scroll must not turn the page here either. */
+      .then(function () {
+        var y = centreOf('.now-page-lyrics');
+        var before = pagerState();
+        return fingerDrag({ from: { x: 300, y: Math.min(height - 60, y + 120) }, to: { x: 100, y: Math.max(60, y - 120) }, steps: 4, gapMs: 20 }).then(function (drag) {
+          return settle().then(function () {
+            out.steps.diagonalOnLyrics = {
+              drag: drag,
+              paneFound: Boolean(document.querySelector('.now-page-lyrics')),
+              pagerBefore: before,
+              pagerAfter: pagerState(),
+            };
+          });
+        });
+      })
+      /* 6. A flick commits on velocity, not on distance. */
+      .then(function () {
+        return flickPager({ selector: '.now-page-lyrics', fromX: Math.round(width * 0.84), toX: Math.round(width * 0.84 - 0.2 * width), steps: 3, gapMs: 8 }).then(function (flick) {
+          return delay(600).then(function () {
+            var rest = nowGeometry();
+            out.steps.flick = { flick: flick, rest: { position: rest.pager ? rest.pager.position : null, route: rest.route } };
+          });
+        });
+      })
+      /* 7. The ring: left from the playlist is the spectrum, left again the lyrics, and right from
+       *    the lyrics the playlist again — every transition the owner named. */
+      .then(function () {
+        var ring = [];
+        var step = function (from, to) {
+          return fingerDrag({ from: { x: from, y: 300 }, to: { x: to, y: 300 }, steps: 5, gapMs: 20 })
+            .then(settle)
+            .then(function (drag) {
+              var geometry = nowGeometry();
+              ring.push({
+                from: from,
+                to: to,
+                position: geometry.pager ? geometry.pager.position : null,
+                route: geometry.route,
+                tilingWorstPx: (drag.samples || []).reduce(function (worst, sample) {
+                  return Math.max(worst, Math.abs(sample.geometry.list.right - sample.geometry.now.left));
+                }, 0),
+                listTranslate: (drag.samples || []).map(function (sample) {
+                  return translateXOf(sample.geometry.list);
+                }),
+                offsets: (drag.samples || []).map(function (sample) {
+                  return sample.pager ? sample.pager.offset : null;
+                }),
+                unavailable: drag.unavailable || null,
+              });
+              return null;
+            });
+        };
+        return step(340, 40)
+          .then(function () {
+            return step(340, 40);
+          })
+          .then(function () {
+            return step(340, 40);
+          })
+          .then(function () {
+            return step(40, 340);
+          })
+          .then(function () {
+            out.steps.ring = ring;
+          });
+      })
+      .then(function () {
+        return { out: out, final: nowGeometry() };
+      })
+      .then(function (result) {
+        result.out.finalRoute = result.final.route;
+        return result.out;
+      });
+  }
+
   window.__naviliteLayoutAudit = {
     DEVICE: DEVICE,
     environment: environment,
@@ -1580,5 +2069,11 @@
     audioState: audioState,
     pauseAudio: pauseAudio,
     flickPager: flickPager,
+    // v1.5 follow-up: the settings overflow, taken apart in the shipping engine, and the gestures.
+    surfaceSideScroll: surfaceSideScroll,
+    settingsOverflowProbe: settingsOverflowProbe,
+    fingerDrag: fingerDrag,
+    inputSupport: inputSupport,
+    deviceGestureSweep: deviceGestureSweep,
   };
 })();

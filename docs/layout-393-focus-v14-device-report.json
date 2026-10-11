@@ -1,0 +1,109 @@
+{
+  "device": {
+    "name": "iPhone 15 Pro",
+    "width": 393,
+    "height": 852,
+    "deviceScaleFactor": 3,
+    "safeAreaTop": 59,
+    "safeAreaBottom": 34
+  },
+  "environment": {
+    "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1",
+    "innerWidth": 393,
+    "innerHeight": 695,
+    "outerWidth": 393,
+    "outerHeight": 852,
+    "screenWidth": 393,
+    "screenHeight": 852,
+    "devicePixelRatio": 3,
+    "visualViewportWidth": 393,
+    "visualViewportScale": 1,
+    "standalone": false,
+    "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "safeAreaInsets": {
+      "top": "0px",
+      "right": "0px",
+      "bottom": "0px",
+      "left": "0px"
+    },
+    "documentClientWidth": 393,
+    "documentScrollWidth": 393,
+    "bodyScrollWidth": 393
+  },
+  "states": {},
+  "focusOnly": true,
+  "settings": {
+    "selector": "select.field",
+    "value": null,
+    "fontSize": "15px",
+    "before": {
+      "innerWidth": 393,
+      "innerHeight": 695,
+      "vvWidth": 393,
+      "vvHeight": 695,
+      "vvScale": 1,
+      "docClientWidth": 393,
+      "docScrollWidth": 393
+    },
+    "after": {
+      "innerWidth": 393,
+      "innerHeight": 695,
+      "vvWidth": 393,
+      "vvHeight": 695,
+      "vvScale": 1,
+      "docClientWidth": 393,
+      "docScrollWidth": 393
+    },
+    "zoom": 1,
+    "surfaceBeforeFocus": {
+      "surface": "div#app > div.view-scroll:nth-of-type(1)",
+      "surfaceClientWidth": 393,
+      "surfaceScrollWidth": 657,
+      "surfaceOverflow": 264,
+      "documentOverflow": 0
+    },
+    "surfaceWhileFocused": {
+      "surface": "div#app > div.view-scroll:nth-of-type(1)",
+      "surfaceClientWidth": 393,
+      "surfaceScrollWidth": 657,
+      "surfaceOverflow": 264,
+      "documentOverflow": 0
+    },
+    "control": {
+      "tag": "SELECT",
+      "className": "field inline",
+      "clientWidth": 363,
+      "scrollWidth": 642,
+      "rectWidth": 365
+    },
+    "widestWhileFocused": {
+      "overflow": 279,
+      "selector": "main#view > div.detail-text.settings > select.field.inline",
+      "clientWidth": 363,
+      "scrollWidth": 642,
+      "rectWidth": 365
+    },
+    "overflowWhileFocused": 264,
+    "offendersWhileFocused": []
+  },
+  "lyrics": {
+    "lines": 36,
+    "visibleLines": 14,
+    "lineHeight": 36,
+    "fontSize": "13px",
+    "panelHeight": 392,
+    "panelTop": 60,
+    "hostTop": 60,
+    "firstLineTop": 60,
+    "firstLineBottom": 96,
+    "firstLineInFade": true,
+    "firstLineFullyInside": true,
+    "coverVisible": false,
+    "coverHeight": 0
+  },
+  "probe": {
+    "source": "page",
+    "href": "http://127.0.0.1:4594/#/now",
+    "at": "2026-10-11T05:01:45.113Z"
+  }
+}

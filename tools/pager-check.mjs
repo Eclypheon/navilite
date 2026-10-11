@@ -41,10 +41,34 @@
  *   node tools/mock-subsonic.mjs --port 4651 --stress --dist dist
  *   node tools/pager-check.mjs --url http://127.0.0.1:4651 [--json report.json]
  *
+ * ## The device driver (v1.5 follow-up)
+ *
+ * Every check above goes through `Input.dispatchTouchEvent`, which is CDP, which is Chrome — so
+ * whether the axis lock survives *Safari's* own gesture arbitration on a real finger was reasoned
+ * about rather than measured. There is no CDP against a simulator's Safari, and no WebDriver for it
+ * either, so the second driver runs the same sweep as `TouchEvent`s dispatched **inside** the page
+ * (`tools/device-probe.mjs --scenario gesture`, which builds its own probe copy and opens it in the
+ * simulator's Safari) and judges the readings with `judgeDeviceGestures` — the same ten questions,
+ * the same labels:
+ *
+ *   node tools/pager-check.mjs --device <simulator-udid> [--dist dist] [--wait 240] [--json report.json]
+ *
+ * What that path can and cannot show is stated where it is implemented (the note above `fingerDrag`
+ * in tools/layout-probe-browser.js): it measures the app's own listeners in the shipping engine,
+ * and it cannot reproduce a *default action*, so the native scroll a vertical drag produces and
+ * Safari's edge-swipe are still Chrome's and the owner's thumb's to confirm.
+ *
  * Exit code is non-zero when a check fails.
  */
-import { writeFileSync } from 'node:fs';
-import { withChromePage, navigate, evaluate } from './layout-audit.mjs';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { withChromePage, navigate, evaluate, judgeDeviceGestures } from './layout-audit.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = join(here, '..');
 
 const IN_PAGE = 'window.__naviliteLayoutAudit.';
 const GEOMETRY = `${IN_PAGE}nowGeometry()`;
@@ -132,6 +156,58 @@ async function main() {
     if (detail) say(`      ${detail}`);
     return ok;
   };
+
+  /*
+   * The device driver. Not a second implementation of the checks: the sweep runs in the simulator's
+   * Safari (device-probe builds the probe copy and opens it), and the same `judgeDeviceGestures`
+   * that prints that run's verdict is called here, so both drivers report the same behaviours under
+   * the same labels — and this one's exit code is pager-check's.
+   */
+  const device = argv.get('device');
+  if (device) {
+    const gestureJson = join(tmpdir(), `navilite-gesture-device-${Date.now()}.json`);
+    const child = spawnSync(
+      process.execPath,
+      [
+        join(here, 'device-probe.mjs'),
+        '--device', String(device),
+        '--dist', String(argv.get('dist') ?? join(root, 'dist')),
+        '--scenario', 'gesture',
+        '--port', String(argv.get('port') ?? 4597),
+        '--wait', String(argv.get('wait') ?? 240),
+        '--json', gestureJson,
+      ],
+      { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
+    );
+    if (child.stdout) say(child.stdout.trimEnd());
+    if (child.stderr) say(child.stderr.trimEnd());
+    let sweep = null;
+    try {
+      sweep = JSON.parse(readFileSync(gestureJson, 'utf8')).gestures;
+    } catch {
+      sweep = null;
+    }
+    if (!sweep) {
+      check('the device run produced a gesture sweep', false, `device-probe exited ${child.status}; its output is above`);
+    } else {
+      readings.device = sweep;
+      say('');
+      say(
+        `judged from the device's own readings — engine ${sweep.device?.width ?? '?'}x${sweep.device?.height ?? '?'} CSS px, ` +
+          `input ${sweep.inputSupport ? `Touch ${sweep.inputSupport.Touch}, TouchEvent ${sweep.inputSupport.TouchEvent}` : 'unknown'}:`,
+      );
+      for (const judged of judgeDeviceGestures(sweep)) check(judged.label, judged.ok, judged.detail);
+    }
+    say(failures.length === 0 ? 'RESULT: the pager pulls its panes, and nothing else moved — on the device too.' : `RESULT: ${failures.length} pager check(s) failed.`);
+    for (const failure of failures) say(`  - ${failure}`);
+    process.stdout.write(`${lines.join('\n')}\n`);
+    if (jsonPath) {
+      writeFileSync(jsonPath, JSON.stringify(readings, null, 2));
+      process.stdout.write(`\nraw measurements: ${jsonPath}\n`);
+    }
+    process.exitCode = failures.length === 0 ? 0 : 1;
+    return;
+  }
 
   try {
     await withChromePage(

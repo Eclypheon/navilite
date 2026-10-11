@@ -1032,7 +1032,8 @@ Found while doing this, **not fixed**: with the box focused, the settings *scrol
 carries `301 px` of horizontally scrollable content in WebKit (surface `393 -> 694 px`) while the
 page stays 393 px and no element's rectangle leaves the screen. The probe extension that names the
 element inside the scroller (`widestWhileFocused`) landed after this run, so the culprit is
-unidentified rather than exonerated. Follow-up card: `t_16a5dbe5`.
+unidentified rather than exonerated. Follow-up card: `t_16a5dbe5`. **It was named, measured and
+fixed in §14.1** — it is the playback dropdown's own content, and the fix is one line of CSS.
 
 ### 13.2 The first lyric line
 
@@ -1102,4 +1103,128 @@ The lesson to carry: for a card of this shape the check budget is about **ten mi
 harnesses that already exist** — `pager-check.mjs` already covered the axis lock and the swipe map,
 and its one run is what §13.3 quotes. New scaffolding is only worth it when an existing harness
 *cannot* express the risk.
+
+## 14. v1.5 follow-up — the 301 px named, and the gestures on a device (2026-10-11)
+
+The v1.5 card left three things: a measured 301 px with no element named, gestures that had never
+run in the shipping engine, and the v1.4 half of the WebKit pair dropped. All three are below, each
+with the command that produced it.
+
+### 14.1 The settings screen's 301 px — the element, and the fix
+
+The culprit is the playback dropdown itself:
+
+| | measured (Safari, iPhone 15 Pro simulator, real WebKit) |
+| --- | --- |
+| `select.field.inline` (the playback preference) | box `363 px`, content `679 px` — **the box fits, the content does not** |
+| its widest option | `669 px` of text — "Web Audio only — always the real spectrum (background playback depends on the platform)" |
+| the app's scroll container `div#app > .view-scroll` | `393 -> 694 px`, i.e. `301 px` of sideways content |
+| what a push actually does | `scrollLeft` reaches **`301 px`** — the settings screen really is draggable sideways |
+
+Mechanism: `select.field` clamps the *box* (`max-width: 100%`) but WebKit does not clip the control's
+*content*, and an unclipped overflow inside the scroll container is scrollable overflow. So the
+screen the owner said he could still drag sideways was draggable, at 301 px, by a `<select>` whose
+text is a sentence long.
+
+`tools/device-probe.mjs --scenario settings-overflow` now answers this by *testing rules on the live
+page in one run* (apply, re-measure, push, remove) instead of asking anyone to guess what WebKit
+does. Measured candidates, all in the same run:
+
+| rule applied to the live page | surface | push | verdict |
+| --- | --- | --- | --- |
+| **baseline, the shipping CSS before the fix** | `301 px` | `301 px` | the defect |
+| `select.field { overflow: hidden }` | `0 px` | `0 px` | **the fix** (`src/styles.css`) |
+| `select.field { overflow-x: hidden }` | `0 px` | `0 px` | also works; the one-directional form of the same rule |
+| `select.field { contain: inline-size }` | `301 px` | `301 px` | no effect |
+| `select.field { appearance: none }` | `301 px` | `301 px` | no effect — it is not the appearance |
+| `.field.inline { width: 100% }` | `301 px` | `301 px` | no effect — the box was never the problem |
+| `.view-scroll { overflow-x: hidden }` | `301 px` (geometry unchanged) | `301 px` by script | hides it from a finger, leaves the content overflowing. Not used: it fixes the symptom |
+| `select.field { overflow: visible }` (the pre-fix control) | `301 px` | `301 px` | the control, below |
+
+After the fix, the same run reports: surface `393 -> 393 px`, a push moves it **`0 px`**, and the
+pre-fix control in the same run still measures **`301 px`** — so the zero is a measurement of the
+settings screen, not a probe that has gone blind. `RESULT: the settings screen has nothing to drag
+sideways.` (exit 0).
+
+**Chrome cannot see this one.** The same `<select>` in Chrome reports `scrollWidth === clientWidth`
+(`363 px`), the surface stays `393/393`, and a push moves it 0 — measured with a scratch probe
+(`HeadlessChrome/154`, 393 x 852, dpr 3, safe-area insets). That is why the 393 px audit has been
+green throughout while the phone was not, and why the guard for this lives in the device run: the
+command above **fails** (exit 1, printout naming the element) while the surface carries sideways
+content.
+
+### 14.2 The gestures, in the engine that ships
+
+`node tools/pager-check.mjs --device A0DAA171-263B-48EC-99B6-FCA0BCD299EC` — one run, in Safari on
+the iPhone 15 Pro simulator, **9 checks, 0 failed** (`docs/layout-393-gesture-device-report.json`).
+
+There is no CDP against a simulator's Safari and no WebDriver for it either, so the harness drives
+the app's own listeners in the page: `TouchEvent`s dispatched at a finger's cadence
+(`device-probe.mjs --scenario gesture` → `deviceGestureSweep()`), geometry read between moves with
+the finger still down. `pager-check.mjs` judges the same readings with the same labels it uses for
+Chrome (`judgeDeviceGestures`), so the two drivers answer the same questions.
+
+| what was asked | measured on the device |
+| --- | --- |
+| a mostly-vertical drag turns no page | a **200 x 240 px** drag over the playlist: pager `position 0, offset 0`, the list transform **never written**, and `preventDefault` called on **0 of 4** moves — handed back untouched |
+| the same over the lyrics | pane `2 -> 2`, finger travel `0` panes, `0 of 4` moves prevented |
+| the pane follows the finger | offsets `1.089 -> 1.181 -> 1.270 -> 1.361 -> 1.450` (monotonic), worst error vs the finger's own travel **`0.2 px`** |
+| the strip is transformed by that travel | strip x vs expected: worst **`0.0 px`**; spectrum.right vs lyrics.left and the window edges: worst **`0.00 px`** |
+| the drag commits, route follows | rest pane `2` on `#/now/lyrics`, strip `-393 px` (one whole pane) |
+| a short drag snaps back | a slow `0.12` panes over `375 ms` moved the pane and returned to pane `2` |
+| a flick commits on velocity | the same `0.2` panes in `29 ms`, never past the 0.32 commit point, turned the page to pane `0` |
+| the swipe map is the ring | `340→40`: pane `1` on `#/now` → pane `2` on `#/now/lyrics` → pane `0` on `#/playlist/pl-stress-long`; `40→340` right from the playlist: pane `2` on `#/now/lyrics` |
+| the two screens tile while trading places | list.right vs now.left over all four ring drags: worst **`0.00 px`** |
+
+What this path cannot show, stated plainly: the events go straight to the listeners, so an untrusted
+gesture has **no default action**. The native scroll a real vertical drag produces is therefore not
+reproduced here (Chrome's `Input.dispatchTouchEvent` run in §13.3 is where that half is measured),
+and neither is Safari's own edge-swipe. `defaultPrevented: false` on every vertical move is the part
+of the axis-lock claim this path *can* prove: the gesture is handed back untouched.
+
+One measured difference between the two drivers, worth knowing before comparing numbers: the in-page
+path runs at a finger's real cadence, so the shallow `0.12`-pane drag that Chrome's round-trip-bound
+gesture releases slowly is here fast enough to commit on velocity. It is slowed down in the sweep
+(`steps: 6, gapMs: 60`) so the check is about distance, which is what that check is for.
+
+### 14.3 The v1.4 half of the WebKit pair, re-run (RED), and v1.5 beside it (GREEN)
+
+`--scenario focus` against the v1.4 dist (`670502c`, built separately) and against this build:
+
+| reading | v1.4 | v1.5 + this fix |
+| --- | --- | --- |
+| the playback dropdown's focus size | `15px` | `16px` |
+| visual viewport while focused | `393x695` scale `1` -> scale `1`, **zoom x1** | the same, **zoom x1** |
+| the settings scroll surface | `393 -> 657 px` (**264 px**) | `393 -> 393 px` (**0 px**) |
+| its widest content | `select.field.inline`, `+279 px` | `select.field.inline`, `0 px` of surface overflow |
+| the first lyric line | **`+0.0 px`** — in the faded band | **`+18.0 px`** — past it |
+
+Two honest notes. First, the v1.4 run is RED for the reasons the v1.5 card fixed (the first lyric
+line) and for the reason this card fixed (the surface), which is what a before/after pair is for.
+Second, **the focus-zoom itself did not reproduce in this runtime**: the simulator now runs iOS 26.1,
+where focusing a 15 px control left `visualViewport.scale` at 1 — so what is reproduced here is the
+*size* (`15px`, the documented cause) and not the zoom the v1.5 card measured at x1.07 on iOS 18.7.
+The 16 px change is unchanged by that; the zoom ratio is not re-confirmed on this runtime.
+
+### 14.4 Still unverified
+
+- **Safari's own edge-swipe on a real finger.** The in-page path cannot produce a default action, so
+  whether a horizontal drag that starts at the very left edge is taken by the browser's back gesture
+  before the pager sees it is still unmeasured. (§14.2 measures the app's half of the axis lock.)
+- **The native scroll a vertical drag produces** — Chrome-measured (§13.3), not device-measured.
+- **Landscape and the iPad**, as before.
+
+### 14.5 Two harness bugs found on the way
+
+Both in `tools/device-probe.mjs`, and both of the kind that make a measurement look absent rather
+than wrong:
+
+- The mock stores each post as `{ receivedAt, report }`; the driver read the wrapper as if it were
+  the report. Every device run ended in **"no report arrived"** *after* the page had posted a full
+  report — which is why §13.1's 301 px came with no element named: the field that names it was in a
+  report nothing printed.
+- Once that was fixed, the driver still read only the *newest* entry each time the count moved. The
+  page posts its report and its next progress beat in the same millisecond, so the driver read the
+  beat, stepped `seen` past the report, and waited out its whole timeout. It now walks every entry
+  posted since the last look, in order.
 

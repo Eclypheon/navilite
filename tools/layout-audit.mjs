@@ -335,6 +335,259 @@ export function formatScrollContainment(scroll) {
   return lines;
 }
 
+/* ------------------------------ the device driver's readings (v1.5 follow-up) */
+
+/**
+ * The owner's two v1.5 reports as they came off the device: the settings screen's focus-zoom and
+ * the first lyric line inside the panel's faded band.
+ *
+ * Kept apart from `formatReport` because a `--scenario focus` report carries two readings and no
+ * route walk, and because both of these are *failures* when they come back wrong: a zoom of 1.07 is
+ * a pannable settings screen however clean its width is, and a first line inside the fade is the
+ * clipping the owner photographed.
+ */
+export function formatFocusSettings(report) {
+  const lines = [];
+  const failures = [];
+  const settings = report.settings;
+  const lyrics = report.lyrics;
+  if (settings) {
+    lines.push('The settings screen, focused the way a finger focuses it:');
+    lines.push(`  ${settings.selector} at ${settings.fontSize} (control box ${settings.control.clientWidth} px, content ${settings.control.scrollWidth} px)`);
+    lines.push(
+      `  visual viewport ${settings.before.vvWidth}x${settings.before.vvHeight} (scale ${settings.before.vvScale}) -> ` +
+        `${settings.after.vvWidth}x${settings.after.vvHeight} (scale ${settings.after.vvScale}) — zoom x${settings.zoom}`,
+    );
+    if (settings.zoom > 1.001) {
+      failures.push(`${settings.selector} zooms the visual viewport x${settings.zoom} when it takes focus`);
+    }
+    const surface = settings.surfaceWhileFocused;
+    if (surface) {
+      lines.push(
+        `  scroll surface ${surface.surface}: ${surface.surfaceClientWidth} -> ${surface.surfaceScrollWidth} px ` +
+          `(${surface.surfaceOverflow} px of sideways content), document ${surface.documentOverflow} px`,
+      );
+      if (surface.surfaceOverflow > 0) {
+        failures.push(`the settings scroll surface carries ${surface.surfaceOverflow} px of sideways content`);
+      }
+    }
+    const widest = settings.widestWhileFocused;
+    if (widest) {
+      lines.push(
+        `  widest inside the scroller: ${widest.selector} — box ${widest.clientWidth} px, content ${widest.scrollWidth} px (+${widest.overflow} px)`,
+      );
+    }
+  }
+  if (lyrics) {
+    lines.push('The lyrics panel:');
+    lines.push(
+      `  ${lyrics.visibleLines} of ${lyrics.lines} lines fit whole in ${Math.round(lyrics.panelHeight)} px; ` +
+        `first line ${(lyrics.firstLineTop - lyrics.panelTop).toFixed(1)} px below the panel top`,
+    );
+    if (lyrics.firstLineFullyInside !== true || lyrics.firstLineInFade === true) {
+      failures.push('the first lyric line is not drawn whole and clear of the panel\u2019s faded band');
+    }
+  }
+  lines.push('');
+  lines.push(failures.length === 0 ? 'RESULT: both of the owner\u2019s reports are clean in real WebKit.' : `RESULT: ${failures.length} reading(s) still wrong in real WebKit.`);
+  for (const failure of failures) lines.push(`  - ${failure}`);
+  return { text: lines.join('\n'), failures: failures.length };
+}
+
+/**
+ * The settings screen's 301 px, as a table of measured candidates.
+ *
+ * The *shipping* rule set is the baseline line: every candidate below it is a measurement of what
+ * one change would do, taken in the same engine in the same run. The verdict is about the baseline,
+ * because that is what the owner is running — a candidate is how the fix is chosen, not evidence
+ * that it was applied.
+ */
+export function formatSettingsOverflow(probe) {
+  const lines = [];
+  const failures = [];
+  if (!probe) return { text: 'the settings overflow probe posted nothing', failures: 1 };
+  lines.push(`The settings screen's sideways content — select.field at ${probe.fontSize}`);
+  lines.push(
+    `  the control: box ${probe.select.clientWidth} px, content ${probe.select.scrollWidth} px, rect ${probe.select.rectWidth} px (+${probe.select.overflow} px of content)`,
+  );
+  for (const option of probe.options ?? []) {
+    lines.push(`  option ${option.index}${option.selected ? ' (selected)' : ''}: ${Math.round(option.width)} px of text — "${option.text}"`);
+  }
+  lines.push('');
+  lines.push('  what each rule would do, measured on the live page (surface = the app\u2019s scroll container):');
+  lines.push('    rule                                                                   surface  side-scroll   widest inside');
+  for (const candidate of probe.candidates ?? []) {
+    const label = String(candidate.label).padEnd(68).slice(0, 68);
+    const over = `${candidate.surfaceOverflow} px`.padStart(7);
+    const scroll = `${candidate.sideScroll ? candidate.sideScroll.sideScroll : 0} px`.padStart(11);
+    const widest = candidate.widest ? candidate.widest.replace(/^[^ ]+ > /, '') : '—';
+    lines.push(`    ${label} ${over} ${scroll}   ${widest}`);
+  }
+  const baseline = probe.baseline;
+  lines.push('');
+  if (baseline) {
+    const style = baseline.sideScroll ?? {};
+    lines.push(
+      `  the shipping rule set: surface ${style.clientWidth} -> ${style.scrollWidth} px, overflow-x ${style.overflowX}, ` +
+        `a push moves it ${style.sideScroll} px`,
+    );
+    if (baseline.surfaceOverflow > 0) {
+      failures.push(`the settings screen still carries ${baseline.surfaceOverflow} px of sideways content`);
+    }
+  }
+  /*
+   * The control, and it is not decoration: with the clip removed the same reading has to come back
+   * at 301 px. A probe that reports 0 for every rule is not measuring the settings screen any more —
+   * the element moved, the route changed, the build is not the one the harness thinks it is — and
+   * without this line that would read as a pass.
+   */
+  const control = (probe.candidates ?? []).find((candidate) => candidate.control === true);
+  if (control) {
+    lines.push(`  the control (pre-fix rule, same run, same element): ${control.surfaceOverflow} px`);
+    if (!(control.surfaceOverflow > 0)) {
+      failures.push('the pre-fix control measured no overflow at all — this probe is not measuring the settings screen');
+    }
+  } else {
+    failures.push('the probe ran no pre-fix control, so its zero readings prove nothing');
+  }
+  if (probe.restoredMatchesBaseline !== true) {
+    failures.push('the probe did not put the page back after its candidates — the readings above cannot be trusted');
+  }
+  lines.push('');
+  lines.push(failures.length === 0 ? 'RESULT: the settings screen has nothing to drag sideways.' : `RESULT: ${failures.length} reading(s) still wrong.`);
+  for (const failure of failures) lines.push(`  - ${failure}`);
+  return { text: lines.join('\n'), failures: failures.length };
+}
+
+/**
+ * The v1.5 gestures, judged from a device run.
+ *
+ * `tools/pager-check.mjs` asks these questions of Chrome through `Input.dispatchTouchEvent`; this is
+ * the same list asked of the readings a device run posts, so both drivers print the same labels for
+ * the same two behaviours: *a mostly-vertical drag turns no page*, and *the pane follows the finger
+ * with the swipe map right*.
+ */
+export function judgeDeviceGestures(sweep) {
+  const checks = [];
+  if (!sweep) return [{ label: 'the device gesture sweep posted readings', ok: false, detail: 'nothing arrived' }];
+  if (sweep.unsupported) {
+    return [{ label: 'the build under test has a pager to measure', ok: false, detail: sweep.unsupported }];
+  }
+  const steps = sweep.steps ?? {};
+  const list = steps.diagonalOnList;
+  if (list) {
+    const rest = list.pagerAfter ?? {};
+    const prevented = (list.drag?.prevented ?? []).some(Boolean);
+    checks.push({
+      label: 'a mostly-vertical drag over the playlist turns no page',
+      ok: rest.position === 0 && Math.abs(rest.offset - rest.position) < 0.01 && (list.listTranslate ?? 0) === 0 && !prevented,
+      detail:
+        `a ${Math.abs(list.drag.from.x - list.drag.to.x)} x ${Math.abs(list.drag.from.y - list.drag.to.y)} px drag on ${list.drag.target}: ` +
+        `pager pane ${rest.position} offset ${rest.offset}, the list transform ${list.listTranslate === 0 ? 'never written' : list.listTranslate}, ` +
+        `preventDefault called ${prevented ? 'yes' : 'no'} (a scroll is handed back untouched)`,
+    });
+  }
+  const onLyrics = steps.diagonalOnLyrics;
+  if (onLyrics) {
+    const before = onLyrics.pagerBefore ?? {};
+    const after = onLyrics.pagerAfter ?? {};
+    checks.push({
+      label: 'and the same drag over the lyrics turns no page either',
+      ok: before.position === 2 && after.position === 2 && Math.abs(after.offset - after.position) < 0.01,
+      detail:
+        `started on pane ${before.position} (the lyrics pane ${onLyrics.paneFound ? 'on screen' : 'MISSING'}), ended on pane ${after.position} at offset ${after.offset} — ` +
+        `a finger's travel of 0 panes, ` +
+        `over ${onLyrics.drag.target} (${onLyrics.drag.prevented.filter(Boolean).length} of ${onLyrics.drag.prevented.length} moves prevented)`,
+    });
+  }
+  const follow = steps.follow;
+  const width = sweep.device?.width ?? 393;
+  if (follow) {
+    checks.push({
+      label: 'the panes follow the finger: the offset is the finger\u2019s own travel, move by move',
+      ok: follow.offsetErrorPx < 2 && follow.monotonic === true,
+      detail: `worst error ${follow.offsetErrorPx.toFixed(1)} px over ${follow.drag.samples.length} samples, monotonic ${follow.monotonic} — offsets ${follow.drag.samples.map((sample) => sample.pager?.offset).join(' \u2192 ')}`,
+    });
+    checks.push({
+      label: 'the strip is transformed by exactly that travel, and the panes still tile edge to edge',
+      ok: follow.stripErrorPx < 2 && follow.tilingWorstPx < 1,
+      detail: `strip x vs expected: worst ${follow.stripErrorPx.toFixed(1)} px · spectrum.right vs lyrics.left, the window edges: worst ${follow.tilingWorstPx.toFixed(2)} px`,
+    });
+    checks.push({
+      label: 'the drag is committed and lands on the lyrics, with the route following the pane',
+      // At rest on the lyrics the strip is one whole pane to the left (the window shows its second
+      // child), so "the strip is at rest on the pane" is -width, not 0.
+      ok: follow.rest?.position === 2 && follow.rest?.route === '#/now/lyrics' && Math.abs(Math.abs(follow.rest?.strip ?? 0) - width) < 1,
+      detail: `rest pane ${follow.rest?.position} on ${follow.rest?.route}, strip ${follow.rest?.strip} px (one pane is ${width} px)`,
+    });
+  }
+  const snap = steps.shortDrag;
+  if (snap) {
+    checks.push({
+      label: 'a short drag moves the pane under the finger and then snaps back to the same pane',
+      ok: (snap.offsets ?? []).some((offset) => offset > 2.05) && snap.rest?.position === 2,
+      detail: `offsets ${(snap.offsets ?? []).join(' \u2192 ')} over ${snap.ms} ms (a slow 0.12 panes, so the commit point is distance only) \u2192 rest pane ${snap.rest?.position}`,
+    });
+  }
+  const flick = steps.flick;
+  if (flick) {
+    checks.push({
+      label: 'a flick commits on velocity: the same shallow travel, released fast, turns the page',
+      ok:
+        flick.flick !== null &&
+        (flick.flick?.offsets ?? []).length > 0 &&
+        Math.max(...(flick.flick?.offsets ?? [0])) < 2.32 &&
+        flick.rest?.position === 0,
+      detail:
+        flick.flick === null
+          ? 'the page could not drive a flick'
+          : `offsets under the finger ${flick.flick.offsets.map((value) => value.toFixed(3)).join(' \u2192 ')} over ${flick.flick.ms} ms, never past the 0.32 commit point \u2192 rest pane ${flick.rest?.position} on ${flick.rest?.route}`,
+    });
+  }
+  const ring = steps.ring ?? [];
+  if (ring.length === 4) {
+    const [toSpectrum, toLyrics, toPlaylist, backToLyrics] = ring;
+    checks.push({
+      label: 'the swipe map is the ring: playlist \u2192 spectrum \u2192 lyrics \u2192 playlist, and right again is the lyrics',
+      ok:
+        toSpectrum.position === 1 &&
+        String(toSpectrum.route).startsWith('#/now') &&
+        toLyrics.position === 2 &&
+        toLyrics.route === '#/now/lyrics' &&
+        toPlaylist.position === 0 &&
+        String(toPlaylist.route).startsWith('#/playlist') &&
+        backToLyrics.position === 2 &&
+        backToLyrics.route === '#/now/lyrics',
+      detail: ring.map((step) => `${step.from}\u2192${step.to}: pane ${step.position} on ${step.route}`).join(' · '),
+    });
+    checks.push({
+      label: 'the two screens tile while they trade places: their edges meet exactly',
+      ok: ring.every((step) => step.tilingWorstPx < 1),
+      detail: `list.right vs now.left over the four ring drags: worst ${Math.max(...ring.map((step) => step.tilingWorstPx)).toFixed(2)} px`,
+    });
+  }
+  return checks;
+}
+
+/** The device gesture run, as a report whose failures are the failed checks. */
+export function formatDeviceGestures(sweep) {
+  const lines = [];
+  if (sweep?.device) {
+    lines.push(`The v1.5 gestures, in this engine — ${sweep.device.width}x${sweep.device.height} CSS px, dpr ${sweep.device.devicePixelRatio}`);
+    lines.push(`  input: ${sweep.input}`);
+  }
+  const checks = judgeDeviceGestures(sweep);
+  let failures = 0;
+  for (const check of checks) {
+    if (!check.ok) failures += 1;
+    lines.push(`${check.ok ? 'ok  ' : 'FAIL'}  ${check.label}`);
+    if (check.detail) lines.push(`      ${check.detail}`);
+  }
+  lines.push('');
+  lines.push(failures === 0 ? 'RESULT: the gestures do what Chrome says they do, in this engine too.' : `RESULT: ${failures} gesture check(s) failed.`);
+  return { text: lines.join('\n'), failures };
+}
+
 /* ----------------------------------------------------------------------- CLI */
 
 /**

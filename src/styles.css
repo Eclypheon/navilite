@@ -485,10 +485,22 @@ textarea.field {
  * preference options are a sentence long. Left alone it measured 671 CSS px inside a 360 px
  * screen — the whole document then had a sideways scroll on the settings screen, which is
  * exactly what the owner reported. Constrain it and let the browser clip the option text.
+ *
+ * v1.5 follow-up: constraining the *box* was only half of it. In WebKit the control's **content**
+ * still overflows it — measured in Safari on the iPhone 15 Pro simulator, `.field.inline` is a
+ * 365 px box whose content is 679 px, the widest option being 669 px of text — and an unclipped
+ * overflow inside the app's scroll container is scrollable overflow: it took `.view-scroll` from
+ * 393 to 694 px and a push moved it the whole 301 px, i.e. the settings screen was still
+ * draggable sideways with the dropdown focused, which is the owner's original complaint.
+ * Chrome never showed it (the same select reports `scrollWidth === clientWidth`, and Chrome's
+ * audit at 393 px has been clean throughout), so this is a WebKit-specific reading and it is held
+ * by `tools/device-probe.mjs --scenario settings-overflow`, which fails while it is non-zero.
+ * Clipping the control is the whole fix: the container goes back to 393 px and a push moves it 0.
  */
 select.field {
   width: 100%;
   max-width: 100%;
+  overflow: hidden;
   text-overflow: ellipsis;
 }
 
