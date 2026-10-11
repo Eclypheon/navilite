@@ -43,7 +43,7 @@
  * says so in one line and draws the album-art theme rather than animating a lie.
  */
 import { platformInfo, type OsName } from '../platform.ts';
-import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativeSpectrumFrame, type NativeTrackInfo } from './native.ts';
+import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativePlaybackFacts, type NativeSpectrumFrame, type NativeTrackInfo } from './native.ts';
 
 export type PlaybackBackend = 'web' | 'native';
 
@@ -143,6 +143,27 @@ export interface EngineStatus {
   durationMs: number;
   error: string | null;
   nativeAvailable: boolean;
+  /**
+   * The last `playbackState` the **plugin** reported, verbatim (v1.9.5), as
+   * `state · reason · position/duration s` — or null when nothing has reported.
+   *
+   * `modeReason` is what the *app* decided; this is what the phone said, and the two side by side
+   * are what settle a boundary failure on the device instead of in a guess. Three rounds of
+   * diagnosis were made without either one reaching the screen.
+   */
+  pluginState: string | null;
+  /** What the boundary's adoption did: 'adopted', 'nothing prepared', 'play refused (…)', 'timed out' (v1.9.5). */
+  adoptOutcome: string;
+  /** Events the bridge discarded itself, by reason (v1.9.5) — filtered as inaudible, or inside a slot write. */
+  droppedEvents: { inaudible: number; slotGrace: number };
+  /**
+   * The tracks the player is holding warm, oldest first (v1.9.5).
+   *
+   * The previous song and the next two, by id. On the screen because "instant" is a claim about this
+   * list: a boundary that paid a cold fetch is a boundary where the track it moved to was not on it,
+   * and three rounds of diagnosis were made without that fact ever being visible.
+   */
+  warmedIds: string[];
 }
 
 /**
@@ -315,6 +336,45 @@ const SPECTRUM_NEAR_END_MS = 4000;
  */
 const MAX_SPECTRUM_RECHECKS = 3;
 /**
+ * How close to the item's own end the clock has to sit to count as *pinned* there (v1.9.5).
+ *
+ * Much narrower than {@link NATIVE_END_SLACK_MS}: this is not "the last second of a track", it is
+ * "the clock has stopped moving because the player stopped playing", and the position it has
+ * stopped at is the end of the item because `nativeClock` clamps there while `playing`.
+ */
+const PINNED_END_SLACK_MS = 250;
+/**
+ * How long the clock has to sit pinned at the end, with no live frame, before the app calls the
+ * track over by itself (v1.9.5).
+ *
+ * This is the last door onto the end of a track, and it exists because every other one is a
+ * message from the plugin: the vendored player's own completion fires only on an exact
+ * `currentTime == duration` (see the tap's own notes), and a message that is never sent cannot be
+ * waited for. Two seconds of a clock that has stopped at the end of the item, while the tap is
+ * producing nothing, is not a track that is playing.
+ */
+const PINNED_END_HOLD_MS = 2000;
+/**
+ * How often the tap is looked at again once its own re-check budget is spent (v1.9.5).
+ *
+ * The budget used to end the *polling*, so a tap that would not stay up was given up on for the
+ * rest of the track and the bars never came back without a new track — the owner's *"just stays
+ * there"*. The budget now only slows the checks down: the poll survives at this interval, and a
+ * live frame anywhere later puts the bars back on its own.
+ */
+const SPECTRUM_SLOW_POLL_MS = 5000;
+/**
+ * How many tracks are warm on the player at once (v1.9.5): the previous song and the next two.
+ *
+ * The owner's own rule (*"after any selection the app must commence prefetching/caching the previous
+ * song and the NEXT TWO songs, so stepping back or forward is instant"*), and it is three because
+ * the bridge has exactly three slots that are not the one being heard — the bound is structural, not
+ * a budget that a long session can spend. This is only the engine's side of it (the claims); the
+ * number that matters on the device is the bridge's slot pool, and the two are the same number by
+ * construction.
+ */
+const MAX_WARM_TRACKS = 3;
+/**
  * The same non-zero frame for ~1 s is a frozen buffer, not a measurement.
  *
  * v1.1 lowered this from 25 frames (2.5 s): with the analyser running at a near-zero smoothing
@@ -373,6 +433,14 @@ export class AudioEngine {
   /** Polls in a row where the tap said it was not playing, and how many re-checks that has cost. */
   private spectrumDeadPolls = 0;
   private spectrumRechecks = 0;
+  /** When the tap last produced a live frame (v1.9.5) — the watchdog's other half. */
+  private lastLiveFrameAt = 0;
+  /** Since when the clock has been sitting at the end of the item (v1.9.5), or null. */
+  private pinnedAtEndSince: number | null = null;
+  /** The last `playbackState` the plugin reported, kept verbatim for the reason line (v1.9.5). */
+  private lastPluginState: { state: string; reason: string; currentTimeMs: number; durationMs: number } | null = null;
+  /** What the boundary's adoption did (v1.9.5). */
+  private adoptOutcome = 'not attempted';
 
   /* ------------------------------------------------------------- the machine */
   private state: EngineState = 'idle';
@@ -414,13 +482,23 @@ export class AudioEngine {
    */
   private loadInFlight = false;
   /**
-   * The song id sitting in the native **prepared slot**, if any (v1.9.1).
+   * The tracks the bridge is holding warm: `songId -> the exact URL it was warmed under` (v1.9.5,
+   * one prepared slot since v1.9.1).
    *
-   * The player holds the next track, buffered and silent, under its own asset id — so when that
-   * exact track is played from the start, there is nothing to load: the prepared asset is adopted
-   * and the first audio arrives in a seek's time instead of after a cold fetch.
+   * The player holds them buffered and silent, each under its own asset id — so when one of them is
+   * played from the start there is nothing to load: the warmed asset is adopted and the first audio
+   * arrives in a seek's time instead of after a cold fetch. The URL is kept beside the id because
+   * the stream URL is the bitrate the link had been measured at when the track was warmed, and the
+   * play request must carry **exactly that string** for the adoption to be of the same bytes
+   * (`startNative` refuses to adopt unless the two agree).
+   *
+   * Insertion order is the drop order, exactly as in the bridge. Every way an entry leaves this map
+   * is named: the track is started and adopted (deleted), a warm that did not happen (deleted in
+   * `prepareNext`), the pool is full (the oldest is dropped by {@link trimWarmed}), the queue knows
+   * the chain has moved ({@link pruneWarmed}), the engine is stopped or the track list cleared
+   * (`discardPrepared`), and a cold load (a track the pool did not hold) clears it outright.
    */
-  private preparedSongId: string | null = null;
+  private readonly warmed = new Map<string, string>();
   /**
    * The start in flight, and how it ends (v1.9.2). See {@link START_DEADLINE_MS}.
    *
@@ -665,6 +743,69 @@ export class AudioEngine {
     return this.nativePositionMs >= duration - NATIVE_END_SLACK_MS;
   }
 
+  /** The item's own duration as the plugin reported it, in ms — 0 when it did not (v1.9.5). */
+  private factsDurationMs(facts: NativePlaybackFacts | undefined): number {
+    const seconds = facts?.duration;
+    return Number.isFinite(seconds) && (seconds as number) > 0 ? (seconds as number) * 1000 : 0;
+  }
+
+  /**
+   * Is the item the player just reported on sitting at its own end? (v1.9.5)
+   *
+   * The facts decide it when the plugin sent them — its own `currentTime` against its own
+   * `duration`, which is the only pair of numbers that describe the item actually being held.
+   * Without them the app falls back to what it has (`nativeAtEnd`: its own position reading
+   * against its own duration), which is the reading v1.9.0 introduced.
+   */
+  private reportIsAtEnd(facts: NativePlaybackFacts | undefined): boolean {
+    const durationMs = this.factsDurationMs(facts);
+    if (durationMs <= 0) return this.nativeAtEnd();
+    // A track shorter than the slack cannot be judged this way, and says so rather than guessing.
+    if (durationMs <= NATIVE_END_SLACK_MS) return false;
+    const positionMs = Number.isFinite(facts?.currentTime) ? Math.max(0, (facts?.currentTime as number) * 1000) : this.nativePositionMs;
+    return positionMs >= durationMs - NATIVE_END_SLACK_MS;
+  }
+
+  /**
+   * The last door onto the end of a track: the app's own clock (v1.9.5).
+   *
+   * Every other way the queue hears that a track is over is a message from the plugin, and the
+   * vendored player's messages are one fragile event (an exact `currentTime == duration`) plus a
+   * state word it reserves for assets that are not being heard. When that event is missed there is
+   * nothing left to wait for — so this reads the two facts the app does have and reports the end
+   * itself: the machine says `playing`, the clock is pinned at the end of the item, and the tap is
+   * producing no live frame. The clock is pinned exactly because the player stopped reporting: it
+   * advances only while playing and clamps at the duration, so a player that has quietly stopped
+   * at the end of its item looks like this and nothing else.
+   *
+   * Held for {@link PINNED_END_HOLD_MS} before it fires, so a momentary report gap in the last
+   * quarter-second of a track is not a track ending. `reportEnded` is idempotent, so a real
+   * completion arriving during the hold changes nothing.
+   */
+  private watchForPinnedEnd(): void {
+    if (this.backend !== 'native' || this.state !== 'playing' || this.endedReported) {
+      this.pinnedAtEndSince = null;
+      return;
+    }
+    const duration = this.durationMs();
+    const position = this.nativeClock();
+    const pinned = duration > NATIVE_END_SLACK_MS && position >= duration - PINNED_END_SLACK_MS;
+    const frameLive = this.spectrumLive && this.clockNow() - this.lastLiveFrameAt <= PINNED_END_HOLD_MS;
+    if (!pinned || frameLive) {
+      this.pinnedAtEndSince = null;
+      return;
+    }
+    const now = this.clockNow();
+    if (this.pinnedAtEndSince === null) {
+      this.pinnedAtEndSince = now;
+      return;
+    }
+    if (now - this.pinnedAtEndSince < PINNED_END_HOLD_MS) return;
+    this.pinnedAtEndSince = null;
+    this.nativePositionMs = duration;
+    this.reportEnded('the clock has been sitting at the end of the item with no live frame, so the player is not going to say it');
+  }
+
   /**
    * The player has said there is sound — and this is the only place a start may be called started
    * (v1.9.2).
@@ -719,6 +860,8 @@ export class AudioEngine {
     if (this.clockTimer !== null) return;
     this.clockTimer = setInterval(() => {
       if (this.state !== 'playing') return;
+      // The end the player never announced (v1.9.5) — see {@link watchForPinnedEnd}.
+      this.watchForPinnedEnd();
       this.emit();
     }, CLOCK_TICK_MS);
   }
@@ -803,11 +946,24 @@ export class AudioEngine {
   status(): EngineStatus {
     const durationMs = this.durationMs();
     const positionMs = this.backend === 'native' ? this.nativeClock() : this.el.currentTime * 1000;
+    const plugin = this.lastPluginState;
     return {
       state: this.state,
       backend: this.backend,
       spectrum: this.spectrumLive,
       modeReason: this.modeReason,
+      /*
+       * The phone's own account, as a line (v1.9.5): what it said, why it said it, and where the
+       * item it said it about was — the three facts that were dropped at the bridge until this
+       * release, and the reason a failure on the device could not be told from a failure in the
+       * app.
+       */
+      pluginState: plugin
+        ? `${plugin.state}${plugin.reason ? ` · ${plugin.reason}` : ''} · ${(plugin.currentTimeMs / 1000).toFixed(1)}/${(plugin.durationMs / 1000).toFixed(1)} s`
+        : null,
+      adoptOutcome: this.adoptOutcome,
+      droppedEvents: this.native?.droppedEvents?.() ?? { inaudible: 0, slotGrace: 0 },
+      warmedIds: [...this.warmed.keys()],
       positionMs: Number.isFinite(positionMs) ? positionMs : 0,
       durationMs: Number.isFinite(durationMs) ? durationMs : 0,
       error: this.error,
@@ -929,28 +1085,59 @@ export class AudioEngine {
           this.emit();
           this.onProgress?.(this.nativePositionMs, this.durationMs());
         },
-        onState: (state, isPlaying) => {
+        onState: (state, isPlaying, facts) => {
           if (this.backend !== 'native') return;
           /*
-           * The end of a track is never "ours" — it is checked *before* the window below (v1.9.1).
+           * What the plugin said, kept as it said it (v1.9.5).
            *
-           * It used to sit behind the in-transition gate, which was safe only while that gate was a
-           * counter that always returned to zero. With the gate decided before the report is read, a
-           * track that ran out while a load or a seek was settling was a track whose end was thrown
-           * away — and nothing sends that report twice. Reading the end first costs nothing: it is
-           * the player saying it stopped with the clock at the end of the item, which no transport of
-           * ours produces (`nativeAtEnd`).
-           *
-           * This is the reading that does not depend on the player's own end event arriving either:
-           * the owner's report is *"it doesn't seem to automatically go to the next song on my
-           * playlist anymore once one song is done"*, and a queue that only ever hears about the end
-           * through one notification is a queue that stops for good the day that notification is
-           * late, is dropped by a load in flight, or is never sent. `reportEnded` is idempotent, so
-           * if the event does arrive as well, it changes nothing.
+           * `modeReason` is the app's own account and it is written from a dozen places; this is
+           * the phone's. It is on the screen (see `updatePlayerBar`) because the boundary failure
+           * that survives three releases reproduces only on the device, and every diagnosis so far
+           * has had to guess which of the two — the app or the player — was describing what.
            */
-          if (state === 'stopped' && this.nativeAtEnd()) {
+          const factDurationMs = this.factsDurationMs(facts);
+          this.lastPluginState = {
+            state,
+            reason: facts?.reason ?? '',
+            currentTimeMs: Number.isFinite(facts?.currentTime) ? Math.max(0, (facts?.currentTime as number) * 1000) : this.nativePositionMs,
+            durationMs: factDurationMs > 0 ? factDurationMs : this.durationMs(),
+          };
+          /*
+           * The player's own numbers replace our guesses about them (v1.9.5).
+           *
+           * `durationMs()` preferred the duration Navidrome advertised for the track — a number
+           * that has nothing to do with the item the player actually holds (a re-encode, a
+           * different master, a stream that ends early). Everything that asks "are we at the end"
+           * asked that question against the wrong number. The player answers it itself now, in
+           * every state report, and that answer is the one used from here on.
+           */
+          if (factDurationMs > 0) this.nativeDurationMs = factDurationMs;
+          if (Number.isFinite(facts?.currentTime)) this.setNativePosition(Math.max(0, (facts?.currentTime as number) * 1000));
+          /*
+           * **The end of a track is decided from the facts, not from one spelling of one state
+           * (v1.9.5).**
+           *
+           * Until this release this read `state === 'stopped' && nativeAtEnd()`, and the vendored
+           * player almost never says `stopped` about the audible asset: `Plugin.swift`'s own
+           * `resolvePlaybackState` answers `.paused` whenever the asset is the one it is playing,
+           * and `.stopped` only when it is not — so the one word this app accepted as "the track
+           * ended" was a word reserved for assets that are *not* being heard. The completion event
+           * that does say it fires on an exact `currentTime == duration` in `RemoteAudioAsset`
+           * (and `play()` registers no end-of-item observer at all), so when it misses, the report
+           * that arrives is a `paused` at the end of the item — and the app turned that into an
+           * interruption, disarmed the consumers, left the queue parked and the chip reading
+           * *native audio*, which is the owner's report word for word.
+           *
+           * A not-playing report whose own position is the end of its own item is the end of the
+           * track, whichever word carries it. It is checked *before* the in-transition gate, as it
+           * has been since v1.9.1: nothing we send produces a player we stopped with the clock at
+           * the end of the item, and this report is the only one that will ever come.
+           */
+          if (!isPlaying && this.reportIsAtEnd(facts)) {
             this.nativePositionMs = this.durationMs();
-            this.reportEnded('the player stopped at the end of the item');
+            this.reportEnded(
+              `the player reported itself not playing (${state}${facts?.reason ? `, ${facts.reason}` : ''}) with its own position at the end of the item`,
+            );
             return;
           }
           // Our own load/play/pause/resume in flight: this report is describing the request.
@@ -1073,43 +1260,89 @@ export class AudioEngine {
    */
   async prepareNext(track: TrackRequest): Promise<boolean> {
     if (!this.nativePlatform) return false;
-    if (this.preparedSongId === track.id) return true;
+    // Already warm under exactly this URL: the same stream, so a second preload is nothing.
+    if (this.warmed.get(track.id) === track.url) return true;
     const bridge = this.native ?? (await this.ensureNative());
     if (!bridge?.prepare) return false;
     /*
-     * Claimed before the call, not after: two prepares for the same next track (a tap, then the
-     * queue's own start) must not both go out, and the claim is what makes the second one a no-op.
+     * Claimed before the call, not after: two warms for the same track (the queue's own, then a
+     * start that reads it back) must not both go out, and the claim is what makes the second one a
+     * no-op.
      *
-     * v1.9.2 — **and given back when the prepare did not happen.** `bridge.prepare` answers whether
-     * the plugin actually took the asset; a prepare that timed out, or that the bridge refused
-     * because the listener had already moved on, leaves no prepared track behind, so the claim must
-     * not outlive it. That leak is what the owner hit as a track that never came: the slot stayed
-     * claimed for a track that was never loaded, the queue then refused to re-prepare it ("already
-     * holding exactly this"), and the boundary paid a cold fetch with no word about why.
+     * v1.9.2 — **and given back when the warm did not happen.** `bridge.prepare` answers whether
+     * the plugin actually took the asset; a warm that timed out, or that the bridge refused because
+     * the listener had already moved on, leaves no warmed track behind, so the claim must not
+     * outlive it. That leak is what the owner hit as a track that never came: the claim stayed for
+     * a track that was never loaded, the queue then refused to re-warm it ("already holding exactly
+     * this"), and the boundary paid a cold fetch with no word about why.
      */
-    this.preparedSongId = track.id;
-    const settled = (await bridge.prepare({
-      url: track.url,
-      title: track.title,
-      artist: track.artist,
-      album: track.album,
-      artworkUrl: track.artworkUrl,
-    })) === true;
-    if (!settled) this.preparedSongId = null;
-    return settled;
+    this.warmed.set(track.id, track.url);
+    const settled =
+      (await bridge.prepare({
+        id: track.id,
+        url: track.url,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        artworkUrl: track.artworkUrl,
+      })) === true;
+    if (!settled) {
+      if (this.warmed.get(track.id) === track.url) this.warmed.delete(track.id);
+      return false;
+    }
+    this.trimWarmed();
+    return true;
   }
 
-  /** Throw the prepared track away — the queue is not going where it was prepared for. */
+  /**
+   * Keep the claims inside the pool the bridge actually has (v1.9.5).
+   *
+   * Three tracks are warm at once (the previous one and the next two), which is the number of slots
+   * the bridge keeps that are not the audible one; a fourth claim would be a claim on a track whose
+   * slot has just been reused. The oldest is dropped first, exactly as the bridge drops the oldest
+   * slot.
+   */
+  private trimWarmed(): void {
+    while (this.warmed.size > MAX_WARM_TRACKS) {
+      const oldest = this.warmed.keys().next();
+      if (oldest.done) return;
+      this.warmed.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Drop the claims for tracks the queue is no longer around (v1.9.5).
+   *
+   * Called when a selection moves the queue: a claim for a track nobody is going to hear is a claim
+   * that would make a later start try to adopt an asset the player no longer holds. The bridge's own
+   * slots are not touched — they are reused by the next warm, and the pool is fixed, so dropping a
+   * claim costs nothing and removes a whole class of stale state.
+   */
+  pruneWarmed(keep: readonly string[]): void {
+    for (const songId of [...this.warmed.keys()]) if (!keep.includes(songId)) this.warmed.delete(songId);
+  }
+
+  /**
+   * The exact URL a track is warm under, or `null` when the pool does not hold it (v1.9.5).
+   *
+   * This is the queue's single source of truth about warmth, and it is the engine's on purpose: the
+   * engine is what drops a claim a cold load invalidated, so a queue keeping its own copy could
+   * believe a track was warm that the player had long since forgotten — and would then never warm it
+   * again. The string it returns is the one the asset holds, so asking for it again asks for the
+   * bytes that are already there rather than for a second transcode.
+   */
+  warmedUrl(songId: string): string | null {
+    return this.warmed.get(songId) ?? null;
+  }
+
+  /**
+   * Throw the warmed tracks away — the queue is not going where they were warmed for.
+   */
   async discardPrepared(): Promise<void> {
-    this.preparedSongId = null;
+    this.warmed.clear();
     const bridge = this.native;
     if (this.backend !== 'native' || !bridge?.discard) return;
     await bridge.discard();
-  }
-
-  /** The song id currently buffered in the player's prepared slot, if any. */
-  get preparedId(): string | null {
-    return this.preparedSongId;
   }
 
   async toggle(): Promise<void> {
@@ -1286,8 +1519,8 @@ export class AudioEngine {
     this.el.pause();
     this.el.removeAttribute('src');
     this.track = null;
-    // Nothing is playing, so nothing is prepared for it either (v1.9.1).
-    this.preparedSongId = null;
+    // Nothing is playing, so nothing is warm for it either (v1.9.1).
+    this.warmed.clear();
     this.setNativePosition(0);
     this.nativeDurationMs = 0;
     this.dispatch({ type: 'cleared' });
@@ -1434,7 +1667,17 @@ export class AudioEngine {
     }
     this.backend = 'native';
     this.setNativePosition(startMs);
-    this.nativeDurationMs = track.durationMs;
+    /*
+     * **The metadata duration is a fallback, not the player's number (v1.9.5).**
+     *
+     * This used to *write* Navidrome's duration for the track into the slot that is supposed to
+     * hold the player's own answer, which made every "are we at the end" question in this file a
+     * question about the advertised length of a re-encode. `durationMs()` already falls back to the
+     * track's metadata when the player has said nothing, so leaving this at zero changes nothing
+     * until the player speaks — and from the first state report on, its own duration is what is
+     * used.
+     */
+    this.nativeDurationMs = 0;
     this.spectrumLive = false;
     // A new track is a fresh budget for a tap that will not answer. (v1.7.7: a *budget*, not a
     // rebuild — the tap on the previous item is left where it is and the new item gets its own.)
@@ -1458,29 +1701,59 @@ export class AudioEngine {
      */
     this.startAnchorMs = Math.max(0, startMs);
     /*
-     * **The boundary: this track was already prepared, so there is nothing to load (v1.9.1).**
+     * **The boundary: this track is warm on the player, so there is nothing to load (v1.9.1).**
      *
-     * The queue keeps the track after the current one in the player's *other* asset — buffered,
-     * silent, never played. When that track is the one being started, and from its start, the
-     * prepared asset is adopted: it is already the audible asset, with an item AVFoundation has been
-     * filling since the previous track began. That is the whole of "autoplay after a track ends is
-     * instant": at a track boundary the app is not fetching anything, it is switching a pointer,
-     * because the whole length of the previous track was available to get ready.
+     * The queue keeps the previous track and the next two buffered on the player's other assets —
+     * silent, never played. When one of them is the track being started, and from its start, its
+     * asset is adopted: it is already the audible asset, with an item AVFoundation has been filling
+     * since before it was asked for. That is the whole of "autoplay after a track ends is instant":
+     * at a boundary the app is not fetching anything, it is switching a pointer, because the whole
+     * length of the listening that came before it was available to get ready.
      *
-     * Deliberately narrow: only when the id matches and the position is the very start. A resume
-     * mid-track, a different track, or a bridge with no prepared slot all fall through to the load
-     * below, which is exactly v1.9.0's behaviour.
+     * Deliberately narrow, and the URL is part of the condition (v1.9.5): the warmed asset holds the
+     * stream the URL asked for, so the claim must name *this* track **under exactly this string** —
+     * a bitrate the ladder has moved since the warm makes the assets different bytes, and adopting
+     * one for the other would play something other than what the play request asked for. A resume
+     * mid-track, a track that is not warm, a URL that has moved, or a bridge with no warm pool all
+     * fall through to the load below, which is exactly v1.9.0's behaviour.
      */
-    const adoptable = startMs === 0 && this.preparedSongId === track.id && typeof bridge.adopt === 'function';
+    const warmUrl = this.warmed.get(track.id) ?? null;
+    const adoptable = startMs === 0 && warmUrl !== null && warmUrl === track.url && typeof bridge.adopt === 'function';
+    /*
+     * What the boundary did, named before it is tried (v1.9.5) — see `NativeBridge.adoptOutcome`.
+     * A cold load is a legitimate outcome; an *unaccounted* one is what the reason line exists to
+     * end.
+     */
+    this.adoptOutcome =
+      startMs !== 0
+        ? 'not attempted — this track starts part-way through'
+        : warmUrl === null
+          ? `nothing warm for this track (holding ${this.warmed.size})`
+          : warmUrl !== track.url
+            ? 'not attempted — the warm asset is a different stream than this request'
+            : typeof bridge.adopt !== 'function'
+              ? 'not attempted — this build has no warm pool'
+              : 'attempting';
     let adopted = false;
     try {
       if (adoptable) {
-        adopted = (await bridge.adopt?.()) === true;
-        // Whichever way it went, the slot is not this track's to use again: adopted it is audible,
-        // not adopted it is unknown, and the next prepare will fill it afresh.
-        this.preparedSongId = null;
+        adopted = (await bridge.adopt?.(track.id)) === true;
+        // The bridge's own words when it has them ('nothing prepared', 'play refused (…)',
+        // 'timed out'), and an honest fallback when it does not.
+        this.adoptOutcome = bridge.adoptOutcome?.() ?? (adopted ? 'adopted' : 'refused — the track was loaded instead');
+        // Whichever way it went, this track is not warm any more: adopted it is audible, refused it
+        // is not on the player at all, and the queue re-warms around the new track after this start.
+        this.warmed.delete(track.id);
       }
       if (!adopted) {
+        /*
+         * A track the pool did not hold is a cold fetch, and a cold fetch is where the old chain
+         * ends (v1.9.5): every claim from here on describes a track the player is not holding —
+         * `load` clears the bridge's own pool for the same reason — so the claim map is cleared with
+         * it. What is left is nothing claiming anything, which is the state a selection has to
+         * leave behind; the queue warms the new neighbourhood as soon as this start has sound.
+         */
+        this.warmed.clear();
         await bridge.load(track);
         /*
          * **The guard the review found missing: two rapid plays of two different tracks race here.**
@@ -1522,6 +1795,20 @@ export class AudioEngine {
     } finally {
       // The load is over: reports arriving from here on are news again, and the tap can be checked.
       this.loadInFlight = false;
+      /*
+       * **An adopted item gets its own verify (v1.9.5).**
+       *
+       * The adopted item is already playing by the time this bracket closes — the plugin's play
+       * inside `adopt` is what reports the sound, so the engine has entered `playing` and called
+       * `startConsumers` *while* `loadInFlight` was still true, which is exactly the case
+       * `startConsumers` refuses to verify in. The tap's only install for an adopted track was
+       * therefore one fire-and-forget promise, with no retry anywhere and a failure that went into
+       * `modeReason` and nowhere visible.
+       *
+       * The cold-load path does not need this: it is still `loading` when this bracket closes, so
+       * its `startConsumers` runs afterwards with the bracket open and verifies there.
+       */
+      if (adopted) this.verifySpectrum();
     }
     /*
      * A pause that arrived *while the asset was loading* wins.
@@ -1710,8 +1997,22 @@ export class AudioEngine {
       if (this.spectrumDeadPolls < ZERO_POLLS_BEFORE_THEME) return;
       if (this.clockNow() - this.lastSpectrumRecheckAt < SPECTRUM_RECHECK_MS) return;
       if (this.spectrumRechecks >= MAX_SPECTRUM_RECHECKS) {
+        /*
+         * **The budget slows the checks down; it does not end them (v1.9.5).**
+         *
+         * This used to call `disarmConsumers`, which clears the poll for good: the tap was given up
+         * on for the rest of the track and the bars never came back without a new one — the
+         * owner's *"just stays there"*, and the second half of the boundary failure. The poll now
+         * stays alive at {@link SPECTRUM_SLOW_POLL_MS} and the budget starts again, so a tap that
+         * comes back to life (or an item that gets replaced under a stale one) is noticed, and the
+         * bars return on their own.
+         */
         this.spectrumDeadPolls = 0;
-        this.disarmConsumers('the spectrum tap would not stay up on this stream — the bars are on the album-art theme, and the audio is untouched');
+        this.spectrumRechecks = 0;
+        if (this.spectrumLive) this.spectrumLive = false;
+        this.modeReason =
+          'the spectrum tap would not stay up on this stream — the bars are on the album-art theme, and the audio is untouched; the tap is still checked every few seconds and the bars come back on their own if it recovers';
+        this.slowSpectrumPoll();
         this.emit();
         return;
       }
@@ -1723,6 +2024,9 @@ export class AudioEngine {
     this.nativeBands = Uint8Array.from(frame.bands);
     if (frame.live) {
       this.spectrumZeroPolls = 0;
+      // A live frame is what the watchdog waits for before it will call the end of a track by
+      // itself (v1.9.5): the tap is measuring sound, so nothing here is over.
+      this.lastLiveFrameAt = this.clockNow();
       // A tap that has produced real frames has proved itself: the re-check budget starts again.
       this.spectrumRechecks = 0;
       if (!this.spectrumLive) {
@@ -1772,6 +2076,21 @@ export class AudioEngine {
     const duration = this.durationMs();
     if (duration <= 0) return false;
     return this.nativeClock() >= duration - SPECTRUM_NEAR_END_MS;
+  }
+
+  /**
+   * Put the tap's re-checks on a slow clock rather than stopping them (v1.9.5).
+   *
+   * The poll keeps running — a tap that recovers puts the bars back without a pause, a resume or a
+   * new track — but each poll now costs one read every {@link SPECTRUM_SLOW_POLL_MS} instead of
+   * thirty a second, because a tap that will not stay up must not be asked thirty times a second
+   * for the length of a track.
+   */
+  private slowSpectrumPoll(): void {
+    if (this.spectrumPoll === null) return;
+    clearInterval(this.spectrumPoll);
+    this.spectrumPoll = setInterval(() => void this.pollSpectrum(), SPECTRUM_SLOW_POLL_MS);
+    this.lastSpectrumRecheckAt = this.clockNow();
   }
 
   /**
@@ -1830,13 +2149,36 @@ export class AudioEngine {
         if (started) return;
         this.modeReason = 'the native spectrum tap did not start, so the bars are on the album-art theme';
         this.emit();
+        this.retrySpectrumOnce(track, 'the install answered that it did not start');
       })
       .catch((error: unknown) => {
         if (this.track !== track) return;
         this.spectrumLive = false;
         this.modeReason = `the native spectrum tap failed (${error instanceof Error ? error.message : String(error)})`;
         this.emit();
+        this.retrySpectrumOnce(track, 'the install rejected');
       });
+  }
+
+  /**
+   * One retry for an install that did not take (v1.9.5).
+   *
+   * The install for a load or an adoption is a single fire-and-forget promise, and until this
+   * release nothing asked again: an answer of `false`, or a rejection, meant the bars stayed on the
+   * album-art theme for the whole track with one sentence in `modeReason` that no screen showed.
+   * The recheck budget in `pollSpectrum` only reaches a tap that is *polling*, and an orphaned tap
+   * (`itemIsCurrent: false`) is the one case that reports anything at all, so a tap that never got
+   * attached had no retry anywhere. One check, {@link SPECTRUM_RECHECK_MS} later, on the item that
+   * is still the current one — a read unless the plugin has genuinely replaced it, so it cannot
+   * make a sound.
+   */
+  private retrySpectrumOnce(track: TrackRequest, why: string): void {
+    const timer = setTimeout(() => {
+      if (this.track !== track || this.backend !== 'native' || this.state !== 'playing') return;
+      this.modeReason = `the native spectrum tap did not start (${why}) — checked again a few seconds later`;
+      this.verifySpectrum();
+    }, SPECTRUM_RECHECK_MS);
+    if (typeof timer === 'object' && typeof timer.unref === 'function') timer.unref();
   }
 
   /**

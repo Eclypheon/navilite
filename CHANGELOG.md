@@ -162,3 +162,10 @@ Plain language, user-visible changes only. The app shows this same list under
 - Picking a song far down a playlist no longer waits on preparing a track you did not ask for: your choice takes that slot immediately.
 - Scrubbing the seek bar no longer confuses where a song started, so moving the bar and then letting the playlist continue both work.
 - The player only steps down to a lower-quality stream when your phone actually slows down, instead of after one quick start.
+
+## 1.9.5 — 2026-10-12
+
+- When a song ends, the next one starts by itself again and the bars stay live across the change. The bar used to switch to "native audio" at the end of every song and stay there, which is the thing you reported - the end of a track was arriving as a report the app treated as an interruption, so it stopped the queue and went quiet instead of moving on.
+- A song you pick from far down a playlist starts playing as soon as its first few seconds have arrived, not after the whole song has downloaded.
+- The song before the one playing, and the two songs after it, are kept ready on the phone - so stepping back or forward starts straight away instead of waiting for a fetch.
+- When something is not playing, the bar now says why, in one line under the button: the app's own state, what the phone's player last reported, whether handing over from one song to the next worked, and how many of the player's own messages were dropped.

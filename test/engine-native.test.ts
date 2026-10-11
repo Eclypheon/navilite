@@ -1286,8 +1286,17 @@ test('a track that reaches its end starts the next one in the queue', async () =
      * asset: `loads` is empty for the whole advance. This is the release's claim, and it is the one
      * v1.9.0 stated falsely — its prefetch fetched bytes on the WebView stack that the player could
      * never read, so the boundary was a cold fetch.
+     *
+     * v1.9.5 — and the pool is the **neighbourhood**, not one track: while song-1 played, the next
+     * track was warmed (that is what makes this advance an adoption instead of a fetch), and once
+     * song-2 was playing, the track *behind* it was warmed too, so a step back costs what a step
+     * forward costs. Both warms are asserted here, in the order they happened.
      */
-    assert.deepEqual(record.prepares, [TRACK_URL('song-2')], 'the next track was prepared during song-1');
+    assert.deepEqual(
+      record.prepares,
+      [TRACK_URL('song-2'), TRACK_URL('song-1')],
+      'the next track was warmed during song-1, and the one behind it once song-2 was playing',
+    );
     assert.equal(record.adopts, 1, 'and the boundary adopted the prepared asset rather than loading one');
     assert.equal(record.loads.length, 0, `nothing was fetched at the boundary — calls: ${record.calls.join(', ')}`);
     assert.ok(plays.length > 0, `audio for it started — calls: ${record.calls.join(', ')}`);

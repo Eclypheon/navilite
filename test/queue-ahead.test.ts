@@ -62,6 +62,8 @@ function stubEngine(): {
 } {
   const plays: TrackRequest[] = [];
   const prepares: TrackRequest[] = [];
+  /** The engine's warm pool, `songId -> the URL it was warmed under`, as `AudioEngine.warmedUrl` reports it. */
+  const warmed = new Map<string, string>();
   let discards = 0;
   let engineState: 'idle' | 'playing' = 'idle';
   let release: (() => void) | null = null;
@@ -82,6 +84,14 @@ function stubEngine(): {
     }),
     play: (track: TrackRequest) => {
       plays.push(track);
+      /*
+       * The engine's own rule for what a start does to the warm pool (v1.9.5), modelled here because
+       * the queue's warming is built on it: a track the engine is holding warm under exactly this URL
+       * is *adopted* and only that claim goes; a track it is not holding is a cold load, which throws
+       * the whole pool away (`load` clears it in `src/player/native.ts` and in the engine).
+       */
+      if (warmed.get(track.id) === track.url) warmed.delete(track.id);
+      else warmed.clear();
       return new Promise<void>((resolve) => {
         release = () => {
           engineState = 'playing';
@@ -91,8 +101,19 @@ function stubEngine(): {
     },
     prepareNext: async (track: TrackRequest) => {
       prepares.push(track);
+      // Claimed by the engine before it asks the player, exactly as the real one does.
+      warmed.set(track.id, track.url);
+      return true;
+    },
+    /** The engine's pool, read back (v1.9.5) — the queue's only source of truth about warmth. */
+    warmedUrl: (songId: string) => warmed.get(songId) ?? null,
+    pruneWarmed: (keep: readonly string[]) => {
+      for (const songId of [...warmed.keys()]) if (!keep.includes(songId)) warmed.delete(songId);
     },
     discardPrepared: async () => {
+      // `discardPrepared` throws the pool away and tells the player; the pool half is what the queue
+      // can observe here, and the round trip is what `discards` counts.
+      warmed.clear();
       discards += 1;
     },
     pause: async () => {},
@@ -172,14 +193,24 @@ test('the next track is requested before the current one ends', async () => {
   await tick();
   await tick();
 
-  // No track has ended, and the one after the current one is already being prepared on the engine.
+  // No track has ended, and the neighbourhood of the current one is already warm on the engine.
   assert.equal(queue.currentSong?.id, 'song-1', 'and none of this changed what is playing');
   /*
    * v1.9.1/v1.9.2 — the track is prepared on the player: the engine holds the next track buffered
    * and silent, which is what makes the track boundary instant.
+   *
+   * v1.9.5 — and it is the **neighbourhood** (the owner's rule: *"the previous song and the NEXT TWO
+   * songs, so stepping back or forward is instant"*). Track 1 of three has no previous, so the two
+   * warms here are the next two — and this list is asserted whole, url by url, rather than by count:
+   * what has to be true of every entry is that it was asked for under the exact URL the play path
+   * will use, which is the pair of expressions the boundary's adoption depends on.
    */
-  assert.equal(prepares.length, 1, 'the next track was handed to the engine to get ready');
-  assert.equal(prepares[0]!.url, cappedUrlOf('song-2', queue.streamKbps ?? 128), 'under the URL it will be played with, bound now');
+  const kbps = queue.streamKbps ?? 128;
+  assert.deepEqual(
+    prepares.map((prepare) => prepare.url),
+    [cappedUrlOf('song-2', kbps), cappedUrlOf('song-3', kbps)],
+    'the next two tracks were handed to the engine to get ready, under the URLs they will be played with',
+  );
   assert.equal(prepares[0]!.title, 'Track song-2', 'with the metadata the lock-screen card will need');
 });
 
@@ -245,15 +276,19 @@ test('a rapid double tap prepares the track after the one he chose', async () =>
   const { library } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
 
-  // He taps track 1: its stream starts and track 2 begins buffering.
+  // He taps track 1: its stream starts, and the next two begin warming (v1.9.5: the neighbourhood).
   queue.select(queueOf('song-1', 'song-2', 'song-3'), 0, CONTEXT);
   void queue.start();
   await tick();
   releasePlay();
   await tick();
   await tick();
-  assert.equal(prepares.length, 1);
-  assert.equal(prepares[0]!.url, cappedUrlOf('song-2', queue.streamKbps ?? 128));
+  const kbps = queue.streamKbps ?? 128;
+  assert.deepEqual(
+    prepares.map((prepare) => prepare.url),
+    [cappedUrlOf('song-2', kbps), cappedUrlOf('song-3', kbps)],
+    'his tap warmed the two tracks after the one he chose',
+  );
 
   // …and immediately taps track 2, before anything resolved.
   queue.select(queueOf('song-1', 'song-2', 'song-3'), 1, CONTEXT);
@@ -263,8 +298,18 @@ test('a rapid double tap prepares the track after the one he chose', async () =>
   await tick();
   await tick();
 
-  assert.equal(prepares.length, 2, 'the second tap asked for something, and only one thing');
-  assert.equal(prepares[1]!.url, cappedUrlOf('song-3', queue.streamKbps ?? 128), 'and it is the track after the one he chose');
+  /*
+   * The second tap warms what is around the track he chose, and the queue does not ask twice for what
+   * is already warm under the same URL: song-3 was warmed by the first tap and is still the next one,
+   * so the one new warm is song-1 — the track he just left, which is what makes a step *back* instant.
+   * (v1.9.5: the list is asserted whole, so "asked for something, and only one thing" is now "asked
+   * for exactly the neighbour it did not already have".)
+   */
+  assert.deepEqual(
+    prepares.map((prepare) => prepare.url),
+    [cappedUrlOf('song-2', kbps), cappedUrlOf('song-3', kbps), cappedUrlOf('song-1', kbps)],
+    'and it asked for the one neighbour it did not already hold',
+  );
   assert.equal(queue.currentSong?.id, 'song-2', 'what is playing is what he chose');
   assert.equal(queue.position, 1, 'and the queue is in the order he left it in');
 });

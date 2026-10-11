@@ -104,6 +104,13 @@ interface Shell {
   barPosition: HTMLElement;
   barDuration: HTMLElement;
   barChip: HTMLElement;
+  /**
+   * v1.9.5: the app's own account of what the player and the engine are doing, one line under the
+   * chip. It is shown only when something is *not* the healthy playing-with-a-live-spectrum state,
+   * because that is the state the owner's reports are about and the one no diagnosis has been able
+   * to see from here.
+   */
+  barReason: HTMLElement;
   nowCover: HTMLElement;
   nowTitle: HTMLElement;
   nowSubtitle: HTMLElement;
@@ -273,6 +280,12 @@ export async function boot(root: HTMLElement): Promise<void> {
     sampleRate: () => engine.sampleRate(),
     fftSize: () => engine.fftSize,
     libraryReady: () => ctx.library !== null,
+    /**
+     * The palette the app is actually wearing (v1.4.1, and the seam `tools/palette-check.mjs` reads
+     * — it has been calling this since v1.4.1 and the key was never here, which is why the
+     * palette-apply check failed the moment a `dist/` build existed to run it against).
+     */
+    palette: () => ctx.palette,
     route: () => location.hash,
     nowMode: () => shell.nowMode,
     /** v1.5: the swipe pager's own state — the pane, the offset and what it has transformed. */
@@ -389,6 +402,7 @@ function buildShell(root: HTMLElement): Shell {
   const barPosition = h('span', { class: 'time', text: '0:00' });
   const barDuration = h('span', { class: 'time', text: '0:00' });
   const barChip = h('span', { class: 'mode-chip', text: 'idle' });
+  const barReason = h('p', { class: 'pb-reason hidden', text: '' });
   const playerBar = h('footer', { class: 'playerbar hidden' }, [
     h('div', { class: 'pb-main' }, [
       barCover,
@@ -403,6 +417,7 @@ function buildShell(root: HTMLElement): Shell {
     ]),
     h('div', { class: 'pb-progress', 'data-pager': 'off' }, [barPosition, barProgress, barDuration]),
     barChip,
+    barReason,
   ]);
 
   const canvas = h('canvas', { class: 'now-canvas' });
@@ -515,6 +530,7 @@ function buildShell(root: HTMLElement): Shell {
     barPosition,
     barDuration,
     barChip,
+    barReason,
     nowCover,
     nowTitle,
     nowSubtitle,
@@ -2221,6 +2237,35 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
 
   shell.barChip.textContent = loading ? 'loading…' : `${status.spectrum ? 'spectrum' : status.backend === 'native' ? 'native audio' : 'theme'}${cap === null ? '' : ` · ${cap} kbps`}`;
   shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : 'fallback'}${cap === null ? '' : ' capped'}`;
+
+  /*
+   * v1.9.5 — **the app says its own reason, on the screen.**
+   *
+   * The boundary failure this release exists for reproduces only on the owner's phone, and three
+   * rounds of diagnosis were made from source alone — which is why the chip's own evidence was
+   * never available: `native audio` is what this chip says for *every* state that is not playing,
+   * so `paused`, `ended`, `interrupted`, "no tap" and "the adoption failed" are the same word on
+   * screen. `modeReason` has been written in seventeen places and read by no screen at all.
+   *
+   * So the line carries the whole account at once: the machine's state, the engine that is behind
+   * it, whether the spectrum is actually fed, what the *player* last said (its own state, its own
+   * reason, and where it thinks it is against its own duration), what the boundary's adoption did,
+   * and how many of the bridge's own events were discarded and why. Every one of those is a fact
+   * this app already had and never showed.
+   *
+   * It is shown whenever the state is not a healthy, playing, spectrum-fed track, so it costs the
+   * layout nothing in the case that is working and is on the screen in every case that is not. The
+   * chip's tooltip carries it always.
+   */
+  const detail =
+    `${status.state} · ${status.backend} · spectrum ${status.spectrum ? 'live' : 'off'} · ` +
+    `${status.pluginState === null ? 'player: nothing reported yet' : `player: ${status.pluginState}`} · ` +
+    `adopt: ${status.adoptOutcome} · warm: ${status.warmedIds.length} · ` +
+    `dropped: ${status.droppedEvents.inaudible} inaudible, ${status.droppedEvents.slotGrace} in a slot write · ${status.modeReason}`;
+  const abnormal = status.state !== 'playing' || !status.spectrum;
+  shell.barChip.title = detail;
+  shell.barReason.textContent = abnormal ? detail : '';
+  shell.barReason.classList.toggle('hidden', !abnormal);
 
   shell.lyrics.position(positionMs);
 }

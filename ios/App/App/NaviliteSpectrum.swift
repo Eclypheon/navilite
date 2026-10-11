@@ -722,27 +722,57 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
      */
     @objc func start(_ call: CAPPluginCall) {
         let requested = call.getString("url").flatMap { URL(string: $0) }
+        /*
+         * v1.9.5 — **the caller says which slot it is playing, and that slot is the only one this may
+         * tap.**
+         *
+         * The lookup below used to be this plugin's own guess (`AudibleBridgePlayer.find`), and with
+         * the pool holding a silent, buffered track per neighbour it could land on a player nobody is
+         * hearing — the vendor plugin clears its own `currentlyPlayingAssetId` at the moment an item
+         * is unloaded, and the guess then fell through to any asset holding an item and reported
+         * `started: true`. The bars were then a picture of a silent player: real frames of the wrong
+         * audio, or none at all, while the app believed the tap was healthy.
+         *
+         * A named slot that is not on the bridge is now a **refusal**, not a licence to guess: the
+         * app is told the bars are on the album-art theme instead of being told a lie. A caller that
+         * names nothing (an older JS bundle) still gets the plugin's own answer.
+         */
+        let requestedAssetId = call.getString("assetId")
         DispatchQueue.main.async { [weak self] in
             guard let self else {
                 call.reject("the spectrum plugin is gone")
+                return
+            }
+            let named = requestedAssetId.flatMap { $0.isEmpty ? nil : $0 }
+            if let named {
+                guard let found = AudibleBridgePlayer.player(named, from: self.bridge) else {
+                    call.reject("the player this app is playing (\(named)) is not loaded on the bridge, so there is nothing to tap — the bars stay on the album-art theme")
+                    return
+                }
+                self.begin(call: call, player: found.player, assetId: found.assetId, requested: requested)
                 return
             }
             guard let audible = AudibleBridgePlayer.find(from: self.bridge) else {
                 call.reject("the audible player was not found on the bridge, so there is nothing to tap — the bars stay on the album-art theme")
                 return
             }
-            self.generation += 1
-            let generation = self.generation
-            /*
-             * v1.9.1: the wait for the item's audio track is *awaited* off the main thread rather
-             * than retried on it, and the readiness test is asynchronous with it. The retry loop is
-             * kept — an item that has just been created genuinely has no track list for a moment —
-             * but every step of it yields the main thread instead of holding it, which is what put
-             * the new stream's cold fetch in front of the play call that was waiting on it.
-             */
-            Task { [weak self] in
-                await self?.install(call: call, player: audible.player, assetId: audible.assetId, requested: requested, generation: generation, waited: 0)
-            }
+            self.begin(call: call, player: audible.player, assetId: audible.assetId, requested: requested)
+        }
+    }
+
+    /// Start the tap on one named player. Split out so both lookups above land here identically.
+    private func begin(call: CAPPluginCall, player: AVPlayer, assetId: String, requested: URL?) {
+        self.generation += 1
+        let generation = self.generation
+        /*
+         * v1.9.1: the wait for the item's audio track is *awaited* off the main thread rather
+         * than retried on it, and the readiness test is asynchronous with it. The retry loop is
+         * kept — an item that has just been created genuinely has no track list for a moment —
+         * but every step of it yields the main thread instead of holding it, which is what put
+         * the new stream's cold fetch in front of the play call that was waiting on it.
+         */
+        Task { [weak self] in
+            await self?.install(call: call, player: player, assetId: assetId, requested: requested, generation: generation, waited: 0)
         }
     }
 
@@ -826,12 +856,19 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
      */
     @objc func configureBuffer(_ call: CAPPluginCall) {
         let seconds = call.getDouble("seconds") ?? 5
+        /*
+         * The slot the app says it is playing goes with this too (v1.9.5), for the same reason the tap
+         * takes it: the property is written on *one* item, and the app is the side that knows which
+         * one is being heard. No name (an older JS bundle) keeps the plugin's own lookup.
+         */
+        let requestedAssetId = call.getString("assetId").flatMap { $0.isEmpty ? nil : $0 }
         DispatchQueue.main.async { [weak self] in
             guard let self else {
                 call.reject("the spectrum plugin is gone")
                 return
             }
-            guard let audible = AudibleBridgePlayer.find(from: self.bridge), let item = audible.player.currentItem else {
+            let named = requestedAssetId.flatMap { AudibleBridgePlayer.player($0, from: self.bridge) }
+            guard let audible = named ?? AudibleBridgePlayer.find(from: self.bridge), let item = audible.player.currentItem else {
                 // No audible item yet (a cold start, or the lookup failed): the player keeps its
                 // own policy, which is exactly what every build before this one had.
                 call.resolve(["buffered": false])
@@ -858,6 +895,24 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
  * restages its storage.
  */
 enum AudibleBridgePlayer {
+    /**
+     * The player of one **named** asset, and only that one (v1.9.5).
+     *
+     * This is what `start` uses whenever the caller says which slot it is playing: no guessing, no
+     * preference for a player that happens to be playing, and no fallback to another asset. An asset
+     * that has no loaded item is `nil` — a refusal the app can state on screen — rather than a
+     * different player's frames.
+     */
+    static func player(_ assetId: String, from bridge: CAPBridgeProtocol?) -> (player: AVPlayer, assetId: String)? {
+        guard let plugin = bridge?.plugin(withName: "NativeAudio") else { return nil }
+        for child in Mirror(reflecting: plugin).children where child.label == "audioList" {
+            guard let assets = child.value as? [String: Any], let value = assets[assetId] else { continue }
+            guard let player = players(of: value).first(where: { $0.currentItem != nil }) else { return nil }
+            return (player, assetId)
+        }
+        return nil
+    }
+
     static func find(from bridge: CAPBridgeProtocol?) -> (player: AVPlayer, assetId: String)? {
         guard let plugin = bridge?.plugin(withName: "NativeAudio") else { return nil }
         var fallback: (player: AVPlayer, assetId: String)?

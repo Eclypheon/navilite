@@ -22,6 +22,14 @@ import { ByteRate } from './bitrate.ts';
 import type { Library } from './library.ts';
 
 const SAVE_QUEUE_DEBOUNCE_MS = 5000;
+/**
+ * How many tracks ahead and behind are kept warm on the player (v1.9.5).
+ *
+ * The owner's own rule — the previous song and the **next two** — and it is the same number the
+ * engine's claims and the bridge's slot pool are built on. Closest first, and the boundary before
+ * everything: the next track is what a track ending plays.
+ */
+const WARM_STEPS: readonly number[] = [1, -1, 2];
 /** How often the local resume snapshot is allowed to be written (see `src/storage/session.ts`). */
 const SNAPSHOT_INTERVAL_MS = 5000;
 const PLAY_THRESHOLD_MS = 240000; // Subsonic: half the song, or four minutes
@@ -129,17 +137,14 @@ export class PlaybackQueue {
    */
   private startFailed = false;
   /**
-   * v1.9.1: the track after the current one, and the **exact URL** it was prepared under.
+   * Which warm run is the current one (v1.9.5).
    *
-   * This is the queue's look-ahead, and its one invariant is that `prepared.songId` is the song at
-   * `order[cursor + 1]` — anything else is discarded rather than left buffering. The URL is bound
-   * here at prepare time and used again, unchanged, as the play request's URL: the transcode key
-   * (`maxBitRate`) is part of the string, and v1.9.0 built it twice — once for the prefetch and once
-   * at the boundary, from a rate that had *changed* in between — so Navidrome was asked to transcode
-   * the same file twice, the second time from scratch, at the moment the listener was waiting for
-   * sound.
+   * Bumped by every `warmNeighbours`, incremented only — a run that is not the newest stops before
+   * its next call, so a chain of preloads for a queue the listener has left cannot go on issuing
+   * them. Nothing has to be cleared, and nothing grows: the value is one number, and the only
+   * reader is the loop that compares it to the value it captured.
    */
-  private prepared: { songId: string; url: string } | null = null;
+  private warmRun = 0;
   /**
    * v1.9.1: the song the engine has been asked for and has not answered yet.
    *
@@ -238,21 +243,21 @@ export class PlaybackQueue {
     this.loading = true;
     /*
      * v1.9.2 — there is no WebView probe to cancel any more (the prefetch is deleted), so all this
-     * has to do is make sure nothing is left buffering for where the listener *was*: that is the
-     * prepared slot, handled below.
+     * has to do is make sure nothing is left buffering for where the listener *was*: that is the warm
+     * pool, handled below.
      */
     /*
-     * And the prepared slot follows the same rule (v1.9.1) — with one exception that matters.
+     * And the warm pool follows the same rule (v1.9.1) — with one exception that matters.
      *
-     * A prepared track that is neither the track he touched nor the track that now follows it is
-     * buffering something nobody is going to hear: on his link that is a second download competing
-     * with the very stream he is waiting for, so it is thrown away. When it *is* one of those two,
-     * it is kept — and that is the case the exception exists for: he taps the row that was already
-     * being got ready, so there is nothing to fetch at all and the track starts in a seek's time.
+     * A warmed track that is not around the one he touched is buffering something nobody is going to
+     * hear: on his link that is a download competing with the very stream he is waiting for, so its
+     * claim is dropped. When it *is* a neighbour of what he touched, it is kept — and that is the
+     * case the exception exists for: he taps a row that was already being got ready, so there is
+     * nothing to fetch at all and the track starts in a seek's time. The bridge's own slots are not
+     * touched here: the pool is fixed at four, and the warm that follows this selection writes the
+     * slots it needs.
      */
-    const touched = this.currentSong?.id ?? null;
-    const follows = this.nextSongId();
-    if (this.prepared && this.prepared.songId !== touched && this.prepared.songId !== follows) this.cancelPrepared();
+    this.engine.pruneWarmed?.(this.neighbourhoodIds());
     this.startFailed = false;
     this.onChanged?.();
   }
@@ -501,15 +506,17 @@ export class PlaybackQueue {
     const token = this.playToken;
     const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
     /*
-     * **The URL the track was prepared under is the URL it is played with** (v1.9.1).
+     * **The URL the track was warmed under is the URL it is played with** (v1.9.1).
      *
      * Same string, so Navidrome is asked for the transcode it has already started rather than for a
      * second one at a rate the link measurement moved in the meantime — and so the asset that is
-     * already buffered is the asset that becomes audible.
+     * already buffered is the asset that becomes audible. The string comes from the engine, which is
+     * what actually warmed it and what drops a claim a cold load invalidated (v1.9.5), and the
+     * engine's own condition for adopting an asset is exactly this equality: a URL that has moved
+     * since the warm is a cold load, not a mismatch played as if it were the same stream.
      */
-    const preparedUrl = this.prepared?.songId === song.id ? this.prepared.url : null;
-    if (preparedUrl !== null) this.prepared = null;
-    const request = this.trackRequest(song, preparedUrl, artworkUrl);
+    const warmedUrl = this.engine.warmedUrl?.(song.id) ?? null;
+    const request = this.trackRequest(song, warmedUrl, artworkUrl);
     this.inFlightSongId = song.id;
     this.onChanged?.();
     /*
@@ -531,7 +538,7 @@ export class PlaybackQueue {
     const startedAt = Date.now();
     await this.engine.play(request, startMs);
     let failed = this.engine.startDidFail?.() === true;
-    if (!failed && preparedUrl === null) this.rate.noteStart(Date.now() - startedAt);
+    if (!failed && warmedUrl === null) this.rate.noteStart(Date.now() - startedAt);
     if (failed && token === this.playToken) {
       this.rate.demote();
       const retry = this.trackRequest(song, null, artworkUrl);
@@ -555,16 +562,16 @@ export class PlaybackQueue {
        * play queue. What is left is the row and the chip saying so, and the tap that tries again.
        *
        * **And the look-ahead is re-armed here rather than left dead (v1.9.4).** This path used to
-       * cancel the prepared slot and return *before* `prepareNext()` — so from the first start that
+       * cancel the warm pool and return *before* warming anything — so from the first start that
        * failed, the player held nothing the next boundary could adopt, and every later track paid a
        * full cold fetch on the one link where a cold fetch is the problem. That is the second half
        * of the owner's report: *"the first track that plays starts very quickly, but this behaviour
-       * quickly stops"*. Nothing is claimed about the track that failed; the track after it is got
-       * ready exactly as it is on the path where a start succeeded.
+       * quickly stops"*. Nothing is claimed about the track that failed; the tracks around it are got
+       * ready exactly as they are on the path where a start succeeded.
        */
       this.cancelPrepared();
       this.onChanged?.();
-      this.prepareNext();
+      this.warmNeighbours();
       return;
     }
     this.reportNowPlaying(song);
@@ -573,14 +580,16 @@ export class PlaybackQueue {
     // A new track, at a known position: the snapshot is written now rather than on the next tick.
     this.persistSnapshot(true);
     this.onChanged?.();
-    this.prepareNext();
+    // Every start is a selection (v1.9.5): the boundary, a tap, a skip and a step back all land
+    // here, so all four leave the previous song and the next two warming behind them.
+    this.warmNeighbours();
   }
 
   /**
-   * One request, built from one place, so the retry differs only in the URL it asks for.
+   * A play/ warm request for one song at one exact URL.
    *
-   * `url` is the prepared slot's own URL when the track was already got ready, and otherwise the
-   * URL the link's own measurement earns (`rate.maxBitRate`: `null` = the original file).
+   * `url` is the warm pool's own URL when the track was already got ready, and otherwise the URL the
+   * link's own measurement earns (`rate.maxBitRate`: `null` = the original file).
    */
   private trackRequest(song: Song, url: string | null, artworkUrl: string | null): TrackRequest {
     return {
@@ -595,65 +604,105 @@ export class PlaybackQueue {
     };
   }
 
-  /** The song after the one playing, in the play order — `null` at the end of the queue. */
-  private nextSongId(): string | null {
-    return this.items[this.order[this.cursor + 1]]?.song.id ?? null;
+  /**
+   * Get the neighbourhood ready on the player, while this one plays (v1.9.1, pooled in v1.9.5).
+   *
+   * The player is warmed: the previous song and the next two are loaded by the plugin itself, each
+   * under its own asset id, in assets that are buffered, silent and never played. When one of them
+   * is started — at the track boundary, on a step forward, on a step back — its asset is adopted, so
+   * it begins in a seek's time: this is what "the whole previous track was available to warm the
+   * next one" buys, and it is the owner's second rule, in his words: *"after any selection the app
+   * must commence prefetching/caching the previous song and the NEXT TWO songs, so stepping back or
+   * forward is instant."*
+   *
+   * Order and bounds, both deliberate:
+   *
+   *  - **The next track first**, because the boundary is the one that must never pay a cold fetch;
+   *    then the previous one (a step back), then the one after next.
+   *  - **One at a time.** These are network preloads on the link the listener is already streaming
+   *    on; three at once would compete with the track he is listening to, which is the exact failure
+   *    this app has shipped before.
+   *  - **A run token, not a counter.** Every call replaces the previous run's token, and a run checks
+   *    it before each warm: when the listener moves (a tap, a skip, a boundary) the older chain stops
+   *    where it is instead of warming for a track that is no longer next. There is nothing to clear —
+   *    a run that is not the newest simply never issues another call.
+   *
+   * The claims it records are the **URLs** it asked for (`this.warmed`), and the engine's own claims
+   * are set before each call and given back when the call did not happen. Exactly this pairing is
+   * what makes the boundary's adoption possible: the same string, asked for again.
+   */
+  private warmNeighbours(): void {
+    const started = this.currentSong;
+    if (!started) return;
+    this.engine.pruneWarmed?.(this.neighbourhoodIds());
+    const run = (this.warmRun += 1);
+    void (async () => {
+      for (const song of this.neighbourSongs()) {
+        /*
+         * Abandoned runs stop here: the queue has moved on (a newer run), so warming more of the old
+         * chain's neighbourhood would be a download for a track nobody is next to.
+         */
+        if (run !== this.warmRun || this.currentSong?.id !== started.id) return;
+        const url = this.library.streamUrl(song, this.rate.maxBitRate);
+        /*
+         * The engine is asked whether it already holds this track, under **this** URL, rather than
+         * the queue keeping its own copy of what it asked for (v1.9.5). That is the asymmetry that
+         * makes the pool honest: a cold load drops every claim at once, and a queue that remembered
+         * "warm" on its own would skip the re-warm and leave the next boundary without anything to
+         * adopt.
+         */
+        if (this.engine.warmedUrl?.(song.id) === url) continue;
+        // The engine claims the track itself, before it issues anything, and gives the claim back
+        // when the player did not take it — so there is nothing to record here.
+        await this.engine.prepareNext(this.trackRequestFor(song, url));
+      }
+    })();
+  }
+
+  /** The song at `step` places from the current one in the play order, or `null`. */
+  private songAt(step: number): Song | null {
+    return this.items[this.order[this.cursor + step]]?.song ?? null;
   }
 
   /**
-   * Get the next track ready on the player, while this one plays (v1.9.1).
+   * The songs kept warm around the current one, in the order they are warmed (v1.9.5).
    *
-   * The player is prepared: the track after this one is loaded by the plugin itself, under its own
-   * asset id, in the player that is already running — buffered, silent, never played. At the track
-   * boundary that asset is adopted, so the next track starts in a seek's time: this is what "the
-   * whole previous track was available to prepare the next one" buys.
-   *
-   * v1.9.2 — **and the slot is a result, not a claim.** `engine.prepareNext` answers whether the
-   * player actually took the track, and only then is there a prepared track as far as the queue is
-   * concerned. It used to be recorded on the way *in*, before the call: a prepare that timed out, or
-   * that was cancelled because the listener had moved on, left this side believing the next track
-   * was buffered while the player held nothing — so the boundary adopted nothing, paid a cold fetch,
-   * and (worse) `prepared` was never cleared, so the track was never prepared again either.
-   *
-   * Exactly one of these is ever in flight, it is for the item that follows the one the listener
-   * actually chose, and it cannot move the queue: nothing here reads or writes `order`.
+   * Closest first, and the boundary before everything: the next track (what a track ending plays),
+   * then the previous one (a step back), then the one after next. Songs that repeat inside the
+   * window (a two-song queue) appear once.
    */
-  private prepareNext(): void {
-    const next = this.items[this.order[this.cursor + 1]];
-    if (!next) {
-      this.cancelPrepared();
-      return;
+  private neighbourSongs(): Song[] {
+    const out: Song[] = [];
+    for (const step of WARM_STEPS) {
+      const song = this.songAt(step);
+      if (song && !out.some((other) => other.id === song.id)) out.push(song);
     }
-    const url = this.library.streamUrl(next.song, this.rate.maxBitRate);
-    // Already holding exactly this, under exactly this URL: preparing it twice is the same work.
-    if (this.prepared?.songId === next.song.id && this.prepared.url === url) return;
-    const songId = next.song.id;
-    this.cancelPrepared();
-    void this.engine
-      .prepareNext({
-        id: next.song.id,
-        url,
-        crossOrigin: this.library.crossOrigin,
-        title: next.song.title,
-        artist: next.song.artist ?? 'Unknown artist',
-        album: next.song.album ?? '',
-        artworkUrl: this.library.coverUrl(next.song.coverArt ?? next.song.albumId, 512),
-        durationMs: (next.song.duration ?? 0) * 1000,
-      })
-      .then((settled) => {
-        // A prepare that did not happen is not a prepared track — and the queue must not say it is.
-        if (settled === false) return;
-        // The listener may have moved while the player was taking it; then it is not "the next one".
-        if (this.nextSongId() !== songId) return;
-        this.prepared = { songId, url };
-      })
-      .catch((error: unknown) => {
-        console.warn('[navilite] the next track could not be prepared on the player', error);
-      });
+    return out;
+  }
+
+  /** The current track and its neighbourhood by id — what a selection is allowed to keep warm. */
+  private neighbourhoodIds(): string[] {
+    const current = this.currentSong;
+    return [...(current ? [current.id] : []), ...this.neighbourSongs().map((song) => song.id)];
+  }
+
+  /** A play/ warm request for one song at one exact URL. */
+  private trackRequestFor(song: Song, url: string): TrackRequest {
+    return {
+      id: song.id,
+      url,
+      crossOrigin: this.library.crossOrigin,
+      title: song.title,
+      artist: song.artist ?? 'Unknown artist',
+      album: song.album ?? '',
+      artworkUrl: this.library.coverUrl(song.coverArt ?? song.albumId, 512),
+      durationMs: (song.duration ?? 0) * 1000,
+    };
   }
 
   private cancelPrepared(): void {
-    this.prepared = null;
+    // The engine holds the pool, so it is the engine that is told to throw it away (v1.9.5) — the
+    // queue keeps no copy that could disagree with it.
     void this.engine.discardPrepared?.();
   }
 

@@ -781,6 +781,28 @@ img {
   border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
 }
 
+/*
+ * v1.9.5 — the app's own account of what is happening, under the chip.
+ *
+ * One line, monospaced-adjacent and dim: it is diagnostic, it is only drawn when the state is not
+ * a healthy playing-with-a-live-spectrum track, and it must never push the bar's own controls
+ * around, so it spans the bar and truncates rather than wrapping.
+ */
+.pb-reason {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pb-reason.hidden {
+  display: none;
+}
+
 /* ------------------------------------------------------------ now playing */
 
 /*
