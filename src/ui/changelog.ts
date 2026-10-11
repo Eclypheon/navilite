@@ -89,4 +89,11 @@ export const CHANGELOG: ChangelogRelease[] = [
       'Back and forward on the phone walk those three screens the way you would expect: back from the lyrics is the spectrum, forward is the lyrics again.',
     ],
   },
+  {
+    version: '1.5.1',
+    date: '2026-10-11',
+    items: [
+      'The settings screen can no longer be dragged sideways. The playback dropdown\'s own text was still wider than the box it sits in — 301 px of it — so tapping it left the screen free to slide; the box clips its text now and there is nothing to drag (measured on your phone: 301 px before, 0 px after).',
+    ],
+  },
 ];

@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.5, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5']);
+test('the changelog is the owner-visible list: v1.0 through v1.5.1, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -72,6 +72,18 @@ test('every v1.5 change the owner asked for is described in his own terms', () =
   assert.match(text, /200 px of sideways travel/, 'the diagonal gesture that must not turn a page');
   for (const item of v15?.items ?? []) {
     assert.doesNotMatch(item, /viewport|focus-zoom|transform|translate|flex|gesture handler|visual viewport/i);
+  }
+});
+
+test('the settings screen he could still drag sideways is described in his own terms', () => {
+  const v151 = CHANGELOG.find((release) => release.version === '1.5.1');
+  const text = v151?.items.join('\n') ?? '';
+  // His report carried over from v1.5: the settings screen still slid sideways under his finger.
+  assert.match(text, /settings screen can no longer be dragged sideways/, 'his report: the screen that still moved');
+  // The numbers this release is proved on have to be in the text he reads.
+  assert.match(text, /301 px before, 0 px after/, 'the before/after measured on his phone');
+  for (const item of v151?.items ?? []) {
+    assert.doesNotMatch(item, /viewport|focus-zoom|transform|translate|flex|gesture handler|visual viewport|overflow|CSS/i);
   }
 });
 

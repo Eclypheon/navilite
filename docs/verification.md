@@ -1228,3 +1228,95 @@ than wrong:
   beat, stepped `seen` past the report, and waited out its whole timeout. It now walks every entry
   posted since the last look, in order.
 
+## 15. v1.5.1 — the settings screen he could still drag sideways (2026-10-11)
+
+The release for §14.1. v1.5 fixed the focus size but the settings screen was still draggable
+sideways — 301 px of the playback dropdown's own content, which WebKit does not clip — so the owner
+was still running a build that moved under his finger. This section is the release: the version
+bump, the changelog entry, the two artifacts and the tag. It adds no measurement of its own; the one
+it stands on is §14.1, and the source it ships was already committed as `11b6bcf`.
+
+### 15.1 Tests, build, and the release payload measured in the engine that ships
+
+```
+$ npm run build      → dist/assets/index-UMqln3si.js   89.54 kB │ gzip: 31.08 kB
+                       dist/assets/index-9geUir_A.css   12.10 kB │ gzip:  3.18 kB
+$ npm run typecheck  (tsc --noEmit, clean)
+$ npm test           ℹ tests 76  ℹ pass 76  ℹ fail 0   (75 → 76: the new v1.5.1 changelog assertion)
+$ npm run test:layout ✔ the app has no horizontal overflow at 393 x 852 on any route, either mode
+```
+
+The pager flake was met twice and re-run three times: the first full run failed `test/pager.test.ts`
+on `and it leads by one line` (34 of 35 lit lines), the second full run on that same check (24 of 35)
+plus `a hand scroll is left alone`, and the isolated run **and** the third full run both passed — the
+third one being the 76/76 above. Nothing in this diff touches the lyrics scroll (changelog text, four
+version strings, and the CSS rule §14.1 had already fixed), and the same flake is recorded on v1.5's
+own card, before any of this existed.
+
+The release payload itself, in real WebKit — `node tools/device-probe.mjs --device A0DAA171-… 
+--scenario settings-overflow` against this build's `dist/` (iPhone 15 Pro simulator):
+
+```
+the shipping rule set: surface 393 -> 393 px, overflow-x auto, a push moves it 0 px
+the control (pre-fix rule, same run, same element): 301 px
+RESULT: the settings screen has nothing to drag sideways.            (exit 0)
+```
+
+That is §14.1's reading, taken again on the release build. The re-run wrote
+`docs/layout-393-settings-overflow-device-report.json` identically apart from the probe port and the
+timestamp, so the committed copy of that report is left as it was.
+
+### 15.2 What ships
+
+- `CHANGELOG.md` and `src/ui/changelog.ts`: one `## 1.5.1 — 2026-10-11` bullet, in his terms ("The
+  settings screen can no longer be dragged sideways … 301 px before, 0 px after"), free of the
+  internal vocabulary the other sections are checked against.
+- `test/changelog.test.ts`: the version list is now `['1.0' … '1.5.1']`, and a new test pins the 1.5.1
+  section — its sentence, its numbers, and a ban list — the way the v1.4 and v1.5 sections are
+  pinned. That is the +1 test.
+- `package.json` 1.5.0 → 1.5.1; `android/app/build.gradle` `versionName "1.5.1"` / `versionCode 7`;
+  `ios/App/App.xcodeproj/project.pbxproj` `MARKETING_VERSION = 1.5.1` / `CURRENT_PROJECT_VERSION = 7`
+  (Debug and Release), the same way v1.5 did it.
+- Branch `release/v1.5.1` off `release/v1.5`'s tip (fast-forwarded onto the fix, so the built commit
+  is `11b6bcf` plus this card's release commit), pushed, with the annotated tag `v1.5.1` on the built
+  commit. No existing tag was moved or force-pushed.
+
+### 15.3 Artifacts
+
+```
+artifacts/Navilite-1.5.1-debug.apk      8,785,271 bytes   (v1.4: 8,782,355 — +2,916, +0.03%)
+artifacts/Navilite-1.5.1-unsigned.ipa     869,342 bytes   (v1.4:   866,719 — +2,623, +0.30%)
+$ aapt2 dump badging …Navilite-1.5.1-debug.apk  →  versionCode='7' versionName='1.5.1'
+$ tools/build-ios-ipa.sh                        →  app version 1.5.1 (7), UIBackgroundModes[0]=audio
+```
+
+Every hashed asset in `dist/assets/` is byte-identical to its copy inside **both** archives (sha256 of
+each member read straight out of the zip, so nothing was extracted to disk):
+
+| asset | sha256 — the same in `dist/`, the APK and the IPA |
+| --- | --- |
+| `index-UMqln3si.js` (89,546 B) | `524ae08be2489d4131aac27b26f7d9f8969a6fb7c5d4602c970d7ba55e1e8534` |
+| `index-9geUir_A.css` (12,103 B) | `02f4872c03d9471184863f8d0650efffd82eab439d086567fe9881741ffdc4a3` |
+| `base-Ilm-LlNj.js`, `esm-B7L2JGfO.js`, `esm-vQC5DiGm.js`, `native-3kB3u6fK.js`, `web-CdZqwKzK.js`, `web-DFsRYH62.js` | `acf4a23f…`, `f6f45b77…`, `743acba7…`, `1aae361a…`, `10abf09e…`, `01f9c175…` |
+
+The fix is in the shipped stylesheet, not only on disk —
+`select.field{text-overflow:ellipsis;width:100%;max-width:100%;overflow:hidden}` is in
+`index-9geUir_A.css` inside both artifacts — and the shipped chunk carries the new changelog text
+(`can no longer be dragged sideways` is in `index-UMqln3si.js`), so the "What's new" page he opens
+under Settings says 1.5.1 rather than 1.5.
+
+Neither binary is in the repo (`artifacts/` is gitignored). Both were attached to the release card
+`t_0caf0353`.
+
+### 15.4 Still unverified
+
+- **The APK on an Android device.** There is no Android device run for this release, and none for the
+  ones before it: the Android half of this fix is the same stylesheet the simulator measured, and
+  §12.6's note holds — Android's web view does not drag its own content the way WKWebView does.
+- **The installed `.ipa` on the simulator.** The device run above loads the release `dist/` in
+  Safari, not the app bundle: `--app` needs a build with `server.url` pointing at the probe port, and
+  the release build deliberately has none. What ties the two together is §15.3's byte-identical
+  payload, not a run of the installed binary.
+- Everything else carries over from §14.4 unchanged: Safari's own edge-swipe on a real finger, the
+  native scroll a real vertical drag produces, landscape, and the iPad.
+
