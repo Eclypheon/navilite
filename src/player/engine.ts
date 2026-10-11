@@ -22,7 +22,7 @@
  */
 import { platformInfo, type OsName } from '../platform.ts';
 import type { PlaybackPreference } from '../storage/settings.ts';
-import { createNativeBridge, type NativeBridge, type NativeTrackInfo } from './native.ts';
+import { createNativeBridge, type NativeBridge, type NativeBridgeEvents, type NativeTrackInfo } from './native.ts';
 
 export type PlaybackBackend = 'web' | 'native';
 export type EngineState = 'idle' | 'loading' | 'playing' | 'paused' | 'error';
@@ -47,6 +47,26 @@ export interface EngineStatus {
   preference: PlaybackPreference;
 }
 
+/**
+ * What the engine needs from its own environment, injectable so the native paths can be driven
+ * without a phone. Production passes nothing: the platform is `platformInfo()` and the bridge is
+ * `createNativeBridge`. `test/engine-native.test.ts` passes a fake bridge whose calls take a
+ * measurable amount of time, which is how the press-to-play latency is quoted.
+ */
+export interface EngineOptions {
+  platform?: { os: OsName; native: boolean };
+  nativeFactory?: (os: OsName, events: NativeBridgeEvents) => Promise<NativeBridge | null>;
+}
+
+/**
+ * How long a `resume()` is given to turn into actual playback before the engine stops believing it.
+ *
+ * `NativeAudio.resume()` is a request, not a fact: AVPlayer can decline to come back after an
+ * interruption or a route change, and the plugin answers the *call*, not the state. Asking the
+ * player 300 ms later is what separates "it is playing" from "the promise resolved".
+ */
+const RESUME_CONFIRM_MS = 300;
+
 /** ~1.8 s of silence from the analyser while audio is definitely playing = not real samples. */
 const ZERO_FRAMES_BEFORE_THEME = 18;
 /**
@@ -66,6 +86,18 @@ export class AudioEngine {
   private readonly nativePlatform: boolean;
   private ctx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
+  /**
+   * The analyser's output stage. It is *always* connected to the destination — at a gain of 0
+   * while the native engine is the one being heard.
+   *
+   * v1.7 connected `source → analyser` and left it there for the native case, on the theory that
+   * an unconnected analyser is a silent one. A graph with no path to the destination is not
+   * rendered at all: both engines prune it, `getByteFrequencyData()` fills the array with zeros and
+   * raises nothing, and the visualiser drops through to the album-art theme. That is the dead
+   * spectrum the owner reported. Silence has to be a gain of zero on a live graph, never a missing
+   * edge — so the edge is written once, here, and only the gain ever changes.
+   */
+  private analyserGain: GainNode | null = null;
   private graphSource: MediaElementAudioSourceNode | null = null;
   private graphFailedReason: string | null = null;
   private freq: Uint8Array<ArrayBuffer> = new Uint8Array(new ArrayBuffer(1024));
@@ -82,6 +114,10 @@ export class AudioEngine {
   private preference: PlaybackPreference = 'auto';
   private native: NativeBridge | null = null;
   private nativeReady: Promise<NativeBridge | null> | null = null;
+  /** How the native bridge is built — real in production, fake in `test/engine-native.test.ts`. */
+  private readonly nativeFactory: (os: OsName, events: NativeBridgeEvents) => Promise<NativeBridge | null>;
+  /** True while a `confirmPlaying` check is in flight, so two taps cannot both restart a track. */
+  private confirming = false;
   private nativePositionMs = 0;
   private nativeDurationMs = 0;
   private crossOriginRetry = false;
@@ -110,10 +146,11 @@ export class AudioEngine {
   onNextRequested: (() => void) | null = null;
   onPreviousRequested: (() => void) | null = null;
 
-  constructor() {
-    const info = platformInfo();
+  constructor(options: EngineOptions = {}) {
+    const info = options.platform ?? platformInfo();
     this.os = info.os;
     this.nativePlatform = info.native;
+    this.nativeFactory = options.nativeFactory ?? createNativeBridge;
 
     const el = new Audio();
     el.preload = 'auto';
@@ -222,7 +259,23 @@ export class AudioEngine {
 
   setPreference(preference: PlaybackPreference): void {
     this.preference = preference;
+    this.prewarm();
     this.emit();
+  }
+
+  /**
+   * Build the native bridge now, and throw the result away — the press must not pay for it.
+   *
+   * v1.7 built the bridge *inside* the first `play()`: a dynamic import of the plugin, a
+   * `configure()` round trip, three `addListener` round trips, and only then the unload/preload of
+   * the asset and the `play`. All of it sat between the tap and the first sound, and that is the
+   * "noticeable delay when pressing play" the owner reported. The plugin costs nothing while idle
+   * (it activates the session when it is asked to play), so it is built at launch instead, and the
+   * tap only has the asset left to load.
+   */
+  prewarm(): void {
+    if (!this.nativePlatform || this.preference === 'web') return;
+    void this.ensureNative();
   }
 
   get currentTrack(): TrackRequest | null {
@@ -233,7 +286,7 @@ export class AudioEngine {
   private async ensureNative(): Promise<NativeBridge | null> {
     if (!this.nativePlatform) return null;
     if (!this.nativeReady) {
-      this.nativeReady = createNativeBridge(this.os, {
+      this.nativeReady = this.nativeFactory(this.os, {
         onPosition: (seconds) => {
           this.nativePositionMs = seconds * 1000;
           this.emit();
@@ -287,10 +340,8 @@ export class AudioEngine {
    * `preference: 'web'` is still honoured — it is the escape hatch for the PWA and for debugging,
    * and it now means "no native engine at all", not "later".
    */
-  private async wantNative(): Promise<boolean> {
-    if (this.preference === 'web') return false;
-    if (!this.nativePlatform) return false;
-    return (await this.ensureNative()) !== null;
+  private wantsNative(): boolean {
+    return this.preference !== 'web' && this.nativePlatform;
   }
 
   async play(track: TrackRequest, startMs = 0): Promise<void> {
@@ -299,8 +350,20 @@ export class AudioEngine {
     this.state = 'loading';
     this.crossOriginRetry = false;
     this.emit();
-    if (await this.wantNative()) await this.startNative(track, startMs);
-    else await this.startWeb(track, startMs);
+    /*
+     * The bridge is taken as it already is (`this.native`, which the pre-warm has usually built)
+     * rather than awaited first: awaiting it — even a promise that has already resolved — puts the
+     * optimistic state of `startNative` one microtask behind every press for no reason. Only a
+     * cold, un-pre-warmed engine pays for the bridge here.
+     */
+    if (this.wantsNative()) {
+      const ready = this.native ?? (await this.ensureNative());
+      if (ready) {
+        await this.startNative(track, startMs, ready);
+        return;
+      }
+    }
+    await this.startWeb(track, startMs);
   }
 
   async toggle(): Promise<void> {
@@ -321,17 +384,70 @@ export class AudioEngine {
     this.el.pause();
   }
 
+  /**
+   * Play, from a paused native player.
+   *
+   * Two things changed in v1.7.1, and both of them come from the owner's own report.
+   *
+   * **It is optimistic.** The state and the icon flip here, on the tap, rather than after a bridge
+   * round trip — that ordering *was* the "noticeable delay when pressing play". Nothing is claimed
+   * that is not checked immediately afterwards (`confirmPlaying`).
+   *
+   * **It is confirmed.** `NativeAudio.resume()` resolving does not mean sound came out: after an
+   * interruption, a route change, or an item iOS stopped while the app was suspended, AVPlayer
+   * simply does not come back — and v1.7 then sat showing "playing" over a silent player. That is
+   * exactly the state the owner was stuck in: the tap did nothing, and only nudging the seek bar and
+   * toggling pause/play unstuck it. So the tap is checked against the player, and if the player did
+   * not come up, the track is started again from where it stopped — inside the same tap.
+   */
   async resume(): Promise<void> {
     if (this.backend === 'native') {
-      await this.native?.resume();
       this.state = 'playing';
-      this.restartAnalysis();
       this.emit();
+      this.restartAnalysis();
+      await this.native?.resume();
+      this.onProgress?.(this.nativePositionMs, this.durationMs());
+      void this.confirmPlaying();
       return;
     }
     await this.resumeContext();
     await this.el.play().catch((cause: unknown) => this.fail(cause));
     this.startMeter();
+  }
+
+  /**
+   * The second half of a native `resume()`: ask the player what it is *actually* doing, and if the
+   * answer is "not playing", start the track again from the position it stopped at.
+   *
+   * This is the rule the owner asked for in his own words — one tap on play must restart it, with
+   * no seek-bar nudge and no pause/play dance. A resume that resolves and leaves the player stopped
+   * is the one case that would otherwise still need the dance, so it is caught here.
+   */
+  private async confirmPlaying(): Promise<void> {
+    const bridge = this.native;
+    const track = this.track;
+    if (!bridge || !track || this.backend !== 'native' || this.confirming) return;
+    this.confirming = true;
+    try {
+      // A resumed AVPlayer is not instantaneous; asking immediately would restart healthy tracks.
+      await new Promise((resolve) => setTimeout(resolve, RESUME_CONFIRM_MS));
+      // The user may have moved on inside that window — a different track, or a pause.
+      if (this.state !== 'playing' || this.track !== track) return;
+      const truth = await bridge.sync();
+      if (!truth) return; // The player could not be read; the optimistic state stands.
+      if (truth.playing) {
+        this.nativePositionMs = truth.positionMs;
+        this.emit();
+        return;
+      }
+      // Stopped (or the queue cleared) while the player was being asked: the restart is off.
+      if (this.track !== track || this.state !== 'playing') return;
+      const from = truth.positionMs > 0 ? truth.positionMs : this.nativePositionMs;
+      this.nativePositionMs = from;
+      await this.startNative(track, from);
+    } finally {
+      this.confirming = false;
+    }
   }
 
   async seek(positionMs: number): Promise<void> {
@@ -415,15 +531,16 @@ export class AudioEngine {
     this.startMeter();
   }
 
-  /** Whether the analyser element is connected to the speakers (web path) or to nothing (native). */
+  /**
+   * Whether the analyser's output is heard (the web path) or muted (the native path).
+   *
+   * The mute is a **gain of zero on a live graph**, never a disconnect. See `analyserGain`: a graph
+   * with no path to the destination is pruned by the engine and reads as a flatline, which is why
+   * v1.7's silent copy produced no spectrum at all.
+   */
   private setGraphOutput(audible: boolean): void {
-    if (!this.analyser) return;
-    try {
-      this.analyser.disconnect();
-    } catch {
-      // Not connected yet — `disconnect()` throws when there is nothing to disconnect.
-    }
-    if (audible && this.ctx) this.analyser.connect(this.ctx.destination);
+    if (!this.analyserGain) return;
+    this.analyserGain.gain.value = audible ? 1 : 0;
   }
 
   private stopAnalysis(): void {
@@ -486,6 +603,15 @@ export class AudioEngine {
       this.nativePositionMs = truth.positionMs;
       if (truth.durationMs > 0) this.nativeDurationMs = truth.durationMs;
       this.state = truth.playing ? 'playing' : this.state === 'idle' ? 'idle' : 'paused';
+    } else if (this.state === 'playing') {
+      /*
+       * The player would not answer — an unloaded asset, a bridge that threw, a session another app
+       * took. Never leave a "playing" on screen that the tap cannot act on (the owner's stuck
+       * transport: the tap resolved to a pause on a player that was already stopped). Showing
+       * "paused" is the safe half of an unknown: the next tap re-reads the truth before it decides,
+       * and if the player turns out to be playing after all, `confirmPlaying` says so.
+       */
+      this.state = 'paused';
     }
     if (this.state === 'playing') await this.startAnalysis(this.track, this.nativePositionMs);
     this.emit();
@@ -530,8 +656,8 @@ export class AudioEngine {
     this.startMeter();
   }
 
-  private async startNative(track: TrackRequest, startMs: number): Promise<void> {
-    const bridge = await this.ensureNative();
+  private async startNative(track: TrackRequest, startMs: number, ready?: NativeBridge): Promise<void> {
+    const bridge = ready ?? (await this.ensureNative());
     if (!bridge) {
       await this.startWeb(track, startMs);
       return;
@@ -546,17 +672,34 @@ export class AudioEngine {
     this.emit();
     // A load is an unload + preload: the outgoing asset's stop must not be read as a track ending.
     this.assetSwap = true;
+    /*
+     * v1.7.1: the transport is put into "playing" *before* the round trips, not after them.
+     *
+     * `load()` unloads, preloads the asset over the network and `play()` starts it — three bridge
+     * round trips and an AVPlayer item preparation, all of which v1.7 sat in front of the icon
+     * flipping, which is the delay the owner felt on pressing play. The state is now optimistic and
+     * the reconciliation is the honest half: a failure sets `error` below, and a track that the
+     * player refuses to start is caught by `confirmPlaying`.
+     */
+    this.state = 'playing';
+    this.emit();
+    /*
+     * The silent analysis copy starts *here* — on the tap, in parallel with the native load — and
+     * not after it. v1.7 asked for it once `load()` and `play()` had both resolved, i.e. a few
+     * hundred milliseconds after the gesture that started the track; on iOS a Web Audio graph is
+     * only allowed to start while the gesture that asked for it is still live, so the ordering was
+     * one way for the spectrum to come back dead on the phone while every harness here is green.
+     * Running it concurrently costs nothing: the copy is silent and reads the same stream.
+     */
+    void this.startAnalysis(track, startMs);
     try {
       await bridge.load(track);
       await bridge.play(startMs / 1000);
-      this.state = 'playing';
     } catch (cause) {
       this.fail(cause);
     } finally {
       this.assetSwap = false;
     }
-    // The spectrum, foreground only, and only if there is something to draw it for.
-    if (this.state === 'playing') void this.startAnalysis(track, startMs);
     this.emit();
   }
 
@@ -583,8 +726,20 @@ export class AudioEngine {
       // either, so a bar's height is exactly this frame's magnitude.
       analyser.smoothingTimeConstant = 0;
       analyser.minDecibels = -95;
+      /*
+       * source → analyser → gain → destination, written once and never taken apart.
+       *
+       * The last hop is the v1.7.1 fix: the analyser is always reachable from the destination, and
+       * the *gain* is what makes the analysis copy silent (0) on the native path. v1.7 disconnected
+       * the analyser instead, and a graph nothing reaches is not rendered — the analyser returned
+       * zeros with no error, the honesty check called it silence, and the visualiser showed the
+       * album-art theme. This is the difference between "inaudible" and "not running".
+       */
+      const gain = ctx.createGain();
+      gain.gain.value = 1;
       source.connect(analyser);
-      analyser.connect(ctx.destination);
+      analyser.connect(gain);
+      gain.connect(ctx.destination);
       ctx.addEventListener('statechange', () => {
         if (ctx.state === 'suspended') {
           this.spectrumLive = false;
@@ -595,6 +750,7 @@ export class AudioEngine {
       });
       this.ctx = ctx;
       this.analyser = analyser;
+      this.analyserGain = gain;
       this.graphSource = source;
       this.freq = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
     } catch (error) {

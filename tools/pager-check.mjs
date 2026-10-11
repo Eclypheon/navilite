@@ -34,7 +34,10 @@
  *      the finger down**, which is the point of their living outside the strip; and the lyric
  *      highlight still advances mid-drag.
  *   8. **History** walks the panes (the owner's "optional but nice").
- *   9. **The lyrics follow** leads by one line, never scrolls past the end of the song, and leaves a
+ *   9. **The seek bar owns its own drag** (v1.7.1). A finger that starts on the bar and travels most
+ *      of the screen must seek the track and move no pane — the owner could not drag it at all,
+ *      because the gesture was being read as a page turn.
+ *  10. **The lyrics follow** leads by one line, never scrolls past the end of the song, and leaves a
  *      hand scroll alone for a few seconds — and the first line is not in the panel's faded band,
  *      which is the v1.5 clipping report.
  *
@@ -414,7 +417,76 @@ async function main() {
         `pane ${pagerOf(atSpectrum).position} on ${atSpectrum.route}, settled ${pagerOf(atSpectrum).settled}`,
       );
 
-      /* ------------------------------------- 6. the controls, with the finger still down */
+      /* --------------------- 6. the seek bar owns a horizontal drag (v1.7.1) */
+      /*
+       * The owner: *"i can't drag the seek bar because it registers as im trying to swipe to a
+       * different pane. swipes on the seek bar should allow me to seek through the audio
+       * seamlessly."*
+       *
+       * So: a real finger through the input pipeline, starting *on the bar* (a fifth of the way
+       * along it) and dragging right across most of the screen — the exact shape that would turn a
+       * page anywhere else on this screen. The pager must not move a pixel, and the position must
+       * follow the finger, including in the middle of the drag rather than only at release.
+       */
+      const bar = atSpectrum.progress;
+      if (!bar) throw new Error('the seek bar is not in the now screen geometry');
+      const positionBefore = await evaluate(cdp, `window.__navilite.status().positionMs`);
+      /*
+       * The pane the screen is resting on is the baseline, not zero: a rest on the spectrum leaves
+       * `.view-scroll` translated by a whole screen — that is the pose, and it must be *the same
+       * pose* after every move. ("The pager never moved" is equality with the resting state, not
+       * equality with zero, which is only true on the playlist.)
+       */
+      const poseOf = (geometry) =>
+        [
+          Math.round(pagerOf(geometry).offset * 1000),
+          translateX(geometry.now.translate),
+          translateX(geometry.pages.translate),
+          translateX(geometry.list.translate),
+        ].join(':');
+      const restingPose = poseOf(atSpectrum);
+      const seekDrag = await drag(cdp, {
+        fromX: bar.left + bar.width * 0.2,
+        toX: bar.left + bar.width * 0.8,
+        y: bar.top + bar.height / 2,
+        steps: 6,
+        stepDelayMs: 32,
+        afterReleaseMs: 600,
+      });
+      const posesWhileSeeking = seekDrag.samples.map((sample) => poseOf(sample.geometry));
+      const afterSeek = await evaluate(
+        cdp,
+        `({
+          value: Number(document.querySelector('.now-progress .progress').value),
+          positionMs: window.__navilite.status().positionMs,
+          durationMs: window.__navilite.status().durationMs,
+          route: location.hash,
+          pane: window.__navilite.pager().position,
+          barWidth: ${Math.round(bar.width)},
+        })`,
+      );
+      readings.stages.seekDrag = { bar, restingPose, posesWhileSeeking, afterSeek, positionBefore };
+      check(
+        'a drag that starts on the seek bar never moves the pager',
+        posesWhileSeeking.every((pose) => pose === restingPose) &&
+          afterSeek.pane === atSpectrum.pager.position &&
+          afterSeek.route === '#/now',
+        `pose at rest ${restingPose} · pose during the drag ${[...new Set(posesWhileSeeking)].join(' / ')} · ` +
+          `after: pane ${afterSeek.pane} on ${afterSeek.route}`,
+      );
+      check(
+        'and the same drag seeks the track where the finger went',
+        Math.abs(afterSeek.positionMs - positionBefore) > 3000 && afterSeek.value > 500,
+        `position ${Math.round(positionBefore / 1000)}s → ${Math.round(afterSeek.positionMs / 1000)}s ` +
+          `(slider at ${afterSeek.value}/1000 of ${Math.round(afterSeek.durationMs / 1000)}s, thumb released at 80 % of the bar)`,
+      );
+      // Put the track back where it was: the checks that follow walk the lyrics from a known
+      // position, and a track parked at 80 % of its length is a different walk.
+      await evaluate(cdp, `${IN_PAGE}seekAudio(${Math.max(1, Math.round(positionBefore / 1000))})`);
+      await wait(300);
+      say('');
+
+      /* ------------------------------------- 7. the controls, with the finger still down */
       await touch(cdp, 'touchStart', 330, 300);
       await touch(cdp, 'touchMove', 170, 300);
       await wait(80);
@@ -443,7 +515,7 @@ async function main() {
         `mid-drag (offset ${pagerOf(midDrag).offset}): “${activeBefore}” → seeking the track → “${activeAfter}”`,
       );
 
-      /* ------------------------------------------------------------- 7. history */
+      /* ------------------------------------------------------------- 8. history */
       // Tolerant on purpose: the check is the *numbers* recorded below, not the wait. A pane the app
       // refuses to settle on has to show up as a reading, not as a hang.
       await evaluate(cdp, `${IN_PAGE}setPillMode(1).catch(function () { return null; })`);
@@ -470,7 +542,7 @@ async function main() {
         `from ${onLyrics.route} (pane ${pagerOf(onLyrics).position}) · back → ${back.route} (pane ${pagerOf(back).position}) · forward → ${forward.route} (pane ${pagerOf(forward).position})`,
       );
 
-      /* ------------------------------------------------- 8. the lyrics themselves */
+      /* ------------------------------------------------- 9. the lyrics themselves */
       // A song whose sidecar is longer than the panel: the twelve long lines of the stress album,
       // played from the album's own screen, so the tap is the one the owner makes.
       await evaluate(cdp, `location.hash = '#/album/album-ja-1'; true`);
@@ -559,7 +631,7 @@ async function main() {
           : `${ledWhole.length} of ${lead.length} lit lines had the next one fully visible (deepest ${Math.max(...lead.map((step) => Math.round(step.upcoming.bottom)))} px down a ${density ? Math.round(density.panelHeight) : '?'} px panel), ${clamped.length} of them because the panel was already at its end`,
       );
 
-      /* --------------------------------------------------- 9. the grace period */
+      /* -------------------------------------------------- 10. the grace period */
       const middle = walk.find((step) => step.index === Math.floor(lineCount / 2)) ?? walk[0];
       const beforeHand = await evaluate(cdp, `${IN_PAGE}lyricsFollowState()`);
       await cdp.send('Input.synthesizeScrollGesture', {

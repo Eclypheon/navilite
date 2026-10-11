@@ -130,4 +130,14 @@ export const CHANGELOG: ChangelogRelease[] = [
       'The spectrum is still the real one — the reading of the music that is actually playing. It is a foreground picture now: while the app is in the background the screen is off anyway, and it returns the moment you open it.',
     ],
   },
+  {
+    version: '1.7.1',
+    date: '2026-10-11',
+    items: [
+      'The visualiser is back. It had gone flat when playback moved to the phone\'s own player, and it reads the music again now — the real reading of what you are hearing, unchanged from before.',
+      'Coming back to the app just works. Returning from the background now asks the player what is actually true and makes the screen agree with it, so the buttons match the sound: still playing shows playing, and if it stopped, one tap on play starts it again from where it stopped — no nudging the seek bar, no pause-then-play to unstick it.',
+      'Pressing play answers at once. The button used to wait for the phone\'s player to say yes before it changed; it now changes on your touch and is checked a moment later, and the player is got ready when the app opens rather than when you press. Measured in the harness: the screen used to flip a fifth of a second later than the touch, and now flips on it.',
+      'Dragging the seek bar seeks. A swipe that starts on the bar belongs to the bar: the screens no longer turn while you are scrubbing, and the track follows your thumb as you drag it instead of jumping when you let go.',
+    ],
+  },
 ];

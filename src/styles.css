@@ -735,6 +735,17 @@ img {
   border-radius: 999px;
   background: var(--line);
   cursor: pointer;
+  /*
+   * v1.7.1: the seek bar owns a horizontal drag that starts on it.
+   *
+   * The screen around it is `touch-action: pan-y ...` (see `.now`), which is right for the panes —
+   * and which the platform also applies to a gesture on the slider, so a horizontal drag could be
+   * read as a pan/swipe instead of turning the thumb. `none` on the control itself says the opposite
+   * for this subtree only: the browser claims no scroll or zoom here, the platform's own slider drag
+   * is free to run, and the pager has already refused the gesture by name (`data-pager="off"` on the
+   * row) and by hit-test (`src/ui/pager.ts`).
+   */
+  touch-action: none;
 }
 
 .progress::-webkit-slider-thumb {

@@ -354,7 +354,7 @@ function buildShell(root: HTMLElement): Shell {
         h('button', { class: 'transport small', 'aria-label': 'Next', onclick: () => void queueRef?.next() }, [icon(ICONS.next)]),
       ]),
     ]),
-    h('div', { class: 'pb-progress' }, [barPosition, barProgress, barDuration]),
+    h('div', { class: 'pb-progress', 'data-pager': 'off' }, [barPosition, barProgress, barDuration]),
     barChip,
   ]);
 
@@ -412,7 +412,7 @@ function buildShell(root: HTMLElement): Shell {
     h('div', { class: 'now-page now-page-lyrics' }, [lyricsHost]),
   ]);
   const nowOverlay = h('section', { class: 'now hidden', 'aria-label': 'Now playing' }, [
-    h('div', { class: 'now-top' }, [
+    h('div', { class: 'now-top', 'data-pager': 'off' }, [
       h('button', { class: 'icon-button now-close', 'aria-label': 'Close now playing', onclick: () => closeNow() }, [
         icon(ICONS.close),
       ]),
@@ -422,8 +422,8 @@ function buildShell(root: HTMLElement): Shell {
     nowTitle,
     nowSubtitle,
     nowContext,
-    h('div', { class: 'now-progress' }, [nowPosition, nowProgress, nowDuration]),
-    h('div', { class: 'now-bar', 'aria-label': 'Playback controls' }, [nowShuffle, h('button', {
+    h('div', { class: 'now-progress', 'data-pager': 'off' }, [nowPosition, nowProgress, nowDuration]),
+    h('div', { class: 'now-bar', 'data-pager': 'off', 'aria-label': 'Playback controls' }, [nowShuffle, h('button', {
       class: 'transport',
       'aria-label': 'Previous',
       onclick: () => void queueRef?.previous(),
@@ -830,26 +830,85 @@ function setNowMode(mode: NowMode): void {
   location.hash = target;
 }
 
+/**
+ * The seek bar, and the drag that seeks with it.
+ *
+ * v1.7.1 — three things, all of them the owner's report that *"i can't drag the seek bar because it
+ * registers as im trying to swipe to a different pane"*:
+ *
+ *   1. **The gesture belongs to the bar.** The row carries `data-pager="off"` and the pager asks by
+ *      hit-test as well as by element, so a drag that starts here can never turn a page
+ *      (`src/ui/pager.ts`, `ownsGesture`). The CSS gives the control its own `touch-action`, so the
+ *      platform does not read the horizontal movement as a pan either.
+ *   2. **The drag seeks, continuously.** v1.7 sought only on `change` — that is, on release — so
+ *      nothing happened while the thumb was being dragged. Every move now seeks, throttled to one
+ *      round trip per `SEEK_INTERVAL_MS`, with the last position always committed and the value on
+ *      release seeking exactly where the finger left it.
+ *   3. **The thumb is not pulled out from under the finger.** `scrubbing` is set on the way down (on
+ *      `pointerdown` and on `touchstart`, because audio controls are reached by touch) and cleared
+ *      when the gesture ends however it ends, so the engine's own position updates stop writing the
+ *      input's value while a finger is on it.
+ */
+const SEEK_INTERVAL_MS = 120;
+
 function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => PlaybackQueue | null): void {
-  input.addEventListener('pointerdown', () => {
+  let lastSeekAt = 0;
+  let pendingMs: number | null = null;
+  let trailing: ReturnType<typeof setTimeout> | null = null;
+
+  const durationOf = (): number => queueDurationMs(getQueue());
+  const valueMs = (): number => (Number(input.value) / 1000) * durationOf();
+
+  const commit = (ms: number): void => {
+    const queue = getQueue();
+    if (!queue || ms < 0) return;
+    void queue.seek(ms);
+  };
+
+  const begin = (): void => {
     shell.scrubbing = true;
-  });
-  input.addEventListener('input', () => {
-    const queue = getQueue();
-    if (!queue) return;
-    const duration = queueDurationMs(getQueue());
-    if (duration > 0) {
-      const seconds = (Number(input.value) / 1000) * (duration / 1000);
-      input.setAttribute('aria-valuetext', formatTime(seconds));
-    }
-  });
-  input.addEventListener('change', () => {
+  };
+
+  /** Whatever ends the gesture: stop hiding the thumb, and seek to where the finger left it. */
+  const finish = (): void => {
     shell.scrubbing = false;
-    const queue = getQueue();
-    const duration = queueDurationMs(queue);
-    if (!queue || duration <= 0) return;
-    void queue.seek((Number(input.value) / 1000) * duration);
+    if (trailing !== null) clearTimeout(trailing);
+    trailing = null;
+    pendingMs = null;
+    if (durationOf() > 0) commit(valueMs());
+  };
+
+  input.addEventListener('pointerdown', begin);
+  input.addEventListener('touchstart', begin, { passive: true });
+  input.addEventListener('input', () => {
+    const duration = durationOf();
+    if (duration <= 0) return;
+    const ms = valueMs();
+    input.setAttribute('aria-valuetext', formatTime(ms / 1000));
+    const now = performance.now();
+    if (now - lastSeekAt >= SEEK_INTERVAL_MS) {
+      lastSeekAt = now;
+      pendingMs = null;
+      commit(ms);
+      return;
+    }
+    // Between round trips the finger keeps moving; the last position is what gets sent, so the
+    // seek lands where the finger stopped rather than where it was 120 ms ago.
+    pendingMs = ms;
+    if (trailing !== null) return;
+    trailing = setTimeout(() => {
+      trailing = null;
+      lastSeekAt = performance.now();
+      const queued = pendingMs;
+      pendingMs = null;
+      if (queued !== null) commit(queued);
+    }, SEEK_INTERVAL_MS);
   });
+  input.addEventListener('change', finish);
+  input.addEventListener('pointerup', finish);
+  input.addEventListener('pointercancel', finish);
+  input.addEventListener('touchend', finish, { passive: true });
+  input.addEventListener('touchcancel', finish, { passive: true });
 }
 
 function queueDurationMs(queue: PlaybackQueue | null): number {

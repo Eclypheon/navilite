@@ -630,6 +630,12 @@
       activePill: (document.querySelector('.pill-option.active') || {}).textContent || null,
       context: (document.querySelector('.now-context') || {}).textContent || null,
       transport: document.querySelectorAll('.now-bar .transport').length,
+      /**
+       * v1.7.1: the seek bar's own box, so a harness can put a finger on it by geometry rather than
+       * by selector — a slider is dragged, not clicked, and where the drag starts is what decides
+       * whether the pager gets the gesture.
+       */
+      progress: box('.now-progress .progress'),
     };
   }
 

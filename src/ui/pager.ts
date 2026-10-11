@@ -114,6 +114,12 @@ const OVERSHOOT = 0.3;
 const COMMIT = 0.32;
 /** A flick is projected this far ahead when deciding, so a short fast swipe still turns a page. */
 const PROJECTION_MS = 140;
+/**
+ * Everything that owns its own horizontal gesture: form controls, and anything the app marks
+ * `data-pager="off"` (the transport bars, the two seek rows, the pill). A gesture that starts on one
+ * of these never moves the pager — see `ownsGesture`.
+ */
+const OWN_GESTURE = 'input, textarea, select, [data-pager="off"]';
 
 function widthOf(element: HTMLElement): number {
   return element.clientWidth || element.getBoundingClientRect().width || 0;
@@ -295,19 +301,31 @@ export function createPager(options: PagerOptions): Pager {
 
   /* ---------------------------------------------------------------- gestures */
 
-  /** Controls that own their own horizontal gesture: a slider, a text field, a select. */
-  const ownsGesture = (target: EventTarget | null): boolean => {
-    if (!(target instanceof Element)) return false;
-    return target.closest('input, textarea, select, [data-pager="off"]') !== null;
+  /**
+   * Controls that own their own horizontal gesture: a slider, a text field, a select — and, by
+   * name, anything the app marks `data-pager="off"` (the transport bars, the seek rows, the pill).
+   *
+   * v1.7.1: this is asked **twice** on the way down, by element and by pixel. The element test is
+   * the first answer and stays the fast path; the coordinate test is what makes the rule a rule —
+   * a touch can be delivered with a target that is not the control the finger is on (an engine that
+   * retargets the event, a control whose visible part is its own shadow content), and the owner's
+   * report — *"i can't drag the seek bar because it registers as im trying to swipe to a different
+   * pane"* — is exactly a gesture that started on a control and was read as a page turn. Whatever
+   * `elementFromPoint` says under the finger decides as well, so the gesture belongs to the control
+   * it started on, exactly like the axis lock does.
+   */
+  const ownsGesture = (target: EventTarget | null, x: number, y: number): boolean => {
+    if (target instanceof Element && target.closest(OWN_GESTURE) !== null) return true;
+    const hit = typeof document.elementFromPoint === 'function' ? document.elementFromPoint(x, y) : null;
+    return hit instanceof Element && hit.closest(OWN_GESTURE) !== null;
   };
 
   const onTouchStart = (event: TouchEvent): void => {
-    if (!enabled || event.touches.length !== 1 || ownsGesture(event.target)) {
+    const touch = event.touches[0];
+    if (!enabled || event.touches.length !== 1 || !touch || ownsGesture(event.target, touch.clientX, touch.clientY)) {
       gesture = null;
       return;
     }
-    const touch = event.touches[0];
-    if (!touch) return;
     // A second finger while a drag is running is a pinch, not a page turn.
     gesture = {
       startX: touch.clientX,
