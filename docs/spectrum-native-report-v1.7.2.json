@@ -1,0 +1,1115 @@
+{
+  "device": {
+    "name": "iPhone 15 Pro",
+    "width": 393,
+    "height": 852,
+    "deviceScaleFactor": 3,
+    "safeAreaTop": 59,
+    "safeAreaBottom": 34
+  },
+  "environment": {
+    "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+    "innerWidth": 393,
+    "innerHeight": 759,
+    "outerWidth": 393,
+    "outerHeight": 852,
+    "screenWidth": 393,
+    "screenHeight": 852,
+    "devicePixelRatio": 3,
+    "visualViewportWidth": 393,
+    "visualViewportScale": 1,
+    "standalone": false,
+    "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "safeAreaInsets": {
+      "top": "0px",
+      "right": "0px",
+      "bottom": "0px",
+      "left": "0px"
+    },
+    "documentClientWidth": 393,
+    "documentScrollWidth": 393,
+    "bodyScrollWidth": 393
+  },
+  "states": {},
+  "spectrumOnly": true,
+  "spectrum": {
+    "startedAt": "2026-10-11T11:27:02.058Z",
+    "selection": {
+      "tappedAt": 1791718022290,
+      "target": "the row itself",
+      "positionAfter250ms": 30,
+      "stateAfter250ms": "playing",
+      "backendAfter250ms": "native"
+    },
+    "frames": [
+      {
+        "label": "frame-0",
+        "at": 1791718023465,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 833,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 231,
+          "mean": 69,
+          "checksum": 4392427
+        },
+        "canvas": {
+          "lit": 24283,
+          "checksum": 1481540678,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 44,
+          "silentFrames": 0,
+          "positionMs": 733,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 224,
+          "mean": 64,
+          "checksum": 4107210
+        }
+      },
+      {
+        "label": "frame-1",
+        "at": 1791718023516,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 900,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 224,
+          "mean": 64,
+          "checksum": 4107210
+        },
+        "canvas": {
+          "lit": 22512,
+          "checksum": 1122434468,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 44,
+          "silentFrames": 0,
+          "positionMs": 785,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 224,
+          "mean": 64,
+          "checksum": 4107210
+        }
+      },
+      {
+        "label": "frame-2",
+        "at": 1791718023568,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 947,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 224,
+          "mean": 64,
+          "checksum": 4107210
+        },
+        "canvas": {
+          "lit": 22512,
+          "checksum": 1122434468,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 47,
+          "silentFrames": 0,
+          "positionMs": 838,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 36,
+          "pinned": 0,
+          "min": 0,
+          "max": 217,
+          "mean": 61,
+          "checksum": 3921979
+        }
+      },
+      {
+        "label": "frame-3",
+        "at": 1791718023618,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 1003,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 36,
+          "pinned": 0,
+          "min": 0,
+          "max": 217,
+          "mean": 61,
+          "checksum": 3921979
+        },
+        "canvas": {
+          "lit": 21339,
+          "checksum": 1368494597,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 47,
+          "silentFrames": 0,
+          "positionMs": 888,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 36,
+          "pinned": 0,
+          "min": 0,
+          "max": 217,
+          "mean": 61,
+          "checksum": 3921979
+        }
+      },
+      {
+        "label": "frame-4",
+        "at": 1791718023671,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 1055,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 36,
+          "pinned": 0,
+          "min": 0,
+          "max": 213,
+          "mean": 57,
+          "checksum": 3685855
+        },
+        "canvas": {
+          "lit": 19885,
+          "checksum": 1533263493,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 51,
+          "silentFrames": 0,
+          "positionMs": 940,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 36,
+          "pinned": 0,
+          "min": 0,
+          "max": 213,
+          "mean": 57,
+          "checksum": 3685855
+        }
+      },
+      {
+        "label": "frame-5",
+        "at": 1791718023722,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 1107,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 36,
+          "pinned": 0,
+          "min": 0,
+          "max": 213,
+          "mean": 57,
+          "checksum": 3685855
+        },
+        "canvas": {
+          "lit": 19885,
+          "checksum": 1533263493,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 55,
+          "silentFrames": 0,
+          "positionMs": 992,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 37,
+          "pinned": 0,
+          "min": 0,
+          "max": 220,
+          "mean": 63,
+          "checksum": 4009079
+        }
+      },
+      {
+        "label": "frame-6",
+        "at": 1791718023775,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 1159,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 37,
+          "pinned": 0,
+          "min": 0,
+          "max": 220,
+          "mean": 63,
+          "checksum": 4009079
+        },
+        "canvas": {
+          "lit": 21889,
+          "checksum": 567644533,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 55,
+          "silentFrames": 0,
+          "positionMs": 1044,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 37,
+          "pinned": 0,
+          "min": 0,
+          "max": 220,
+          "mean": 63,
+          "checksum": 4009079
+        }
+      },
+      {
+        "label": "frame-7",
+        "at": 1791718023827,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 1210,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 229,
+          "mean": 67,
+          "checksum": 4311365
+        },
+        "canvas": {
+          "lit": 23768,
+          "checksum": 1338304163,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 59,
+          "silentFrames": 0,
+          "positionMs": 1096,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 229,
+          "mean": 67,
+          "checksum": 4311365
+        }
+      },
+      {
+        "label": "frame-8",
+        "at": 1791718023880,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 1262,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 229,
+          "mean": 67,
+          "checksum": 4311365
+        },
+        "canvas": {
+          "lit": 23768,
+          "checksum": 1338304163,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 62,
+          "silentFrames": 0,
+          "positionMs": 1150,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 39,
+          "pinned": 0,
+          "min": 0,
+          "max": 232,
+          "mean": 68,
+          "checksum": 4327465
+        }
+      },
+      {
+        "label": "frame-9",
+        "at": 1791718023937,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 1316,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 39,
+          "pinned": 0,
+          "min": 0,
+          "max": 232,
+          "mean": 68,
+          "checksum": 4327465
+        },
+        "canvas": {
+          "lit": 23888,
+          "checksum": 358881458,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 62,
+          "silentFrames": 0,
+          "positionMs": 1207,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 39,
+          "pinned": 0,
+          "min": 0,
+          "max": 232,
+          "mean": 68,
+          "checksum": 4327465
+        }
+      }
+    ],
+    "roundTrip": {
+      "before": {
+        "label": "before-hide",
+        "at": 1791718023994,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 1374,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 39,
+          "pinned": 0,
+          "min": 0,
+          "max": 232,
+          "mean": 68,
+          "checksum": 4327465
+        },
+        "canvas": {
+          "lit": 23888,
+          "checksum": 358881458,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 66,
+          "silentFrames": 0,
+          "positionMs": 1263,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 230,
+          "mean": 68,
+          "checksum": 4373396
+        }
+      },
+      "readyForHarnessAt": "2026-10-11T11:27:03.994Z",
+      "driver": "the harness, with the app really backgrounded and relaunched",
+      "events": [
+        {
+          "hidden": true,
+          "at": 1791718025527
+        },
+        {
+          "hidden": false,
+          "at": 1791718029752
+        }
+      ],
+      "after": {
+        "label": "after-show",
+        "at": 1791718031225,
+        "state": "playing",
+        "backend": "native",
+        "reportedSpectrum": true,
+        "modeReason": "real spectrum — an FFT of the stream this player is playing, read from the native audio tap",
+        "positionMs": 8595,
+        "durationMs": 20000,
+        "bands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 224,
+          "mean": 63,
+          "checksum": 4056210
+        },
+        "canvas": {
+          "lit": 22178,
+          "checksum": 1335502905,
+          "size": "786x176"
+        },
+        "tap": {
+          "live": true,
+          "frames": 195,
+          "silentFrames": 0,
+          "positionMs": 8406,
+          "playing": true,
+          "readable": true,
+          "sampleRate": 44100
+        },
+        "tapBands": {
+          "length": 64,
+          "nonZero": 38,
+          "pinned": 0,
+          "min": 0,
+          "max": 224,
+          "mean": 63,
+          "checksum": 4056210
+        }
+      },
+      "gapMs": 7231,
+      "positionAdvancedMs": 7221
+    },
+    "posted": true
+  },
+  "scroll": {
+    "steps": [
+      {
+        "label": "the list, scrolled before the spectrum was opened",
+        "state": {
+          "route": "#/playlist/pl-stress-long",
+          "header": {
+            "top": 0,
+            "height": 107,
+            "bottom": 107
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1645,
+          "overflowY": "auto",
+          "overscrollY": "contain",
+          "nowOpen": false,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のあいだにきみと話したかったことのすべて (1/3)",
+          "engineState": "playing",
+          "spectrumChip": "spectrum"
+        }
+      },
+      {
+        "label": "the spectrum, opened over the list",
+        "state": {
+          "route": "#/now",
+          "header": {
+            "top": 0,
+            "height": 107,
+            "bottom": 107
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1645,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "playing",
+          "spectrumChip": "spectrum"
+        }
+      },
+      {
+        "label": "after asking the window and the document to scroll",
+        "state": {
+          "route": "#/now",
+          "header": {
+            "top": 0,
+            "height": 107,
+            "bottom": 107
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1645,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "playing",
+          "spectrumChip": "spectrum"
+        }
+      },
+      {
+        "label": "lyrics mode, before asking it to scroll",
+        "state": {
+          "route": "#/now/lyrics",
+          "header": {
+            "top": 0,
+            "height": 107,
+            "bottom": 107
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1645,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "playing",
+          "spectrumChip": "spectrum"
+        }
+      },
+      {
+        "label": "after asking the window and the document to scroll (lyrics mode)",
+        "state": {
+          "route": "#/now/lyrics",
+          "header": {
+            "top": 0,
+            "height": 107,
+            "bottom": 107
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1645,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "playing",
+          "spectrumChip": "spectrum"
+        }
+      },
+      {
+        "label": "after scrolling the frozen container itself, programmatically",
+        "state": {
+          "route": "#/now/lyrics",
+          "header": {
+            "top": 0,
+            "height": 107,
+            "bottom": 107
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 1000,
+          "scrollable": 1645,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "playing",
+          "spectrumChip": "spectrum"
+        }
+      },
+      {
+        "label": "the list, after closing the spectrum",
+        "state": {
+          "route": "#/playlist/pl-stress-long",
+          "header": {
+            "top": 0,
+            "height": 107,
+            "bottom": 107
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1645,
+          "overflowY": "auto",
+          "overscrollY": "contain",
+          "nowOpen": false,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "playing",
+          "spectrumChip": "spectrum"
+        }
+      }
+    ],
+    "hitTest": {
+      "points": [
+        {
+          "x": 39,
+          "y": 90,
+          "selector": "div#app > section.now > div.now-top:nth-of-type(1)",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 90,
+          "selector": "section.now > div.now-top:nth-of-type(1) > div.pill > button.pill-option.active:nth-of-type(1)",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 90,
+          "selector": "section.now > div.now-top:nth-of-type(1) > div.pill > button.pill-option.active:nth-of-type(1)",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 90,
+          "selector": "div#app > section.now > div.now-top:nth-of-type(1) > div.pill",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 90,
+          "selector": "section.now > div.now-top:nth-of-type(1) > button.icon-button.now-close > svg",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 39,
+          "y": 237,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 237,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 237,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 237,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 237,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 39,
+          "y": 401,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 401,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 401,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 401,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 401,
+          "selector": "div.now-pages:nth-of-type(2) > div.now-page.now-page-spectrum:nth-of-type(1) > div.now-cover:nth-of-type(1) > img.now-art",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 39,
+          "y": 573,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 573,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 573,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 573,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 573,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 39,
+          "y": 761,
+          "selector": "html",
+          "insideNow": false,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 761,
+          "selector": "html",
+          "insideNow": false,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 761,
+          "selector": "html",
+          "insideNow": false,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 761,
+          "selector": "html",
+          "insideNow": false,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 761,
+          "selector": "html",
+          "insideNow": false,
+          "outsideViewport": false
+        }
+      ],
+      "width": 393,
+      "height": 818,
+      "allInsideNow": false
+    },
+    "controls": {
+      "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+      "engineState": "playing",
+      "transport": 5,
+      "pagerBefore": {
+        "position": 1,
+        "offset": 1,
+        "dragging": false,
+        "settled": true,
+        "translate": {
+          "list": -393,
+          "overlay": 0,
+          "strip": 0
+        },
+        "mode": "spectrum"
+      },
+      "lyricsMode": true,
+      "spectrumMode": true,
+      "mode": "spectrum",
+      "pagerAfter": {
+        "position": 1,
+        "offset": 1,
+        "dragging": false,
+        "settled": true,
+        "translate": {
+          "list": -393,
+          "overlay": 0,
+          "strip": 0
+        },
+        "mode": "spectrum"
+      }
+    },
+    "programmatic": {
+      "moved": 600
+    },
+    "before": {
+      "route": "#/playlist/pl-stress-long",
+      "header": {
+        "top": 0,
+        "height": 107,
+        "bottom": 107
+      },
+      "headerPosition": "sticky",
+      "documentScrollTop": 0,
+      "windowScrollY": 0,
+      "documentScrollable": 0,
+      "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+      "scrollTop": 400,
+      "scrollable": 1645,
+      "overflowY": "auto",
+      "overscrollY": "contain",
+      "nowOpen": false,
+      "nowOverscroll": "none",
+      "nowTouchAction": "pan-y pinch-zoom",
+      "lyricsScrollTop": 0,
+      "lyricsScrollable": 0,
+      "lyricsOverscrollY": "contain",
+      "context": "Playing from 夜のあいだにきみと話したかったことのすべて (1/3)",
+      "engineState": "playing",
+      "spectrumChip": "spectrum"
+    },
+    "after": {
+      "route": "#/playlist/pl-stress-long",
+      "header": {
+        "top": 0,
+        "height": 107,
+        "bottom": 107
+      },
+      "headerPosition": "sticky",
+      "documentScrollTop": 0,
+      "windowScrollY": 0,
+      "documentScrollable": 0,
+      "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+      "scrollTop": 400,
+      "scrollable": 1645,
+      "overflowY": "auto",
+      "overscrollY": "contain",
+      "nowOpen": false,
+      "nowOverscroll": "none",
+      "nowTouchAction": "pan-y pinch-zoom",
+      "lyricsScrollTop": 0,
+      "lyricsScrollable": 0,
+      "lyricsOverscrollY": "contain",
+      "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+      "engineState": "playing",
+      "spectrumChip": "spectrum"
+    },
+    "headerUnchanged": true,
+    "listRestored": true,
+    "documentNeverScrolled": true,
+    "headerNeverMoved": true,
+    "listNeverMoved": true,
+    "documentFrozen": true,
+    "swipe": {
+      "route": "#/playlist/pl-stress-long",
+      "swipes": 2,
+      "panes": [
+        2,
+        0
+      ],
+      "firstPane": 2,
+      "state": {
+        "route": "#/playlist/pl-stress-long",
+        "header": {
+          "top": 0,
+          "height": 107,
+          "bottom": 107
+        },
+        "headerPosition": "sticky",
+        "documentScrollTop": 0,
+        "windowScrollY": 0,
+        "documentScrollable": 0,
+        "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+        "scrollTop": 400,
+        "scrollable": 1645,
+        "overflowY": "auto",
+        "overscrollY": "contain",
+        "nowOpen": false,
+        "nowOverscroll": "none",
+        "nowTouchAction": "pan-y pinch-zoom",
+        "lyricsScrollTop": 0,
+        "lyricsScrollable": 0,
+        "lyricsOverscrollY": "contain",
+        "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+        "engineState": "playing",
+        "spectrumChip": "spectrum"
+      }
+    },
+    "pager": {
+      "position": 0,
+      "offset": 0,
+      "dragging": false,
+      "settled": true,
+      "translate": {
+        "list": 0,
+        "overlay": 0,
+        "strip": 0
+      },
+      "mode": "playlist"
+    },
+    "checks": {
+      "documentFrozen": true,
+      "documentNeverScrolled": true,
+      "headerNeverMoved": true,
+      "listNeverMoved": true,
+      "listRestored": true,
+      "overlayIsTheOnlyHitTarget": false,
+      "swipeLandsOnThePlaylist": true,
+      "swipeStepsThroughThePanes": true,
+      "controlsStillWork": true,
+      "pagerSettledOnTheSpectrum": false
+    },
+    "passed": false
+  },
+  "probe": {
+    "source": "page",
+    "href": "http://127.0.0.1:4599/#/playlist/pl-stress-long",
+    "at": "2026-10-11T11:27:15.155Z"
+  }
+}

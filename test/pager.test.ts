@@ -18,7 +18,8 @@
  *   - a mostly-vertical diagonal gesture (200 px across — more than half a pane) scrolls the list and
  *     turns no page at all, and the pager writes no transform for it;
  *   - the same shallow 0.2-pane distance snaps back when released slowly and turns the page when
- *     flicked — the velocity projection, proven by the difference rather than by a number in the code;
+ *     flicked — the velocity projection, proven by the difference and by the release the report
+ *     carries (the gap the pager's own clock saw, and the panes it projects);
  *   - the ring walks 1 → 2 → 0 and back;
  *   - the (x/y) line and the transport are still hit-testable with the finger down;
  *   - the highlight follows a 36-line sidecar to the line, never scrolls the panel past its own end,
@@ -77,13 +78,32 @@ interface PagerState {
   settled: boolean;
 }
 
+interface GestureRelease {
+  gapMs: number;
+  pxPerMs: number;
+  projectedPanes: number;
+}
+
 interface PagerReport {
   checks: Record<string, { ok: boolean; detail?: string }>;
   stages: {
     diagonalOnList: { scrollTop: number; after: PagerState; list: { translate: string } };
     opened: { route: string; pager: PagerState };
     follow: { samples: Array<{ x: number; offset: number; expected: number; strip: number }>; offsetErrorPx: number; stripErrorPx: number };
-    flick: { ms: number; offsets: number[]; rest: number; route: string };
+    flick: {
+      ms: number;
+      offsets: number[];
+      rest: number;
+      route: string;
+      /** The cadence the check asked for, and whether the release move was dispatched in one task. */
+      askedGapMs: number;
+      sameTaskRelease: boolean;
+      /** Whether the release the check actually got is a fast one — i.e. whether the verdict is about the pager. */
+      releaseIsFast: boolean;
+      release: GestureRelease;
+    };
+    snapBack: { offsets: number[]; rest: number; settled: boolean; settledAfterMs: number; release: GestureRelease };
+    slowRelease: { offsets: number[]; rest: number; settled: boolean; settledAfterMs: number; release: GestureRelease };
     ring: { first: { pane: number; route: string }; second: { pane: number; route: string } };
     pill: { strip: number[]; pills: Array<string | null> };
     controlsMidDrag: { offset: number; controls: Array<{ selector: string; insideControl: boolean }> };
@@ -168,6 +188,57 @@ test('the swipe pager pulls its panes, and never takes a scroll', async (t) => {
       `the flick travelled ${Math.max(...report.stages.flick.offsets)} panes — it must stay short of the commit point`,
     );
     assert.equal(report.stages.flick.rest, 0, 'the flick did not turn the page');
+    /*
+     * And the velocities are the harness's own, not whatever the driver happened to cost.
+     *
+     * The pager reads its release velocity from the `performance.now()` gap between its own last two
+     * touchmoves, so a gesture driven through the input pipeline is clocked by the round trip — which
+     * is how this pair of checks used to flake (t_067de214): the same `stepDelayMs: 6` CDP drag handed
+     * the pager 212–330 ms gaps on a busy box and under 80 ms on a quiet one, straddling the ~78 ms
+     * that decides a 0.2-pane drag. The gestures are now driven inside the page at a cadence the check
+     * sets, and the report carries the gaps the pager's own clock saw: assert them, so a harness that
+     * quietly stopped controlling (or reporting) the cadence fails here rather than passing on 0.32.
+     */
+    assert.ok(
+      report.stages.slowRelease.release.gapMs >= 100,
+      `the "slow" release was driven at ${report.stages.slowRelease.release.gapMs} ms between moves — not slow enough to mean anything`,
+    );
+    assert.equal(report.stages.slowRelease.settled, true, 'the slow release’s rest pose was read before the pager had stopped');
+    // The short drag is the same claim at a shorter distance. Its commit threshold is 42 ms (0.12 panes
+    // over two steps), so the ask is the floor that has to stay above it — a timer can only be late.
+    assert.ok(
+      report.stages.snapBack.release.gapMs >= 100,
+      `the short drag was driven at ${report.stages.snapBack.release.gapMs} ms between moves — that is not clear of the 42 ms that would commit it`,
+    );
+    assert.equal(report.stages.snapBack.settled, true, 'the short drag’s rest pose was read before the pager had stopped');
+    assert.ok(
+      0.2 + report.stages.slowRelease.release.projectedPanes < 0.32,
+      `the slow release projected to ${(0.2 + report.stages.slowRelease.release.projectedPanes).toFixed(3)} panes, past the commit point`,
+    );
+    assert.equal(report.stages.slowRelease.rest, 2, 'the slow release did not snap back');
+    assert.ok(
+      0.12 + report.stages.snapBack.release.projectedPanes < 0.32,
+      `the short drag projected to ${(0.12 + report.stages.snapBack.release.projectedPanes).toFixed(3)} panes, past the commit point`,
+    );
+    assert.ok(
+      report.stages.flick.release.projectedPanes >= 0.12,
+      `the flick projected to only ${report.stages.flick.release.projectedPanes} panes — its commit was not the velocity projection`,
+    );
+    /*
+     * And the flick's release is the harness's own *by construction*, not by a timer being punctual.
+     * A timer can only be late: asked for 8 ms the pager's clock has seen 9–47 ms, and the commit needs
+     * a gap under ~78 ms, so a punctual-timer flick goes red on a correct app. The release move is
+     * dispatched in the same task as the one before it, so the gap is the synchronous work between two
+     * dispatches — assert that, so a revision that quietly went back to a timer fails here instead of
+     * on the app's account.
+     */
+    assert.equal(report.stages.flick.sameTaskRelease, true, 'the flick’s release move was not dispatched in the same task as the one before it');
+    assert.ok(
+      report.stages.flick.release.gapMs < 5,
+      `the flick’s release gap was ${report.stages.flick.release.gapMs} ms — the release move was clocked by a timer, not by the check`,
+    );
+    assert.equal(report.stages.flick.releaseIsFast, true, 'the flick’s release was not fast enough to commit on velocity, so its verdict is not about the pager');
+    assert.equal(report.stages.flick.askedGapMs, 8, 'the flick no longer asks for the cadence it reports');
 
     // The ring, and the pill sliding through the same pager.
     assert.equal(report.stages.ring.first.pane, 2, 'left from the spectrum is not the lyrics');

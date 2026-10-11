@@ -28,6 +28,9 @@ import test from 'node:test';
 import { AudioEngine, reduce, type EngineOptions, type EngineState, type PlayerEvent } from '../src/player/engine.ts';
 import type { NativeBridge, NativeBridgeEvents, NativeTrackInfo, NativeTruth } from '../src/player/native.ts';
 import type { TrackRequest } from '../src/player/engine.ts';
+import { PlaybackQueue } from '../src/state/queue.ts';
+import type { Library } from '../src/state/library.ts';
+import type { QueueContext, Song } from '../src/api/types.ts';
 
 /** Every bridge call costs this much, so a state that waited for one is measurably late. */
 const ROUND_TRIP_MS = 40;
@@ -188,7 +191,7 @@ interface Connections {
  * the audio graph recorded as an edge list so the *shape* can be asserted — a graph that is never
  * built on the native path being the point of the "one engine" check.
  */
-function installFakes(): { connections: Connections; restore: () => void; setFrame(v: number): void } {
+function installFakes(): { connections: Connections; restore: () => void; setFrame(v: number): void; finishTrack(): void; currentSrc(): string | null } {
   const connections: Connections = { edges: [], gainValues: [] };
   const frame = { value: 128 };
   const globals = globalThis as unknown as Record<string, unknown>;
@@ -197,6 +200,9 @@ function installFakes(): { connections: Connections; restore: () => void; setFra
     AudioContext: globals.AudioContext,
     document: globals.document,
   };
+
+  /** v1.9.0: the element the engine built, so a test can take a track to its end. */
+  const elements: FakeAudio[] = [];
 
   class FakeAudio {
     preload = '';
@@ -207,6 +213,9 @@ function installFakes(): { connections: Connections; restore: () => void; setFra
     error: { message: string; code: number } | null = null;
     paused = true;
     private listeners = new Map<string, Array<() => void>>();
+    constructor() {
+      elements.push(this);
+    }
     addEventListener(type: string, handler: () => void): void {
       this.listeners.set(type, [...(this.listeners.get(type) ?? []), handler]);
     }
@@ -221,6 +230,11 @@ function installFakes(): { connections: Connections; restore: () => void; setFra
     pause(): void {
       this.paused = true;
       this.dispatch('pause');
+    }
+    /** The stream reached its end — the browser's own `ended`, on the live element. */
+    finish(): void {
+      this.paused = true;
+      this.dispatch('ended');
     }
     private dispatch(type: string): void {
       for (const handler of this.listeners.get(type) ?? []) handler();
@@ -281,6 +295,10 @@ function installFakes(): { connections: Connections; restore: () => void; setFra
     setFrame: (value: number) => {
       frame.value = value;
     },
+    finishTrack: () => {
+      for (const element of elements) element.finish();
+    },
+    currentSrc: () => elements[elements.length - 1]?.src ?? null,
     restore: () => {
       globals.Audio = previous.Audio;
       globals.AudioContext = previous.AudioContext;
@@ -1124,6 +1142,106 @@ test('a change of track taps the new item, and the old item is never drawn', asy
         `at load; with the tap orphaned, nothing drawn and re-attached ${reAttached} ms later, live again ` +
         `${backAfterSwap} ms after that`,
     );
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/* ------------------------------------------------- v1.9.0: the track that reaches its end */
+
+/**
+ * A `Library` with no network in it — the queue asks it for a stream URL, a cover URL and a
+ * `scrobble`, and none of those is what the advance is about.
+ */
+function stubLibrary(): Library {
+  return {
+    crossOrigin: false,
+    coverUrl: () => null,
+    streamUrl: (song: Song) => `http://127.0.0.1:4599/rest/stream?id=${song.id}`,
+    client: {
+      scrobble: async () => undefined,
+      savePlayQueue: async () => undefined,
+    },
+  } as unknown as Library;
+}
+
+const CONTEXT: QueueContext = { kind: 'playlist', name: 'a playlist' };
+
+/** The stream URL `stubLibrary` builds for a song — the one the engine must hold. */
+const TRACK_URL = (id: string): string => `http://127.0.0.1:4599/rest/stream?id=${id}`;
+
+/** What the browser path's element is pointed at right now. */
+const engineUrlOf = (fakes: { currentSrc(): string | null }): string | null => fakes.currentSrc();
+
+const song = (id: string): Song => ({ id, title: `Track ${id}`, artist: 'Someone', album: 'Something', duration: 2 });
+
+const queueOf = (...ids: string[]): { song: Song; context: QueueContext }[] =>
+  ids.map((id) => ({ song: song(id), context: CONTEXT }));
+
+/*
+ * The owner, v1.9.0: *"it doesn't seem to automatically go to the next song on my playlist anymore
+ * once one song is done. both on mobile and on wifi."*
+ *
+ * A regression, and the one that matters most: the track that ends is the app's own promise that
+ * the playlist keeps playing. The event that moves the queue is the player's own end-of-stream
+ * report — `complete` from the native bridge on a phone, `ended` from the element in a browser —
+ * and the assertion is the three things the owner sees: the next track is the *active* one, its
+ * bytes are the ones the engine loaded, and audio for it actually started.
+ */
+test('a track that reaches its end starts the next one in the queue', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    const queue = new PlaybackQueue(engine, stubLibrary());
+    await queue.play(queueOf('song-1', 'song-2'), 0, CONTEXT);
+    await settle(80);
+    assert.equal(queue.currentSong?.id, 'song-1', 'the first track is the one playing');
+    record.calls = [];
+    record.loads = [];
+
+    // The player says the track is over. In a wrapped build this is the bridge's `complete`.
+    record.events?.onComplete();
+    await settle(300);
+
+    const plays = record.calls.filter((call) => call.startsWith('play@'));
+    const loads = record.loads.map((url) => url.slice(-7));
+    say(`the end of song-1: active ${queue.currentSong?.id}, loads ${loads.join(' → ') || 'none'}, plays ${plays.join(', ') || 'none'}`);
+    assert.equal(queue.currentSong?.id, 'song-2', 'the next track is the active one');
+    assert.equal(queue.position, 1, 'and the queue moved its cursor to it');
+    assert.equal(record.loads[record.loads.length - 1], TRACK_URL('song-2'), 'the engine holds the next track’s stream');
+    assert.ok(plays.length > 0, `audio for it started — calls: ${record.calls.join(', ')}`);
+    assert.equal(engine.status().state, 'playing', 'and the machine is playing, not stuck on the end of the last one');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+test('the same advance happens in a browser, where the element’s own `ended` is the event', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const web = new AudioEngine({ platform: { os: 'web', native: false }, nativeFactory: fakeBridge(record) as unknown as EngineOptions['nativeFactory'] });
+    engines.push(web);
+    const queue = new PlaybackQueue(web, stubLibrary());
+    await queue.play(queueOf('song-1', 'song-2'), 0, CONTEXT);
+    await settle(80);
+    assert.equal(web.status().state, 'playing');
+    const before = engineUrlOf(fakes);
+
+    // The audio element reaching the end of the stream: the browser's own `ended`.
+    fakes.finishTrack();
+    await settle(200);
+
+    say(`in a browser, after the end: active ${queue.currentSong?.id}, the element holds ${engineUrlOf(fakes)} (was ${before})`);
+    assert.equal(queue.currentSong?.id, 'song-2', 'the next track is the active one');
+    assert.equal(engineUrlOf(fakes), TRACK_URL('song-2'), 'and the element was pointed at it');
+    assert.equal(web.status().state, 'playing', 'playing the new track, not left on the end of the old one');
   } finally {
     fakes.restore();
     await stopAll(engines);

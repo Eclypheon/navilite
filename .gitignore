@@ -17,3 +17,6 @@ Pods/
 *.aab
 *.keystore
 *.jks
+
+# Timestamped backups from agent edits (*.bak-<timestamp>) are never committed.
+*.bak-*

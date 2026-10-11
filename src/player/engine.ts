@@ -165,6 +165,17 @@ export interface EngineOptions {
  */
 const RESUME_CONFIRM_MS = 300;
 
+/**
+ * How close to its duration the native player has to be for a *stopped* report to mean "the track
+ * finished" rather than "something took the audio away" (v1.9.0).
+ *
+ * The player reports its position every ~100 ms while it plays, so the last report of a track that
+ * ran to its end is within a report of the duration. Just under a second of slack covers a missed
+ * report without ever reaching a *paused* player mid-track — and a track shorter than this window is
+ * never judged this way at all (`nativeAtEnd`).
+ */
+const NATIVE_END_SLACK_MS = 900;
+
 /** ~1.8 s of silence from the analyser while audio is definitely playing = not real samples. */
 const ZERO_FRAMES_BEFORE_THEME = 18;
 /**
@@ -352,6 +363,19 @@ export class AudioEngine {
   private meterTimer: ReturnType<typeof setInterval> | null = null;
   private listeners = new Set<(status: EngineStatus) => void>();
 
+  /**
+   * v1.9.0 — whether the track that is playing has already been reported as *finished*.
+   *
+   * The owner: *"it doesn't seem to automatically go to the next song on my playlist anymore once
+   * one song is done. both on mobile and on wifi."* The end of a track has two doors onto it: the
+   * player's own event (the bridge's `complete`, the element's `ended`) and — since v1.9.0 — the
+   * player's own position when it reports itself *stopped at the end of the item*, which is the
+   * reading that survives the event being lost. Whichever arrives first closes this latch, so the
+   * queue advances exactly once; it is reopened by the next transition into `playing`, which is
+   * what lets `repeat one` hear the same track end again.
+   */
+  private endedReported = false;
+
   /** Set by the queue: called when a track finishes on its own. */
   onEnded: (() => void) | null = null;
   /** Called on every position update, for play reporting. */
@@ -394,8 +418,7 @@ export class AudioEngine {
     });
     el.addEventListener('ended', () => {
       if (this.backend !== 'web') return;
-      this.dispatch({ type: 'track-ended', trackId: this.track?.id ?? '' });
-      this.onEnded?.();
+      this.reportEnded('the element reached the end of the stream');
     });
     el.addEventListener('error', () => this.handleMediaError());
     this.el = el;
@@ -442,6 +465,13 @@ export class AudioEngine {
     if (next === 'playing') {
       // Re-anchor: the clock counts from this instant, never across a transition.
       this.nativePositionAt = this.clockNow();
+      /*
+       * v1.9.0 — a fresh track (or the same one started again) has not been reported as finished
+       * yet. Opening the latch on the transition into `playing` rather than on a load is what keeps
+       * `repeat one` honest: the repeat is a seek and a resume of the *same* track, so a latch
+       * keyed on the track's identity would swallow the second end of it.
+       */
+      this.endedReported = false;
       this.startClockTick();
       this.startConsumers();
       return;
@@ -458,6 +488,35 @@ export class AudioEngine {
               : 'nothing playing';
     this.stopClockTick();
     this.disarmConsumers(reason);
+  }
+
+  /**
+   * The track that is playing reached its end — reported once, whichever door it arrives by.
+   *
+   * The queue is the only thing that may act on this: it owns what "next" means (the play order,
+   * the repeat mode, the end of the queue). The engine's whole job here is to say the one true
+   * thing exactly once, which is what {@link endedReported} is for.
+   */
+  private reportEnded(why: string): void {
+    const track = this.track;
+    if (!track || this.endedReported) return;
+    this.endedReported = true;
+    this.modeReason = `the track ended — ${why}`;
+    this.dispatch({ type: 'track-ended', trackId: track.id });
+    this.onEnded?.();
+  }
+
+  /**
+   * Is the native player sitting at the very end of the item it was given?
+   *
+   * The player reports its position every ~100 ms while it is playing, so the last report before an
+   * item finishes lands within a report of its duration; the slack is a little under two reports and
+   * well under a second, so a track shorter than that cannot be judged this way and says so.
+   */
+  private nativeAtEnd(): boolean {
+    const duration = this.durationMs();
+    if (duration <= NATIVE_END_SLACK_MS) return false;
+    return this.nativePositionMs >= duration - NATIVE_END_SLACK_MS;
   }
 
   private startClockTick(): void {
@@ -637,16 +696,37 @@ export class AudioEngine {
             this.dispatch({ type: 'engine-state', playing: true });
             return;
           }
+          /*
+           * v1.9.0 — *except* when it stopped at the end of the item, which is not an interruption
+           * at all: the track finished, and the queue is what acts on that.
+           *
+           * This is the reading that does not depend on the player's own end event arriving: the
+           * owner's report is *"it doesn't seem to automatically go to the next song on my playlist
+           * anymore once one song is done"*, and a queue that only ever hears about the end through
+           * one notification is a queue that stops for good the day that notification is late, is
+           * dropped by a load in flight, or is never sent. `reportEnded` is idempotent, so if the
+           * event does arrive as well, it changes nothing.
+           */
+          if (state === 'stopped' && this.nativeAtEnd()) {
+            this.nativePositionMs = this.durationMs();
+            this.reportEnded('the player stopped at the end of the item');
+            return;
+          }
           // Not playing and we did not ask it to stop: that is an interruption, not a pause.
           this.dispatch({ type: 'interruption' });
           if (state === 'stopped') this.nativePositionMs = Math.min(this.nativePositionMs, this.durationMs());
         },
         onComplete: () => {
           if (this.backend !== 'native') return;
-          // Never on the back of an asset swap — this is the one event that moves the queue.
+          /*
+           * Never on the back of an asset swap — this is the one event that moves the queue.
+           *
+           * A completion that arrives while a load is in flight belongs to the asset that is being
+           * replaced, so it is still dropped; the derived end above is what covers the case where
+           * the *real* completion is the event that goes missing.
+           */
           if (this.inTransition > 0) return;
-          this.dispatch({ type: 'track-ended', trackId: this.track?.id ?? '' });
-          this.onEnded?.();
+          this.reportEnded('the player reported the item complete');
         },
       });
       const bridge = await this.nativeReady;

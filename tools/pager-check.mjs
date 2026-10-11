@@ -11,7 +11,13 @@
  * always be produced by an animation after the fact; a pane that has moved exactly as far as the
  * finger has, with the layers still tiling edge to edge, cannot. Every drag here is a real finger
  * through the input pipeline (`Input.dispatchTouchEvent`: touchStart, touchMove…, touchEnd) and the
- * geometry is read between moves, with the finger still down.
+ * geometry is read between moves, with the finger still down — except the three gestures in §3 whose
+ * verdict is a *release velocity* (the short drag, the slow release, the flick), which are dispatched
+ * as `TouchEvent`s inside the page: each move through the pipeline costs a round trip, and the pager
+ * reads its velocity from the gap between its own move events, so a gesture driven from here is
+ * clocked by the driver and not by the check. What that cost was, and what replaced it, is at the site —
+ * including why the flick's release move is dispatched in the same task as the one before it, which is
+ * the only way a claim of "released *fast*" stays a claim about the app and not about a timer.
  *
  * What it checks, and why each one is here:
  *
@@ -41,7 +47,9 @@
  *      must be left at that proportion of its length, not merely "somewhere else".
  *  10. **The lyrics follow** leads by one line, never scrolls past the end of the song, and leaves a
  *      hand scroll alone for a few seconds — and the first line is not in the panel's faded band,
- *      which is the v1.5 clipping report.
+ *      which is the v1.5 clipping report. Each step of that walk *seeks*, and the follow answers with
+ *      a smooth scroll, so the walk polls for the line to arrive (bounded, `NAVILITE_FOLLOW_SETTLE_MS`)
+ *      rather than reading the panel at a fixed delay — a fixed delay reads an animation in flight.
  *
  *   node tools/mock-subsonic.mjs --port 4651 --stress --dist dist
  *   node tools/pager-check.mjs --url http://127.0.0.1:4651 [--json report.json]
@@ -98,6 +106,14 @@ async function touch(cdp, type, x, y) {
 /**
  * One finger, sampled as it travels: down at `fromX`, `steps` even moves to `toX`, the geometry read
  * after every move (finger still down), then lifted. `rest` is the geometry after the snap.
+ *
+ * The rest pose is read when the pager says it is at rest, not at a fixed delay: a commit is an
+ * animation of up to 340 ms (`src/ui/pager.ts`, `animateTo`) whose *position* only becomes the new pane
+ * on its last frame, and under load the first frame can be late enough that a fixed 460 ms catches the
+ * pane still travelling — measured: 8 busy processes made this file's own "the drag is committed and
+ * lands on the lyrics" read pane 1 with the strip already a whole pane over, i.e. mid-animation, and go
+ * red on a correct app. The fixed `afterReleaseMs` is kept as a floor (the route and other tasks need
+ * their moment), then `settledPager` polls. Same rule as t_3aa52735's lyric follow, and as §3.
  */
 async function drag(cdp, { fromX, toX, y, steps = 5, stepDelayMs = 24, afterReleaseMs = 460, sampleEvery = 1 }) {
   await touch(cdp, 'touchStart', fromX, y);
@@ -122,8 +138,48 @@ async function drag(cdp, { fromX, toX, y, steps = 5, stepDelayMs = 24, afterRele
     }
   }
   await touch(cdp, 'touchEnd', 0, 0);
+  const releasedAt = Date.now();
   await wait(afterReleaseMs);
-  return { samples, rest: await evaluate(cdp, GEOMETRY) };
+  const settled = await settledPager(cdp);
+  // How long the pager took to come to rest *after the finger left it*: the floor plus however long the
+  // poll had to keep waiting, which is the number that says whether a fixed read was about to be wrong.
+  return { samples, rest: settled.geometry, settledAfterMs: Date.now() - releasedAt, settleTimedOut: settled.waited >= 2500 };
+}
+
+/**
+ * The pager at rest, polled rather than read at a fixed delay — a snap-back is an animation of up to
+ * 340 ms (`src/ui/pager.ts`, `animateTo`), so a fixed delay reads wherever the animation happened to
+ * be; the same rule t_3aa52735 settled for the lyric follow. Bounded, and it reports how long it took.
+ */
+async function settledPager(cdp, timeoutMs = 2500) {
+  const started = Date.now();
+  for (;;) {
+    const geometry = await evaluate(cdp, GEOMETRY);
+    const waited = Date.now() - started;
+    if (pagerOf(geometry)?.settled === true || waited >= timeoutMs) return { geometry, waited };
+    await wait(40);
+  }
+}
+
+/**
+ * The release the pager itself reads: `onTouchMove` keeps the finger's speed as the gap to the
+ * *previous* move event's `performance.now()`, and `settle()` projects it over `PROJECTION_MS`
+ * (140 ms) against `COMMIT` (0.32 of a pane). So the verdict of a shallow drag is decided by the gap
+ * between its last two moves — a number a CDP-driven gesture does not own, and this one does.
+ */
+function releaseOf(gesture, width) {
+  const moves = (gesture?.events ?? []).filter((event) => event.type === 'touchmove');
+  if (moves.length < 2) return null;
+  const last = moves[moves.length - 1];
+  const previous = moves[moves.length - 2];
+  const gap = Math.max(1, last.t - previous.t);
+  const pxPerMs = Math.abs(last.x - previous.x) / gap;
+  const panesPerMs = pxPerMs / width;
+  return {
+    gapMs: Math.round(gap * 10) / 10,
+    pxPerMs: Math.round(pxPerMs * 1000) / 1000,
+    projectedPanes: Math.round(panesPerMs * 140 * 1000) / 1000,
+  };
 }
 
 /** A mostly-vertical, 200 px-wide drag: the shape of the owner's scroll-that-turns-a-page bug. */
@@ -295,6 +351,8 @@ async function main() {
         samples: follow.samples.map((sample, index) => ({ x: sample.x, offset: pagerOf(sample.geometry).offset, expected: expected[index], strip: strip[index] })),
         offsetErrorPx: offsetError * width,
         stripErrorPx: stripError,
+        settledAfterMs: follow.settledAfterMs,
+        settleTimedOut: follow.settleTimedOut,
       };
       check(
         'the panes follow the finger: the offset is the finger’s own travel, move by move',
@@ -319,46 +377,156 @@ async function main() {
       check(
         'the drag is committed and lands on the lyrics, with the route following the pane',
         pagerOf(follow.rest).position === 2 && pagerOf(follow.rest).settled === true && follow.rest.route === '#/now/lyrics',
-        `rest: pane ${pagerOf(follow.rest).position} on ${follow.rest.route}, strip ${follow.rest.pages.translate}`,
+        `rest: pane ${pagerOf(follow.rest).position} on ${follow.rest.route}, strip ${follow.rest.pages.translate}, settled after ${follow.settledAfterMs} ms${follow.settleTimedOut ? ' (THE POLL TIMED OUT — the reading is of a screen still moving)' : ''}`,
       );
 
       /* ----------------------------------------------------- 3. snapping both ways */
-      const short = await drag(cdp, { fromX: 330, toX: 330 - 0.12 * width, y: 300, steps: 2, stepDelayMs: 30 });
+      /*
+       * Every gesture in this section is driven **inside the page**, and it has to be.
+       *
+       * The pager reads its release velocity from the `performance.now()` gap between its last two
+       * `touchmove`s (`src/ui/pager.ts`, `onTouchMove`), and `settle()` projects it over 140 ms against
+       * the 0.32-pane commit point. So the verdict on a 0.2-pane drag is decided by the gap between its
+       * last two moves: 26 px of travel per step at 393 px wide commits unless that gap is longer than
+       * ~78 ms. Driven through `Input.dispatchTouchEvent`, that gap is the *driver's* speed and not the
+       * check's: measured, a `stepDelayMs: 6` CDP drag handed the pager gaps of 212–330 ms per move on
+       * this box — it snaps back, and the "0.0003 panes/ms" this file used to quote *is* that
+       * measurement — while on a quiet box the same drag is under 80 ms per move and commits, which is
+       * the failure filed as t_067de214. It is not load-sensitive but *driver-speed*-sensitive, and
+       * heavier load makes the wire slower, which is why it passed under 8 busy processes. So each check
+       * here sets the cadence itself and reports the gaps the pager's own clock saw, with the projection
+       * those gaps add: the check's verdict stops depending on a number it does not own.
+       *
+       * A timer can only be **late**, never early, so the two claims differ in kind. "Released slowly" (the
+       * short drag, the slow release) asks for a gap above the one that commits it — 42 ms at 0.12 panes,
+       * 78 ms at 0.2 — and a late timer only adds to it, so the ask alone decides: safe as asked. "Released
+       * fast" (the flick) asks for a gap *under* it, where a late timer is exactly the failure: so the
+       * flick's release move is dispatched in the same task as the one before it (a faster finger,
+       * deterministic by construction) and the check judges the release it got, naming a harness failure
+       * when the release was not fast rather than blaming the pager for it.
+       */
+      /*
+       * The ask is the floor on the gap the pager will see (a timer can only be *late*), so an ask above
+       * the gap that would commit this gesture makes the snap-back a fact rather than a hope. At this
+       * distance — 0.12 panes over two steps, 23.6 px at 393 px wide — that gap is 42 ms
+       * (`0.12 + 8.4/gap ≥ 0.32`), and the projection at this cadence is 0.176 of a pane: a snap-back the
+       * report can be read for. So unlike the flick this one was never *broken* at an ask of 60 ms
+       * (60 > 42); it was the thinnest margin in the file, at 0.26 of the 0.32 that commits, and the ask
+       * is now uniform with the slow release's.
+       * `NAVILITE_SHORT_GAP_MS=8` is the negative control: it makes this release a flick, which must
+       * commit and must fail this check — the proof that it is not a no-op.
+       */
+      const shortGapMs = Number(process.env.NAVILITE_SHORT_GAP_MS ?? 150);
+      const short = await evaluate(
+        cdp,
+        `${IN_PAGE}pagerGesture({ fromX: 330, toX: ${330 - 0.12 * width}, y: 300, steps: 2, gapMs: ${shortGapMs} })`,
+      );
+      const shortRest = await settledPager(cdp);
+      const shortRelease = releaseOf(short, width);
+      readings.stages.snapBack = {
+        offsets: short.offsets,
+        events: short.events,
+        release: shortRelease,
+        rest: pagerOf(shortRest.geometry).position,
+        settled: pagerOf(shortRest.geometry).settled,
+        settledAfterMs: shortRest.waited,
+      };
       check(
         'a short drag moves the pane under the finger and then snaps back to the same pane',
-        short.samples.some((sample) => pagerOf(sample.geometry).offset > 2.05) &&
-          pagerOf(short.rest).position === 2 &&
-          pagerOf(short.rest).settled === true,
-        `offsets ${short.samples.map((s) => pagerOf(s.geometry).offset).join(' → ')} → rest pane ${pagerOf(short.rest).position}`,
+        short !== null &&
+          short.offsets.some((offset) => offset > 2.05) &&
+          pagerOf(shortRest.geometry).position === 2 &&
+          pagerOf(shortRest.geometry).settled === true,
+        short === null
+          ? 'the page could not drive a gesture (no Touch/TouchEvent in the page)'
+          : `offsets ${short.offsets.join(' → ')} · released at ${shortRelease.pxPerMs} px/ms (last gap ${shortRelease.gapMs} ms, asked ${shortGapMs} ms) — ` +
+            `the projection adds ${shortRelease.projectedPanes} panes, ${(0.12 + shortRelease.projectedPanes).toFixed(3)} in all, ${0.12 + shortRelease.projectedPanes < 0.32 ? 'under' : 'PAST'} the 0.32 commit point · ` +
+            `rest pane ${pagerOf(shortRest.geometry).position}, settled after ${shortRest.waited} ms`,
       );
 
-      // The control for the flick below: the *same* shallow distance, released slowly — and the slow
-      // release is measurable, because the input pipeline that drives it costs a round trip per move
-      // (the pager reads its velocity from `performance.now()`, so a "fast" CDP gesture is no such
-      // thing: measured, it comes out at 0.0003 panes/ms). A shallow, slow release snaps back.
-      const slow = await drag(cdp, { fromX: 330, toX: 330 - 0.2 * width, y: 300, steps: 3, stepDelayMs: 6, afterReleaseMs: 520, sampleEvery: 0 });
-      const slowOffsets = slow.samples.map((sample) => pagerOf(sample.geometry).offset);
+      // The control for the flick below: the *same* shallow distance, released slowly. "Slowly" is a
+      // number here (150 ms between the pager's own move events, ~0.17 px/ms) rather than whatever the
+      // input pipeline happened to cost, so the check decides on the cadence it asked for. A shallow,
+      // slow release snaps back. `NAVILITE_SLOW_GAP_MS=8` is the negative control: it makes that release
+      // a flick, which must commit and must fail this check — the proof that it is not a no-op.
+      const slowGapMs = Number(process.env.NAVILITE_SLOW_GAP_MS ?? 150);
+      const slow = await evaluate(
+        cdp,
+        `${IN_PAGE}pagerGesture({ fromX: 330, toX: ${330 - 0.2 * width}, y: 300, steps: 3, gapMs: ${slowGapMs} })`,
+      );
+      const slowRest = await settledPager(cdp);
+      const slowRelease = releaseOf(slow, width);
+      const slowDeepest = Math.max(...slow.offsets);
+      readings.stages.slowRelease = {
+        offsets: slow.offsets,
+        events: slow.events,
+        release: slowRelease,
+        rest: pagerOf(slowRest.geometry).position,
+        settled: pagerOf(slowRest.geometry).settled,
+        settledAfterMs: slowRest.waited,
+      };
       check(
         'the same shallow distance, released slowly, snaps back to the pane it started on',
-        Math.max(...slowOffsets) < 2.32 && pagerOf(slow.rest).position === 2,
-        `deepest sample ${Math.max(...slowOffsets).toFixed(3)} panes (the commit point is 0.32 past the pane) · rest pane ${pagerOf(slow.rest).position}`,
+        slow !== null && slowDeepest < 2.32 && pagerOf(slowRest.geometry).position === 2 && pagerOf(slowRest.geometry).settled === true,
+        slow === null
+          ? 'the page could not drive a gesture (no Touch/TouchEvent in the page)'
+          : `deepest sample ${slowDeepest.toFixed(3)} panes (the commit point is 0.32 past the pane) · ` +
+            `released at ${slowRelease.pxPerMs} px/ms (last gap ${slowRelease.gapMs} ms, asked ${slowGapMs} ms) — the projection adds ${slowRelease.projectedPanes} panes, ` +
+            `${(0.2 + slowRelease.projectedPanes).toFixed(3)} in all, ${0.2 + slowRelease.projectedPanes < 0.32 ? 'under' : 'PAST'} the 0.32 commit point · ` +
+            `rest pane ${pagerOf(slowRest.geometry).position}, settled after ${slowRest.waited} ms`,
       );
 
-      // The flick: identical distance, a finger's cadence. Committing at 0.2 panes can only be the
-      // velocity projection — nothing else in the pager can carry it past the commit point.
-      const flick = await evaluate(cdp, `${IN_PAGE}flickPager({ fromX: 330, toX: ${330 - 0.2 * width}, steps: 3, gapMs: 8 })`);
-      await wait(600);
-      const flickRest = await evaluate(cdp, GEOMETRY);
-      readings.stages.flick = { ...flick, rest: pagerOf(flickRest).position, route: flickRest.route };
+      /*
+       * The flick: identical distance, a finger's cadence. Committing at 0.2 panes can only be the
+       * velocity projection — nothing else in the pager can carry it past the commit point.
+       *
+       * And the release is deterministic by construction. A timer can only be late, never early: for an
+       * asked 8 ms the pager's own clock has seen 9–47 ms, and the commit here needs a gap under
+       * ~78 ms, so a slow timer would make a correct app fail. `sameTaskRelease` lands the final move in
+       * the same task as the one before it — a *faster* finger, so "released fast" still holds. The
+       * check then judges that the release it got really was fast (`releaseIsFast`), and says so in
+       * those words if it was not: a gesture that could not commit on velocity is a harness failure,
+       * not a pager one, and must not read as one.
+       */
+      /*
+       * The negative control for the flick: `NAVILITE_FLICK_TIMER_PACED=150` paces that release with a
+       * timer at 150 ms instead of landing it in the same task — a *slow* release, which must snap back,
+       * so the flick check must go red. It is the only way to make this one fail on purpose, so it is the
+       * proof that it is not a no-op.
+       */
+      const flickTimerPacedMs = process.env.NAVILITE_FLICK_TIMER_PACED ? Number(process.env.NAVILITE_FLICK_TIMER_PACED) : null;
+      const flickGapMs = flickTimerPacedMs ?? 8;
+      const flickSameTask = flickTimerPacedMs === null;
+      const flick = await evaluate(
+        cdp,
+        `${IN_PAGE}flickPager({ fromX: 330, toX: ${330 - 0.2 * width}, y: 300, steps: 3, gapMs: ${flickGapMs}, sameTaskRelease: ${flickSameTask} })`,
+      );
+      const flickRest = await settledPager(cdp);
+      const flickRelease = releaseOf(flick, width);
+      // The commit point, applied to what the pager itself would project: 0.2 panes + velocity × 140 ms.
+      const flickReleaseIsFast = flickRelease !== null && 0.2 + flickRelease.projectedPanes >= 0.32;
+      readings.stages.flick = {
+        ...flick,
+        askedGapMs: flickGapMs,
+        release: flickRelease,
+        releaseIsFast: flickReleaseIsFast,
+        rest: pagerOf(flickRest.geometry).position,
+        route: flickRest.geometry.route,
+        settledAfterMs: flickRest.waited,
+      };
       check(
         'a flick commits on velocity: the same 0.2 panes, released fast, turn the page',
         flick !== null &&
           flick.offsets.length > 0 &&
           Math.max(...flick.offsets) < 2.32 &&
-          pagerOf(flickRest).position === 0,
+          pagerOf(flickRest.geometry).position === 0 &&
+          flickReleaseIsFast,
         flick === null
           ? 'the page could not drive a flick (no Touch/TouchEvent in the page)'
-          : `offsets under the finger ${flick.offsets.map((v) => v.toFixed(3)).join(' → ')} over ${flick.ms} ms, then released · rest pane ${pagerOf(flickRest).position} on ${flickRest.route}`,
+          : `offsets under the finger ${flick.offsets.map((v) => v.toFixed(3)).join(' → ')} over ${flick.ms} ms, released at ${flickRelease.pxPerMs} px/ms ` +
+            `(last gap ${flickRelease.gapMs} ms, asked ${flickGapMs} ms, ${flick?.sameTaskRelease ? 'release move in the same task as the one before it' : 'release move paced by a timer, not by the check'}) — the projection adds ${flickRelease.projectedPanes} panes, ${0.2 + flickRelease.projectedPanes < 0.32 ? 'under' : 'past'} the 0.32 commit point · ` +
+            `${flickReleaseIsFast ? '' : 'HARNESS: the release this check got was not a fast one, so a snap-back here is the gesture and not the app · '}` +
+            `rest pane ${pagerOf(flickRest.geometry).position} on ${flickRest.geometry.route}, settled after ${flickRest.waited} ms`,
       );
 
       /* --------------------------------------------------------------- 4. the ring */
@@ -627,20 +795,47 @@ async function main() {
       // so the playhead never reaches the end of the song and rolls onto the next one mid-check.
       const durationMs = Math.round((audio?.duration ?? 0) * 1000);
       const lineStartMs = (index) => Math.round((index * durationMs) / lineCount);
+      // The follow is a *smooth* scroll (`host.scrollTo({ behavior: 'smooth' })`, src/ui/lyrics.ts), so
+      // the panel is still moving for a few hundred milliseconds after the seek — longer, without
+      // bound, when the machine is busy. A fixed delay therefore reads wherever the animation happened
+      // to be at that instant, which is the v1.8.0 flake: under the suite's parallel load this check
+      // read a mid-flight position (the panel still on the previous line's resting offset) and failed,
+      // while the same harness passed standalone. A longer fixed delay is the same class of mistake
+      // with better odds, so this polls for the reading the check is actually about — the highlight on
+      // the line that was sought, and the upcoming line on screen (or the panel at its own end) — for a
+      // bounded time, and records how long that took. A follow that never gets there still fails, on
+      // the position it stopped at, and reports that it never arrived.
+      const followSettleMs = Number(process.env.NAVILITE_FOLLOW_SETTLE_MS ?? 4000);
+      const readFollowSettled = async (index) => {
+        const started = Date.now();
+        for (;;) {
+          const state = await evaluate(cdp, `${IN_PAGE}lyricsFollowState()`);
+          const waited = Date.now() - started;
+          const arrived =
+            state.activeIndex === index &&
+            (!state.upcoming || state.upcoming.fullyVisible || state.scrollTop >= state.maxScroll - 0.5);
+          if (arrived || waited >= followSettleMs) return { state, waited, arrived };
+          await wait(45);
+        }
+      };
       const walk = [];
       if (durationMs > 0 && lineCount > 1) {
         for (let index = lineCount - 1; index >= 0; index -= 1) {
           const ms = lineStartMs(index) + 300;
           await evaluate(cdp, `${IN_PAGE}seekAudio(${ms / 1000})`);
-          await wait(320);
-          const state = await evaluate(cdp, `${IN_PAGE}lyricsFollowState()`);
+          const { state, waited, arrived } = await readFollowSettled(index);
           walk.push({
             index,
             ms,
+            waited,
+            arrived,
             activeIndex: state.activeIndex,
             scrollTop: state.scrollTop,
             maxScroll: state.maxScroll,
-            atEnd: state.atEnd,
+            // The probe has no `atEnd` of its own (it returned `undefined`, so this exemption could
+            // never fire and every report claimed "0 of them because the panel was already at its
+            // end"); derived here from the numbers it does report.
+            atEnd: state.scrollTop >= state.maxScroll - 0.5,
             upcoming: state.upcoming,
           });
         }
@@ -666,12 +861,14 @@ async function main() {
       // panel itself. Everything else has to fit — that is the whole point of leading by a line.
       const ledWhole = lead.filter((step) => step.upcoming.fullyVisible || step.atEnd);
       const clamped = lead.filter((step) => !step.upcoming.fullyVisible && step.atEnd);
+      const neverArrived = walk.filter((step) => !step.arrived);
+      const worstWait = walk.length === 0 ? 0 : Math.max(...walk.map((step) => step.waited));
       check(
         'and it leads by one line: the upcoming line is on screen when the current one lights',
         lead.length > 0 && ledWhole.length === lead.length,
         lead.length === 0
           ? 'no lit line had an upcoming line to measure'
-          : `${ledWhole.length} of ${lead.length} lit lines had the next one fully visible (deepest ${Math.max(...lead.map((step) => Math.round(step.upcoming.bottom)))} px down a ${density ? Math.round(density.panelHeight) : '?'} px panel), ${clamped.length} of them because the panel was already at its end`,
+          : `${ledWhole.length} of ${lead.length} lit lines had the next one fully visible (deepest ${Math.max(...lead.map((step) => Math.round(step.upcoming.bottom)))} px down a ${density ? Math.round(density.panelHeight) : '?'} px panel), ${clamped.length} of them because the panel was already at its end · the follow took up to ${worstWait} ms to arrive, of ${followSettleMs} ms allowed${neverArrived.length === 0 ? '' : ` · ${neverArrived.length} of ${walk.length} positions never arrived (${neverArrived.map((step) => `line ${step.index} at scrollTop ${Math.round(step.scrollTop)}/${step.maxScroll}`).join('; ')})`}`,
       );
 
       /* -------------------------------------------------- 10. the grace period */

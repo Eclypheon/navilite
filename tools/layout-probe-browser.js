@@ -1465,17 +1465,31 @@
   }
 
   /**
-   * A flick, timed *inside* the page.
+   * A finger inside the page, at a cadence this file sets — because the pager's release velocity *is*
+   * the `performance.now()` gap between its last two `touchmove`s, so a gesture driven from outside the
+   * page is clocked by the driver and not by the check.
    *
-   * The pager reads its release velocity from the `performance.now()` gaps between touchmoves. Every
-   * other gesture here goes through the input pipeline, which costs a round trip per move — a hundred
-   * times a finger's cadence — so a "fast" gesture driven that way measures up as a slow one and the
-   * velocity projection can never be reached. This drives the same listeners with `TouchEvent`s at a
-   * finger's pace (26 px every 8 ms) and records the offset after each move, so a commit here cannot
-   * be anything but the projection: the distance travelled is the same shallow one the slow check
-   * snaps back from.
+   * Through the input pipeline each move costs a round trip: measured on this box, a
+   * `stepDelayMs: 6` CDP drag hands the pager gaps of 212–330 ms per move, and on a quiet one under
+   * 80 ms. At 393 px wide, 26 px of travel per step and a 140 ms projection (`src/ui/pager.ts`:
+   * `PROJECTION_MS`, `COMMIT`), a 0.2-pane drag commits unless that gap is longer than ~78 ms — so a
+   * check that means "released slowly" is deciding on a number it does not control. This drives the
+   * same listeners with `TouchEvent`s at `gapMs` between moves and records what the page clock saw.
+   *
+   * Returns `{ ms, offsets, events }`: the offsets under the finger after each move, and one entry per
+   * event (`type`, `x`, the timestamp the listener itself saw — same task, same clock — and the gap
+   * back to the previous event), which is what a check about velocity has to report.
+   *
+   * `sameTaskRelease: true` lands the **final move in the same task as the one before it** instead of
+   * after another timer. A timer can only be late, never early: asked for `gapMs: 8`, the pager's own
+   * clock has seen 9–47 ms, and a gap longer than ~78 ms at this distance snaps the pane back — so a
+   * check whose claim is "released *fast*" would go red on a correct app whenever the timer slipped.
+   * In one task the gap is the synchronous work between two `dispatchEvent`s (well under a
+   * millisecond), which is a *faster* finger, so the claim still holds and now holds by construction.
+   * Gestures whose claim is "released *slowly*" must not set it — there the timer's lateness is the
+   * thing being asked for.
    */
-  function flickPager(options) {
+  function pagerGesture(options) {
     var target = document.querySelector(options.selector || '.now-visualizer');
     if (!target || typeof Touch !== 'function' || typeof TouchEvent !== 'function') return Promise.resolve(null);
     var fromX = options.fromX;
@@ -1487,8 +1501,10 @@
     var make = function (x) {
       return new Touch({ identifier: identifier, target: target, clientX: Math.round(x), clientY: y });
     };
+    var events = [];
     var fire = function (type, x) {
       var point = make(x);
+      var at = performance.now();
       target.dispatchEvent(
         new TouchEvent(type, {
           bubbles: true,
@@ -1498,6 +1514,8 @@
           changedTouches: [point],
         }),
       );
+      var previous = events[events.length - 1];
+      events.push({ type: type, x: Math.round(x), t: at, gapMs: previous ? at - previous.t : null });
     };
     var offsets = [];
     return new Promise(function (resolve) {
@@ -1506,19 +1524,53 @@
       var send = function (index) {
         if (index > steps) {
           fire('touchend', toX);
-          resolve({ ms: Math.round(performance.now() - started), offsets: offsets });
+          resolve({
+            ms: Math.round(performance.now() - started),
+            offsets: offsets,
+            sameTaskRelease: options.sameTaskRelease === true,
+            events: events.map(function (event) {
+              return {
+                type: event.type,
+                x: event.x,
+                t: Math.round(event.t * 10) / 10,
+                gapMs: event.gapMs === null ? null : Math.round(event.gapMs * 10) / 10,
+              };
+            }),
+          });
           return;
         }
         var x = fromX + ((toX - fromX) * index) / steps;
-        setTimeout(function () {
+        var emit = function () {
           fire('touchmove', x);
           var state = pagerState();
           if (state) offsets.push(state.offset);
           send(index + 1);
-        }, gapMs);
+        };
+        // The *release* move goes out in this same task, so the pager's clock measures the synchronous
+        // work between its last two moves rather than how late a timer ran (see above). Both events
+        // still reach the listener and the offsets still advance: the same finger, a faster last step.
+        // Every other move keeps the original spacing, so a gesture that asks for slow still gets slow.
+        if (index > 1 && index === steps && options.sameTaskRelease === true) emit();
+        else setTimeout(emit, gapMs);
       };
       send(1);
     });
+  }
+
+  /**
+   * A flick: `pagerGesture` at a finger's cadence (26 px every 8 ms), with the release move dispatched
+   * in the same task as the one before it — a flick's claim is that it is released *fast*, and a timer
+   * can only be late, so the deterministic release is the only one that keeps the claim about the app
+   * rather than about the box. A commit from here at the same shallow distance the slow release snaps
+   * back from cannot be anything but the velocity projection.
+   */
+  function flickPager(options) {
+    var merged = {};
+    for (var key in options) if (Object.prototype.hasOwnProperty.call(options, key)) merged[key] = options[key];
+    // A caller may opt out by passing `sameTaskRelease: false` — that is the negative control, a flick
+    // paced by a timer, which releases slowly and must snap back.
+    if (typeof merged.sameTaskRelease !== 'boolean') merged.sameTaskRelease = true;
+    return pagerGesture(merged);
   }
 
   function captureMediaElement() {
@@ -2378,6 +2430,7 @@
     audioState: audioState,
     pauseAudio: pauseAudio,
     flickPager: flickPager,
+    pagerGesture: pagerGesture,
     // v1.5 follow-up: the settings overflow, taken apart in the shipping engine, and the gestures.
     surfaceSideScroll: surfaceSideScroll,
     settingsOverflowProbe: settingsOverflowProbe,
