@@ -773,8 +773,8 @@ for what that does *not* prove.
 ### 11.7 Artifacts
 
 ```
-artifacts/Navilite-1.3.0-debug.apk      8,781,723 bytes   (v1.2: 8,780,787 — +936)
-artifacts/Navilite-1.3.0-unsigned.ipa     864,867 bytes   (v1.2:   864,067 — +800)
+artifacts/Navilite-1.3.0-debug.apk      8,783,060 bytes   (v1.2: 8,780,787 — +2,273, +0.03%)
+artifacts/Navilite-1.3.0-unsigned.ipa     864,867 bytes   (v1.2:   864,067 —   +800, +0.09%)
 ```
 
 Both embed the same `dist/` the tests ran against — `shasum -a 256` of
@@ -784,3 +784,16 @@ compared against `assets/public/assets/index-B6xoPdyW.js` inside the APK and
 carries any lyric text: grepping the shipped chunk for the mock's lines and for real lines returns
 nothing; the words stay on his server and in the device cache. The iOS build reports
 `app version 1.3.0 (4), UIBackgroundModes[0]=audio`.
+
+(An APK rebuilt from the *identical* `dist/` came out 1,337 bytes larger than the first one — zip
+timestamps, not content; the web payload hash is the same in both. The numbers above are the shipped
+second build, 08:02.)
+
+### 11.8 Found while doing this, not fixed
+
+- **The About line shows a placeholder.** `src/ui/app.ts` defines `const BUILD_ID = '__BUILD_ID__'`
+  and nothing ever replaces it — `vite.config.ts` stamps only `public/sw.js` — so
+  **Settings → About** reads literally `Navilite __BUILD_ID__ · Subsonic API 1.16.1` in every build,
+  including both artifacts (grep the shipped chunk: one hit). Pre-existing since v1.0, cosmetic, and
+  outside this card; a one-line `define` in `vite.config.ts` fixes it, but it re-hashes the bundle and
+  both artifacts, so it wants its own change.

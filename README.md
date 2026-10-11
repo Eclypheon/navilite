@@ -24,12 +24,13 @@ source, not binaries), and stay far under the ~50 MB a Telegram bot can deliver:
 
 | Artifact | Bytes | Why that size |
 |---|---|---|
-| `artifacts/Navilite-1.3.0-debug.apk` | 8,781,723 (8.4 MiB) | AndroidX + Capacitor core + ExoPlayer (the native audio plugin), plus 17 web payload files. Debug-signed, so it sideloads without any signing setup. |
+| `artifacts/Navilite-1.3.0-debug.apk` | 8,783,060 (8.4 MiB) | AndroidX + Capacitor core + ExoPlayer (the native audio plugin), plus 17 web payload files. Debug-signed, so it sideloads without any signing setup. |
 | `artifacts/Navilite-1.3.0-unsigned.ipa` | 864,867 (0.8 MiB) | No engine is bundled: WKWebView and AVFoundation are the OS's. Just the arm64 binary and the web payload. Unsigned on purpose (`docs/ios-sideload.md`). |
 
-v1.3 adds 936 bytes to the APK and 800 to the IPA over v1.2's 8,780,787 / 864,067: one small module
-(`src/api/sidecar.ts`) and the source-order change in `src/api/lyrics.ts`. No new dependency, and no
-lyrics text in either file (checked by hash and by grep; `docs/verification.md` §11.7).
+v1.3 adds 2,273 bytes to the APK (+0.03%) and 800 to the IPA (+0.09%) over v1.2's 8,780,787 /
+864,067: one small module (`src/api/sidecar.ts`) and the source-order change in `src/api/lyrics.ts`.
+No new dependency, and no lyrics text in either file (checked by hash and by grep;
+`docs/verification.md` §11.7).
 
 ## What it does
 
