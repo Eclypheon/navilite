@@ -1046,7 +1046,8 @@ button. It reads two things the app cannot fake:
   bundle runs, because `queue.onChanged` calls `void syncPalette(...)`: the failure was a rejected
   promise nobody was holding.
 
-Against the v1.4 build (`dist/assets/index-BKF5Cb2p.js`), mock library on :4633:
+Against the v1.4 app with the new read-only seam added and nothing else (the first build of this card,
+`dist/assets/index-BKF5Cb2p.js`), mock library on :4633:
 
     $ node tools/mock-subsonic.mjs --port 4633 --stress --dist dist
     $ node tools/palette-check.mjs --url http://127.0.0.1:4633 --json red-report.json
