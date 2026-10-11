@@ -751,7 +751,25 @@ export async function runNowChrome(cdp, options) {
     above: await gestureAt(DRAG_OFFSETS.insideTheTarget, 'drag'),
     text: await gestureAt(DRAG_OFFSETS.onTheTrackText, 'drag'),
   };
-  return { geometry, gestures, centre, x, chrome: chromeBands(geometry) };
+  /*
+   * v1.8.1 gives the transport row's *container* `pointer-events: none` so that it cannot swallow
+   * the lower part of the seek bar's 44 px target, which overflows into it. The buttons inside keep
+   * `auto`; this is the reading that says so.
+   */
+  const transportBox = geometry.transport;
+  const playX = Math.round(transportBox.left + transportBox.width / 2);
+  const playY = Math.round(transportBox.top + transportBox.height / 2);
+  const transportHit = await read(
+    `(() => {
+      const el = document.elementFromPoint(${playX}, ${playY});
+      if (!el) return null;
+      const button = el.closest ? el.closest('button') : null;
+      /* An SVG's className is an object, not a string: read the base value when there is one. */
+      const name = el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className;
+      return { selector: name ? String(name).split(' ')[0] : el.tagName, button: button ? (button.getAttribute('aria-label') || String(button.className)) : null, insideBar: !!(el.closest && el.closest('.now-bar')) };
+    })()`,
+  );
+  return { geometry, gestures, transportHit, centre, x, chrome: chromeBands(geometry) };
 }
 
 /** The checks v1.8.1 is signed off on, each one a number out of the reading above. */
@@ -809,6 +827,17 @@ export function judgeNowChrome(reading) {
     label: 'less screen goes to chrome than v1.8.0 spent (208.23 px)',
     ok: reading.chrome.total <= 190,
     detail: `${reading.chrome.total} px — ${reading.chrome.parts.map(([label, value]) => `${label} ${Math.round(value * 100) / 100}`).join(' · ')} · album art ${reading.chrome.art} px · spectrum ${reading.chrome.spectrum} px (v1.8.0's own reading of that same screen: chrome 208.23, art 357, spectrum 89.5)`,
+  });
+  /*
+   * The one thing the tall target could have cost: its lower half reaches into the transport row's
+   * box, and a row that answered for its whole area would have stolen it. The container is
+   * `pointer-events: none` and the buttons `auto`, so a finger on the play button must still land on
+   * the button.
+   */
+  checks.push({
+    label: 'the transport buttons still own every tap they had',
+    ok: !!reading.transportHit?.button && reading.transportHit?.insideBar === true,
+    detail: `a finger at the centre of the play button lands on ${reading.transportHit?.selector ?? 'nothing'}, inside ${reading.transportHit?.button ?? 'no button'} in the transport row: ${reading.transportHit?.insideBar === true}`,
   });
   return checks;
 }
