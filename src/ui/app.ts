@@ -182,6 +182,8 @@ export async function boot(root: HTMLElement): Promise<void> {
     route: () => location.hash,
     nowMode: () => shell.nowMode,
     playingRow: () => document.querySelector('.row.song.playing .row-title')?.textContent ?? null,
+    /** What theme the app is holding — so a harness can prove the palette was applied at all. */
+    palette: () => ctx.palette,
     context: () => shell.nowContext.textContent,
     // Visible lyrics, so an end-to-end check can read what the panel actually shows.
     lyrics: () => Array.from(document.querySelectorAll('.lyric-line')).map((node) => node.textContent),
@@ -529,18 +531,27 @@ function applyPaletteVars(shell: Shell, palette: Palette): void {
 
 /* ------------------------------------------------------------------- state */
 
-interface PaletteHooks {
-  apply(palette: Palette): void;
-}
+/*
+ * The palette hook is a plain callback, not an object with an `apply` method.
+ *
+ * It was `interface PaletteHooks { apply(palette: Palette): void }` until v1.4.1, and that shape is
+ * a trap: **a function satisfies it structurally**, because `(palette: Palette) => void` already
+ * has an `apply` — `Function.prototype.apply`. So `restoreSession(ctx, shell, applyPalette)` — the
+ * cold-start path, i.e. every normal launch — type-checked fine, `hooks.apply(DEFAULT_PALETTE)`
+ * then ran `applyPalette(undefined)`, and `applyPaletteVars` threw on `palette.primary` inside a
+ * floating promise: no theme, no error anyone could see, from v1.1 to v1.4. Passing the function
+ * itself removes the shape that made the mistake possible, in both directions.
+ */
+type ApplyPalette = (palette: Palette) => void;
 
 let currentPaletteSong: string | null = null;
 
-async function restoreSession(ctx: AppContext, shell: Shell, hooks: PaletteHooks): Promise<boolean> {
+async function restoreSession(ctx: AppContext, shell: Shell, applyPalette: ApplyPalette): Promise<boolean> {
   const { serverUrl, username } = ctx.settings;
   if (!username) return false;
   const password = await ctx.secrets.get(PASSWORD_KEY);
   if (password === null) return false;
-  connect(ctx, shell, { serverUrl, username, password }, hooks, { silent: true });
+  connect(ctx, shell, { serverUrl, username, password }, applyPalette, { silent: true });
   return true;
 }
 
@@ -576,7 +587,7 @@ interface Credentials {
   password: string;
 }
 
-function connect(ctx: AppContext, shell: Shell, credentials: Credentials, hooks: PaletteHooks, options: { silent?: boolean } = {}): void {
+function connect(ctx: AppContext, shell: Shell, credentials: Credentials, applyPalette: ApplyPalette, options: { silent?: boolean } = {}): void {
   const client = new SubsonicClient(credentials);
   const library = new Library(client);
   const queue = new PlaybackQueue(ctx.engine, library);
@@ -588,21 +599,21 @@ function connect(ctx: AppContext, shell: Shell, credentials: Credentials, hooks:
   queueRef = queue;
   queue.onChanged = () => {
     updatePlayerBar(ctx, shell, ctx.engine.status());
-    void syncPalette(ctx, hooks);
+    void syncPalette(ctx, applyPalette);
   };
   if (!options.silent) {
     queue.onChanged();
   }
 }
 
-async function syncPalette(ctx: AppContext, hooks: PaletteHooks): Promise<void> {
+async function syncPalette(ctx: AppContext, applyPalette: ApplyPalette): Promise<void> {
   const song = ctx.queue?.currentSong ?? null;
   if (!song || song.id === currentPaletteSong) return;
   currentPaletteSong = song.id;
   const url = ctx.library?.coverUrl(song.coverArt ?? song.albumId, 256) ?? null;
-  hooks.apply(DEFAULT_PALETTE);
+  applyPalette(DEFAULT_PALETTE);
   const palette = await paletteFromArtwork(url);
-  if (ctx.queue?.currentSong?.id === song.id) hooks.apply(palette);
+  if (ctx.queue?.currentSong?.id === song.id) applyPalette(palette);
 }
 
 /* ------------------------------------------------------------------ lock */
@@ -821,7 +832,7 @@ async function renderConnect(ctx: AppContext, shell: Shell): Promise<void> {
         ctx.settings = { ...ctx.settings, serverUrl: credentials.serverUrl, username: credentials.username };
         saveSettings(ctx.settings);
         await ctx.secrets.set(PASSWORD_KEY, credentials.password);
-        connect(ctx, shell, credentials, { apply: (palette) => applyPaletteGlobal(shell, palette) });
+        connect(ctx, shell, credentials, (palette) => applyPaletteGlobal(shell, palette));
         location.hash = DEFAULT_ROUTE;
         ctx.toast(`Connected as ${credentials.username}`);
       } catch (error) {

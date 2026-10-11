@@ -1,0 +1,130 @@
+{
+  "url": "http://127.0.0.1:4633",
+  "phases": {
+    "onBoot": {
+      "route": "#/now",
+      "palette": {
+        "primary": "#7cd2ff",
+        "secondary": "#a88cff",
+        "accent": "#ff80b4",
+        "fromArt": false
+      },
+      "errors": []
+    },
+    "artReachable": {
+      "before": {
+        "palette": {
+          "primary": "hsl(22 85% 66%)",
+          "secondary": "hsl(337 60% 60%)",
+          "accent": "hsl(352 70% 72%)",
+          "fromArt": true
+        },
+        "cssPrimary": "hsl(22 85% 66%)",
+        "cssSecondary": "hsl(337 60% 60%)",
+        "cssAccent": "hsl(352 70% 72%)",
+        "playing": "album-ja-1-track-1",
+        "errors": []
+      },
+      "played": {
+        "rows": 3,
+        "song": "album-ja-1-track-1"
+      },
+      "artworkArrived": true,
+      "after": {
+        "palette": {
+          "primary": "hsl(22 85% 66%)",
+          "secondary": "hsl(337 60% 60%)",
+          "accent": "hsl(352 70% 72%)",
+          "fromArt": true
+        },
+        "cssPrimary": "hsl(22 85% 66%)",
+        "cssSecondary": "hsl(337 60% 60%)",
+        "cssAccent": "hsl(352 70% 72%)",
+        "playing": "album-ja-1-track-1",
+        "errors": []
+      }
+    },
+    "artUnreachable": {
+      "before": {
+        "palette": {
+          "primary": "hsl(22 85% 66%)",
+          "secondary": "hsl(337 60% 60%)",
+          "accent": "hsl(352 70% 72%)",
+          "fromArt": true
+        },
+        "cssPrimary": "hsl(22 85% 66%)",
+        "cssSecondary": "hsl(337 60% 60%)",
+        "cssAccent": "hsl(352 70% 72%)",
+        "playing": "album-ja-1-track-1",
+        "errors": []
+      },
+      "played": {
+        "song": "album-ja-1-track-2"
+      },
+      "after": {
+        "palette": {
+          "primary": "#7cd2ff",
+          "secondary": "#a88cff",
+          "accent": "#ff80b4",
+          "fromArt": false
+        },
+        "cssPrimary": "#7cd2ff",
+        "cssSecondary": "#a88cff",
+        "cssAccent": "#ff80b4",
+        "playing": "album-ja-1-track-2",
+        "errors": []
+      }
+    },
+    "final": {
+      "palette": {
+        "primary": "#7cd2ff",
+        "secondary": "#a88cff",
+        "accent": "#ff80b4",
+        "fromArt": false
+      },
+      "cssPrimary": "#7cd2ff",
+      "cssSecondary": "#a88cff",
+      "cssAccent": "#ff80b4",
+      "playing": "album-ja-1-track-2",
+      "errors": []
+    }
+  },
+  "checks": {
+    "a normal launch lands in the app without throwing": {
+      "ok": true,
+      "detail": "no unhandled rejection or error during boot"
+    },
+    "a track change does not throw from queue.onChanged": {
+      "ok": true,
+      "detail": "nothing thrown across the track change (errors: 0)"
+    },
+    "the palette applied is the artwork one (fromArt: true)": {
+      "ok": true,
+      "detail": "palette after the track change: {\"primary\":\"hsl(22 85% 66%)\",\"secondary\":\"hsl(337 60% 60%)\",\"accent\":\"hsl(352 70% 72%)\",\"fromArt\":true} — fromArt true"
+    },
+    "the document is actually carrying the artwork colours": {
+      "ok": true,
+      "detail": "--accent-primary is “hsl(22 85% 66%)”, the palette says “hsl(22 85% 66%)”, the default is “#7cd2ff”"
+    },
+    "the artwork palette is not the default palette wearing a different name": {
+      "ok": true,
+      "detail": "primary hsl(22 85% 66%)"
+    },
+    "the second track change is a different track (so the check is not vacuous)": {
+      "ok": true,
+      "detail": "album-ja-1-track-1 -> album-ja-1-track-2"
+    },
+    "a track change with no reachable cover art does not throw either": {
+      "ok": true,
+      "detail": "nothing thrown (errors: 0)"
+    },
+    "with no cover art the app falls back to the defaults, and applies them": {
+      "ok": true,
+      "detail": "palette {\"primary\":\"#7cd2ff\",\"secondary\":\"#a88cff\",\"accent\":\"#ff80b4\",\"fromArt\":false} · --accent-primary “#7cd2ff”"
+    },
+    "nothing thrown anywhere in the session": {
+      "ok": true,
+      "detail": "no unhandled rejection or error, from boot to the second track change"
+    }
+  }
+}

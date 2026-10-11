@@ -45,3 +45,7 @@ Plain language, user-visible changes only. The app shows this same list under
 - The now-playing screen no longer scrolls the list behind it. Open a playlist, open the spectrum, scroll: the list underneath does not move at all — in v1.3 a gesture there dragged it 800 px and left it there — and closing brings you back to the same row you were on.
 - The top bar cannot grow, stretch or scroll away any more. It measures 58 px at the top of the screen and the same 58 px after every scroll, and the page itself no longer scrolls anywhere: v1.3 scrolled the whole page 1,660 px, and now there is 0 px of page to scroll at all.
 - The app scrolls inside one box of its own now, so the only thing a finger can reach while the now-playing screen is open is that screen: pointing at every part of it lands on the spectrum or the lyrics, never on the list underneath.
+
+## 1.4.1 — 2026-10-11
+
+- The colours follow the cover again. Every track change repaints the screen from that track's album art — it has been stuck on the default blue for the whole session since v1.1 whenever the app signed itself in at launch, which is every normal open. Change track now and you will see it move; a track whose art cannot be read keeps the default colours, as before.

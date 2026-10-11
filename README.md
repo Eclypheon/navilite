@@ -33,6 +33,10 @@ and the IPA also carries the one Swift file that turns off the web view's elasti
 (`ios/App/App/ViewController.swift`). No new dependency, and the payload in both files is the exact
 `dist/` the tests ran against (checked by hash; `docs/verification.md` §12.7).
 
+v1.4.1 is source-only: no artifact in `artifacts/` was rebuilt for it, so the two files above still
+contain the v1.4.0 payload — including the cold-start palette defect v1.4.1 fixes (`docs/verification.md`
+§13). The fix is web-side only, so a rebuild is all it needs.
+
 ## What it does
 
 - **Browse** — artists, albums, playlists, favourites and search over the **Subsonic API**
@@ -270,11 +274,14 @@ node tools/layout-audit.mjs --url http://127.0.0.1:4533 --sweep 320:440 --step 1
 node tools/device-probe.mjs --device <simulator-udid>             # iOS WebKit: the app in Safari
 node tools/device-probe.mjs --serve --app <App.app>               # ...and the real Capacitor shell
 node tools/spectrum-proof.mjs --url http://127.0.0.1:4533         # real pixels: no after-image
+node tools/palette-check.mjs --url http://127.0.0.1:4533          # the theme follows the track
 ```
 
 Each of them exits non-zero when something is wider than the viewport — they report a number, not
 an impression. `npm test` runs the 393 px audit too (`test/layout-393.test.ts`) whenever Chrome and
-a built `dist/` are present, and skips it with the reason when they are not.
+a built `dist/` are present, and skips it with the reason when they are not. `palette-check` is the
+one that is not about layout: it signs in through the stored session, plays a track and reads back
+the palette the app applied (`test/palette-apply.test.ts`).
 
 The device probe needs an app built with `server.url` pointing at the probe (a measurement-only
 `capacitor.config.ts`, reverted straight after — see `docs/verification.md` §10).

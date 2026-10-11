@@ -1,0 +1,120 @@
+{
+  "url": "http://127.0.0.1:4633",
+  "phases": {
+    "onBoot": {
+      "route": "#/artists",
+      "palette": {
+        "primary": "#7cd2ff",
+        "secondary": "#a88cff",
+        "accent": "#ff80b4",
+        "fromArt": false
+      },
+      "errors": []
+    },
+    "artReachable": {
+      "before": {
+        "palette": {
+          "primary": "#7cd2ff",
+          "secondary": "#a88cff",
+          "accent": "#ff80b4",
+          "fromArt": false
+        },
+        "cssPrimary": "#7cd2ff",
+        "cssSecondary": "#a88cff",
+        "cssAccent": "#ff80b4",
+        "playing": null,
+        "errors": []
+      },
+      "played": {
+        "rows": 3,
+        "song": "album-ja-1-track-1"
+      },
+      "artworkArrived": false,
+      "after": {
+        "palette": null,
+        "cssPrimary": "#7cd2ff",
+        "cssSecondary": "#a88cff",
+        "cssAccent": "#ff80b4",
+        "playing": "album-ja-1-track-1",
+        "errors": [
+          "TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11"
+        ]
+      }
+    },
+    "artUnreachable": {
+      "before": {
+        "palette": null,
+        "cssPrimary": "#7cd2ff",
+        "cssSecondary": "#a88cff",
+        "cssAccent": "#ff80b4",
+        "playing": "album-ja-1-track-1",
+        "errors": [
+          "TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11"
+        ]
+      },
+      "played": {
+        "song": "album-ja-1-track-2"
+      },
+      "after": {
+        "palette": null,
+        "cssPrimary": "#7cd2ff",
+        "cssSecondary": "#a88cff",
+        "cssAccent": "#ff80b4",
+        "playing": "album-ja-1-track-2",
+        "errors": [
+          "TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11",
+          "TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11"
+        ]
+      }
+    },
+    "final": {
+      "palette": null,
+      "cssPrimary": "#7cd2ff",
+      "cssSecondary": "#a88cff",
+      "cssAccent": "#ff80b4",
+      "playing": "album-ja-1-track-2",
+      "errors": [
+        "TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11",
+        "TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11"
+      ]
+    }
+  },
+  "checks": {
+    "a normal launch lands in the app without throwing": {
+      "ok": true,
+      "detail": "no unhandled rejection or error during boot"
+    },
+    "a track change does not throw from queue.onChanged": {
+      "ok": false,
+      "detail": "the page threw: TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11"
+    },
+    "the palette applied is the artwork one (fromArt: true)": {
+      "ok": false,
+      "detail": "palette after the track change: null — fromArt undefined"
+    },
+    "the document is actually carrying the artwork colours": {
+      "ok": false,
+      "detail": "--accent-primary is “#7cd2ff”, the palette says “(no palette)”, the default is “#7cd2ff”"
+    },
+    "the artwork palette is not the default palette wearing a different name": {
+      "ok": true,
+      "detail": "primary (no palette)"
+    },
+    "the second track change is a different track (so the check is not vacuous)": {
+      "ok": true,
+      "detail": "album-ja-1-track-1 -> album-ja-1-track-2"
+    },
+    "a track change with no reachable cover art does not throw either": {
+      "ok": false,
+      "detail": "the page threw: TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11"
+    },
+    "with no cover art the app falls back to the defaults, and applies them": {
+      "ok": false,
+      "detail": "palette null · --accent-primary “#7cd2ff”"
+    },
+    "nothing thrown anywhere in the session": {
+      "ok": false,
+      "detail": "TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11 | TypeError: Cannot read properties of undefined (reading 'primary')\n    at Jt (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:62704)\n    at Object.l (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:55788)\n    at $t (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:64056)\n    at Qt.s.onChanged (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:63874)\n    at ht.play (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:38377)\n    at HTMLButtonElement.onclick (http://127.0.0.1:4633/assets/index-BKF5Cb2p.js:1:79119)\n    at <anonymous>:3:22\n    at <anonymous>:5:11"
+    }
+  }
+}

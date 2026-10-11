@@ -996,4 +996,132 @@ off is compiled into what he installs, not just on disk.
   colours stay on the defaults for the whole session; a one-line
   `{ apply: (palette) => applyPalette(palette) }` fixes it. Pre-existing since v1.1, untouched by this
   card, and it changes colours, so it wants its own change rather than a ride-along here.
+  **Fixed in §13 (v1.4.1)** — the fix went further than the one-liner, and §13 is where the proof is.
+
+## 13. v1.4.1 — the album-art palette on a cold start (2026-10-11)
+
+§12.8 recorded the defect; this section is the fix, the proof it was broken, and the proof it is not.
+The diff is two lines in `src/ui/app.ts`, and the interesting part is not the diff: the wrong code
+type-checked, so *why* the type checker was silent had to be shown rather than asserted, and the
+symptom is a theme that never changes rather than an element with the wrong class, so it had to be
+measured in a real browser.
+
+### 13.1 Why the type checker was silent — shown, not asserted
+
+`restoreSession(ctx, shell, hooks: PaletteHooks)` took `{ apply(palette: Palette): void }`, and a
+**function satisfies that structurally**: every function already has an `apply`, namely
+`Function.prototype.apply`. So `restoreSession(ctx, shell, applyPalette)` — the cold-start path, i.e.
+every normal launch — compiled, and at runtime `hooks.apply(DEFAULT_PALETTE)` called
+`applyPalette(undefined)`.
+
+Copied the pre-fix file in beside the fixed one (the timestamped backup taken before editing), and
+compiled it:
+
+    $ cp src/ui/app.ts.bak-<stamp> src/ui/zz-probe-old-palettehooks.ts && npm run typecheck
+    > tsc --noEmit
+    (exit 0 — the pre-fix file, function passed where PaletteHooks was expected, is clean)
+
+Then put that same call shape back into the fixed file:
+
+    $ npm run typecheck
+    src/ui/app.ts(144,42): error TS2353: Object literal may only specify known properties, and
+    'apply' does not exist in type 'ApplyPalette'.
+
+The hook is now a plain callback — `type ApplyPalette = (palette: Palette) => void`, passed directly
+at both call sites (`restoreSession` from `boot()`, and the connect form) — so neither the mistake
+nor its mirror image can be typed any more. This is the part the card's suggested one-liner
+(`{ apply: (palette) => applyPalette(palette) }`) would have left in place: the next `restoreSession`
+call could make the same mistake again.
+
+### 13.2 RED: the defect, reproduced on the build the card was written against
+
+`tools/palette-check.mjs` (new) drives the real app in real Chrome at 393x852 with the safe-area
+insets, through the **stored session** — the path a relaunch takes — and then taps a row's play
+button. It reads two things the app cannot fake:
+
+- the palette the app is holding, via `window.__navilite.palette()` (one new read-only line in the
+  `__navilite` seam that already reports the engine, the route and the lyrics);
+- the colour the document is carrying (`--accent-primary`), which is only set if the apply hook ran;
+- plus every uncaught error and unhandled rejection the page saw, collected from *before* the app's
+  bundle runs, because `queue.onChanged` calls `void syncPalette(...)`: the failure was a rejected
+  promise nobody was holding.
+
+Against the v1.4 build (`dist/assets/index-BKF5Cb2p.js`), mock library on :4633:
+
+    $ node tools/mock-subsonic.mjs --port 4633 --stress --dist dist
+    $ node tools/palette-check.mjs --url http://127.0.0.1:4633 --json red-report.json
+
+    cold start through the stored session: route #/artists · palette {...fromArt:false}
+    ok    a normal launch lands in the app without throwing
+    Track change with cover art reachable: played album-ja-1-track-1 of 3 rows
+      palette {...fromArt:false} -> null
+      document --accent-primary #7cd2ff -> #7cd2ff
+    FAIL  a track change does not throw from queue.onChanged
+          the page threw: TypeError: Cannot read properties of undefined (reading 'primary')
+        at Jt (index-BKF5Cb2p.js:1:62704)                 ← applyPaletteVars
+        at Object.l (…)                                   ← the apply hook
+        at $t (…)                                         ← syncPalette
+        at Qt.s.onChanged (…)                             ← queue.onChanged
+        at ht.play (…) · at HTMLButtonElement.onclick (…)  ← a row's play button
+    FAIL  the palette applied is the artwork one (fromArt: true) — palette null
+    FAIL  the document is actually carrying the artwork colours
+          --accent-primary is "#7cd2ff", the palette says "(no palette)", the default is "#7cd2ff"
+    FAIL  a track change with no reachable cover art does not throw either
+    FAIL  with no cover art the app falls back to the defaults, and applies them
+    FAIL  nothing thrown anywhere in the session
+    RESULT: 6 palette check(s) failed.
+
+Raw measurements: `docs/palette-v1.4.1-red-report.json`. Two details worth keeping: the stack is the
+one §12.8 recorded, frame for frame; and after the first track change the app is holding *no* palette
+at all (`null`), not the defaults — `applyPalette` assigns `ctx.palette` before `applyPaletteVars`
+throws on the argument it was handed. The old colours are what the screen still shows only because
+nothing re-sets the CSS variables afterwards.
+
+### 13.3 GREEN: the same check, on the fixed build
+
+    $ npm run build && node tools/palette-check.mjs --url http://127.0.0.1:4633
+
+    Track change with cover art reachable: played album-ja-1-track-1 of 3 rows
+      palette {...fromArt:false} -> {"primary":"hsl(22 85% 66%)","secondary":"hsl(337 60% 60%)","accent":"hsl(352 70% 72%)","fromArt":true}
+      document --accent-primary #7cd2ff -> hsl(22 85% 66%)
+    ok    a track change does not throw from queue.onChanged
+    ok    the palette applied is the artwork one (fromArt: true)
+    ok    the document is actually carrying the artwork colours
+    ok    the artwork palette is not the default palette wearing a different name
+    Track change with cover art unreachable: played album-ja-1-track-2
+      palette {...fromArt:true} -> {"primary":"#7cd2ff","secondary":"#a88cff","accent":"#ff80b4","fromArt":false}
+    ok    the second track change is a different track (so the check is not vacuous)
+    ok    a track change with no reachable cover art does not throw either
+    ok    with no cover art the app falls back to the defaults, and applies them
+    ok    nothing thrown anywhere in the session
+    RESULT: the theme follows the track, and nothing threw.
+
+Raw measurements: `docs/palette-v1.4.1-green-report.json`. The second half shuts the library's
+cover-art door (the page's own `fetch` made to reject for `getCoverArt`) so the fallback path is
+exercised in the same session rather than assumed, and the two halves deliberately play different
+tracks so neither result can come from the first one.
+
+### 13.4 Tests
+
+    $ npm test          → 75 tests, 75 pass, 0 fail, 0 skipped   (v1.4: 73)
+    $ npm run typecheck → clean
+
+`test/palette-apply.test.ts` (new) runs the driver and asserts on the numbers it reported, not on its
+exit code, so a driver that quietly stopped driving anything would fail here: the stored-session
+launch throws nothing, the artwork palette arrives *and* is not the default, the document carries it,
+the no-art case falls back to the defaults, and the two halves played different tracks. It skips with
+its reason when Chrome or a built `dist/` is missing, like the other two browser tests.
+
+`test/changelog.test.ts` gained the v1.4.1 entry's own assertions (his terms only — no hook, type or
+promise words), and the version list it pins now ends at `1.4.1`.
+
+### 13.5 Still unverified
+
+- **Not on a device, and not in the wrapped builds.** This is Chrome at 393x852 with the safe-area
+  insets emulated — the same harness the v1.4 numbers come from — not WebKit, not a phone.
+- `artifacts/` was **not** rebuilt: the APK and the IPA in there are the v1.4.0 builds, which still
+  carry this defect. The fix is web-payload-only, so a rebuild is all it needs, but nothing in this
+  card built or installed one.
+- The check reads *the palette the app applied* and the CSS variables it set. It does not read the
+  rendered pixels, so "the screen looks like the cover" is still an eye test.
 

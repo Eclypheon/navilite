@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.4, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4']);
+test('the changelog is the owner-visible list: v1.0 through v1.4.1, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.4.1']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -55,6 +55,18 @@ test('every v1.4 defect the owner reported is described in his own terms', () =>
   assert.match(text, /1,660 px|0 px/, 'v1.3 scrolled the page; v1.4 has no page to scroll');
   for (const item of v14?.items ?? []) {
     assert.doesNotMatch(item, /overscroll|overflow|flex|container query|scrollTop|viewport/i);
+  }
+});
+
+test('the v1.4.1 fix is described as what he will see, not as what was wrong in the code', () => {
+  const v141 = CHANGELOG.find((release) => release.version === '1.4.1');
+  const text = v141?.items.join('\n') ?? '';
+  assert.match(text, /colours follow the cover/, 'the visible effect, in his terms');
+  assert.match(text, /album art/, 'what the screen is painted from');
+  assert.match(text, /default blue|default colours/, 'what it looked like before, and what an unreadable cover still looks like');
+  for (const item of v141?.items ?? []) {
+    // The mechanism is nobody's business but ours: no hook names, no types, no promise talk.
+    assert.doesNotMatch(item, /hook|palette|promise|TypeScript|undefined|function/i);
   }
 });
 

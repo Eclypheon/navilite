@@ -74,4 +74,11 @@ export const CHANGELOG: ChangelogRelease[] = [
       'The app scrolls inside one box of its own now, so the only thing a finger can reach while the now-playing screen is open is that screen: pointing at every part of it lands on the spectrum or the lyrics, never on the list underneath.',
     ],
   },
+  {
+    version: '1.4.1',
+    date: '2026-10-11',
+    items: [
+      'The colours follow the cover again. Every track change repaints the screen from that track\'s album art — it has been stuck on the default blue for the whole session since v1.1 whenever the app signed itself in at launch, which is every normal open. Change track now and you will see it move; a track whose art cannot be read keeps the default colours, as before.',
+    ],
+  },
 ];
