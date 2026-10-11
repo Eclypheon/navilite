@@ -797,3 +797,203 @@ second build, 08:02.)
   including both artifacts (grep the shipped chunk: one hit). Pre-existing since v1.0, cosmetic, and
   outside this card; a one-line `define` in `vite.config.ts` fixes it, but it re-hashes the bundle and
   both artifacts, so it wants its own change.
+
+## 12. v1.4 — scroll containment: what moves when he scrolls
+
+Two reports, both about movement, and neither is a layout that can be asserted in the DOM:
+
+> "if i'm in my playlist then i go to my spectrum view, when i scroll, it seems to scroll the playlist
+> behind it."
+> "next, i should not be able to scroll the top bar of the main app such that it takes up more space"
+
+So v1.4 is proved with real gestures in real engines, and the before/after is **one measurement run
+twice**: the v1.3 payload extracted out of `artifacts/Navilite-1.3.0-debug.apk`, served by the same
+mock on the same port numbers, measured by the same probe as the v1.4 build.
+
+### 12.1 The harness, and what it is not
+
+| where | tool | what it does |
+| --- | --- | --- |
+| Chrome 393×852, dpr 3, iPhone 15 Pro metrics + `setSafeAreaInsetsOverride` (59/34) | `tools/scroll-check.mjs` | real touch and wheel gestures (`Input.dispatchTouchEvent`, `Input.dispatchMouseEvent`), 19 named checks, records the header rect, the document offsets and the scroll container's offset at every step |
+| iPhone 15 Pro simulator, Safari | `tools/device-probe.mjs --scenario scroll` | the same scenario in-page via `layout-probe-browser.js`'s `scrollContainment()`, for WebKit, where no finger can be synthesised: hit-testing the screen and asking each scrollable box to scroll |
+| `npm test` | `test/scroll-containment.test.ts` | runs the first line under the suite (the check is a test, so it cannot rot) |
+
+The suite also keeps the v1.2 rule: `test/layout-393.test.ts` still walks every route and both modes
+at 393×852 and fails on any horizontal overflow — it now reports which box it measured
+(`scroll surface measured: div#app > div.view-scroll — since v1.4 the app's own scroll container, not
+the document`).
+
+### 12.2 v1.3, measured (RED)
+
+Chrome, 393×852, 19 checks, **9 failed**. The whole document is the scroll container, and a gesture
+over the now-playing screen drags it:
+
+```
+The list (html) put at scrollTop 400 of 1613 px scrollable.
+  top bar: top 0 · height 107.75 (sticky)
+  document: scrollTop 400 · scrollable 1613 px · window.scrollY 400
+ok    a real touch + wheel gesture scrolls the list (the gesture mechanism works)
+ok    the top bar does not move, grow or shrink when the list scrolls
+FAIL  the document does not scroll while the list does
+      document scrollTop 662 · window.scrollY 662 · document scrollable 1613 px
+FAIL  scrolling the spectrum does not scroll the playlist behind it
+      list scrollTop 700 -> 1613
+FAIL  the covered list is frozen (overflow hidden) while the spectrum is up
+      scroll container overflow-y visible, overscroll-behavior-y auto
+FAIL  closing the spectrum puts the list back at exactly the offset it was left at
+      scrollTop 700 -> 1613 (route #/playlist/pl-stress-long, .row.song rows back: 1613 px scrollable)
+FAIL  a deliberately 600 px-wide element is still reported by the 393 px layout audit
+      overflow +221 px on html (document 221 px) · named as nothing
+```
+
+That last one is report #2's mechanism, measured: in v1.3 a row that is wider than the screen widens
+**the document itself** — 221 px past the 393 px viewport — and a phone's answer to a page wider than
+the screen is to shrink-to-fit and pan it, which is exactly "the top bar takes up more space".
+
+WebKit, iPhone 15 Pro simulator, Safari (`--scenario scroll`, 8 checks, **4 failed**): the same story
+with the numbers WebKit gives, `innerHeight 695` because Safari's URL bar takes the rest:
+
+```
+scroll surface: html (overflow-y visible, overscroll-behavior-y auto)
+the list: scrollTop 400 of 1660 px scrollable
+the document: scrollTop 400, scrollable 1660 px, window.scrollY 400
+the top bar: top 0 · height 58 · position sticky
+after the spectrum was opened, everything scrolled and closed again:
+  the list: scrollTop 1200 (was 400) — NOT restored
+FAIL  documentFrozen · documentNeverScrolled · listNeverMoved · listRestored
+```
+
+### 12.3 What changed
+
+- **One shell, one scroll container.** `#app` is a fixed column (`height: 100%`, `overflow: hidden`)
+  whose only moving part is `div.view-scroll` between the header and the player bar. `html, body` no
+  longer scroll at all. Both boxes carry `overscroll-behavior: contain`/`none`, so a gesture cannot
+  chain out of one view into another in either direction.
+- **The covered view is frozen, not unmounted.** Opening the now screen adds `.scroll-locked`
+  (`overflow: hidden`) to that one box and records its offset; the offset is re-applied *after* the
+  view has been drawn again (re-applying it while the list is still "Loading…" would be undone by the
+  render). That is why closing lands on the same row.
+- **The header is a flex row of the shell** (`flex: none`), outside the scroller, so there is no
+  gesture in the app that can reach it.
+- **iOS: the web view's own elastic scrolling is off.** `ios/App/App/ViewController.swift` is now a
+  `CAPBridgeViewController` subclass that turns off `bounces`, `alwaysBounceVertical`,
+  `alwaysBounceHorizontal` and `contentInsetAdjustmentBehavior` on the web view's scroll view — the
+  rubber-band drag that pulls a header around on a phone is native, so CSS cannot reach it. The
+  storyboard and the scene delegate both instantiate it (`Main.storyboard` customClass
+  `ViewController` in module `App`).
+
+### 12.4 v1.4, measured (GREEN)
+
+Chrome, 393×852, **19 checks, 0 failed**:
+
+```
+The list (div#app > div.view-scroll:nth-of-type(1)) put at scrollTop 400 of 1613 px scrollable.
+  document: scrollTop 0 · scrollable 0 px · window.scrollY 0
+ok    a real touch + wheel gesture scrolls the list           scrollTop 400 -> 664 on div.view-scroll
+ok    the top bar does not move, grow or shrink               top 0 height 107.75 -> top 0 height 107.75
+ok    the document does not scroll while the list does        document scrollTop 0 · scrollable 0 px
+ok    every point of the screen hit-tests into the now-playing view, not the list behind it
+                                                              25 of 25 points land inside .now
+ok    scrolling the spectrum does not scroll the playlist behind it
+                                                              list scrollTop 700 -> 700
+ok    the covered list is frozen (overflow hidden) while the spectrum is up
+                                                              overflow-y hidden, overscroll-behavior-y none
+ok    the lyrics panel itself takes the gesture               scrollTop 321 with 471 px of scrollable filler
+ok    a gesture in lyrics mode does not scroll the playlist behind it either
+                                                              list scrollTop 700 -> 700
+ok    closing the spectrum puts the list back at exactly the offset it was left at
+                                                              scrollTop 700 -> 700
+ok    the list is scrollable again once the spectrum is closed
+                                                              overflow-y auto · 1613 px scrollable
+ok    the swipe from the spectrum to the playlists is still a swipe, not a scroll
+                                                              route after a leftward touch drag: #/playlists
+ok    a deliberately 600 px-wide element is still reported by the 393 px layout audit
+                                                              overflow +221 px on div.view-scroll (document 0 px)
+                                                              · named as div#v14-wide-probe
+RESULT: nothing moved that should not have.
+```
+
+WebKit, iPhone 15 Pro simulator, Safari, **8 of 8**:
+
+```
+scroll surface: div#app > div.view-scroll:nth-of-type(1) (overflow-y auto, overscroll-behavior-y contain)
+the list: scrollTop 400 of 1660 px scrollable
+the document: scrollTop 0, scrollable 0 px, window.scrollY 0
+the top bar: top 0 · height 58 · position sticky
+after the spectrum was opened, everything scrolled and closed again:
+  the list: scrollTop 400 (was 400) — restored exactly
+  the top bar: top 0 · height 58 — identical
+scrolling the frozen container programmatically moved it by 600 px (browser behaviour for
+overflow: hidden) — the offset was still restored exactly
+ok documentFrozen · documentNeverScrolled · headerNeverMoved · listNeverMoved · listRestored
+ok overlayIsTheOnlyHitTarget · swipeStillWorks · controlsStillWork
+```
+
+Raw readings: `docs/layout-393-report.json` (the 393 walk: `RESULT: no horizontal overflow
+anywhere`), `docs/layout-393-scroll-device-report.json` (the WebKit scroll scenario). The v1.3
+counterparts are quoted above and were produced by the same tools pointed at the extracted v1.3
+payload (`tools/device-probe.mjs --dist <v1.3 assets>`).
+
+### 12.5 The header re-report, and where the claim actually rests
+
+He re-reported the top bar while testing **v1.3** — so it is not evidence that this fix failed, and
+it is treated as the same MUST-FIX, measured. What the numbers now say, honestly:
+
+- the header rect is identical before and after every gesture in both engines (`top 0`, `58 px` in
+  WebKit; `top 0`, `107.75 px` in Chrome's emulation — constant in both), and that assertion is in the
+  suite at 393×852;
+- but that assertion also passed on v1.3 under a *synthetic* gesture, because `position: sticky` does
+  hold during a programmatic scroll. It is a guard against regression, not the proof. The proof is
+  what changed around it: the document now has **0 px of scroll range in either axis** (v1.3: 1,660 px
+  down and, with a wide row, 221 px across), the header is not inside anything a gesture can reach,
+  and the wide row that used to widen the page is contained in the scroller instead;
+- the elastic drag itself is native and can only be reached in `ViewController.swift` (§12.3).
+
+### 12.6 Still unverified
+
+- **A finger with momentum.** iOS rubber-band needs a real drag on real hardware: `simctl` cannot
+  synthesise one, and Safari-for-simulator cannot be driven by CDP. The CSS half removes the drag's
+  *effect* (nothing above or below the content is scrollable, and nothing chains), the native half
+  removes the drag itself — but neither is proven by a synthetic gesture. His phone is the answer.
+- **The native shell.** The simulator run above is Safari loading the served `dist/`, not the built
+  `.app` (an unsigned simulator build cannot write the Keychain, so the probe hides the native bridge
+  and the app signs in through its web-storage fallback). `tools/device-probe.mjs --app <App.app>`
+  is the path for a device run; `ViewController.swift` is compiled and linked by the iOS build
+  (`tools/build-ios-ipa.sh`), which is the only thing this session proves about it.
+- **Android's overscroll.** Android's web view does not drag its own content the way WKWebView does,
+  and the document now has no scroll range there either, so the CSS half covers it; no Android device
+  run was made.
+
+### 12.7 Artifacts
+
+```
+artifacts/Navilite-1.4.0-debug.apk      8,782,355 bytes   (v1.3: 8,783,060 —   −705, −0.01%)
+artifacts/Navilite-1.4.0-unsigned.ipa     866,719 bytes   (v1.3:   864,867 — +1,852, +0.21%)
+```
+
+Both embed the exact `dist/` the tests ran against: `shasum -a 256` of `dist/assets/index-DD3_tz8t.js`
+(`78b4902a23606c7b120485c0649025658e89a483fce11bb1dd05d7b91c7ce6c5`) against
+`assets/public/assets/index-DD3_tz8t.js` in the APK and `Payload/App.app/public/assets/index-DD3_tz8t.js`
+in the IPA — identical in all three, and the stylesheet too
+(`…/index-GuqClR0T.css`, `725d33dca7b942b23722678d8f72766824242a4b8d2db0463eef2451a30e3da5`), which is
+where `.view-scroll{…overflow-y:auto}`, `.view-scroll.scroll-locked{overflow:hidden}` and the
+`overscroll-behavior` values live. The iOS build reports `app version 1.4.0 (5),
+UIBackgroundModes[0]=audio`, and the shipped arm64 binary carries the v1.4 override —
+`nm -a Payload/App.app/App` shows
+`_$s3App14ViewControllerC03webB04with13configurationSo05WKWebB0CSo6CGRectV_So0gB13ConfigurationCtF`
+(`App.ViewController.webView(with:configuration:)`), i.e. the class that turns the web view's bounce
+off is compiled into what he installs, not just on disk.
+
+### 12.8 Found while doing this, not fixed
+
+- **The album-art palette never applies on a cold start.** `boot()` calls
+  `restoreSession(ctx, shell, applyPalette)` with a *function* where `PaletteHooks` (`{ apply }`) is
+  expected, so `syncPalette()`'s `hooks.apply(DEFAULT_PALETTE)` becomes `Function.prototype.apply` —
+  `applyPalette(undefined)` — and `applyPaletteVars` throws on `palette.primary`. Seen in the Chrome
+  probe's console while running the scroll scenario (`TypeError: Cannot read properties of undefined
+  (reading 'primary')` at the `queue.onChanged` → `syncPalette` frame, reached from a row's play
+  button), and it is the *stored-session* path, i.e. every normal launch. Visible effect: the theme
+  colours stay on the defaults for the whole session; a one-line
+  `{ apply: (palette) => applyPalette(palette) }` fixes it. Pre-existing since v1.1, untouched by this
+  card, and it changes colours, so it wants its own change rather than a ride-along here.
+

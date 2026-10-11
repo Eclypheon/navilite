@@ -1,0 +1,538 @@
+{
+  "device": {
+    "name": "iPhone 15 Pro",
+    "width": 393,
+    "height": 852,
+    "deviceScaleFactor": 3,
+    "safeAreaTop": 59,
+    "safeAreaBottom": 34
+  },
+  "environment": {
+    "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1",
+    "innerWidth": 393,
+    "innerHeight": 695,
+    "outerWidth": 393,
+    "outerHeight": 852,
+    "screenWidth": 393,
+    "screenHeight": 852,
+    "devicePixelRatio": 3,
+    "visualViewportWidth": 393,
+    "visualViewportScale": 1,
+    "standalone": false,
+    "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "safeAreaInsets": {
+      "top": "0px",
+      "right": "0px",
+      "bottom": "0px",
+      "left": "0px"
+    },
+    "documentClientWidth": 393,
+    "documentScrollWidth": 393,
+    "bodyScrollWidth": 393
+  },
+  "states": {},
+  "scrollOnly": true,
+  "scroll": {
+    "steps": [
+      {
+        "label": "the list, scrolled before the spectrum was opened",
+        "state": {
+          "route": "#/playlist/pl-stress-long",
+          "header": {
+            "top": 0,
+            "height": 58,
+            "bottom": 58
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1660,
+          "overflowY": "auto",
+          "overscrollY": "contain",
+          "nowOpen": false,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": null,
+          "engineState": "idle",
+          "spectrumChip": "idle"
+        }
+      },
+      {
+        "label": "the spectrum, opened over the list",
+        "state": {
+          "route": "#/now",
+          "header": {
+            "top": 0,
+            "height": 58,
+            "bottom": 58
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1660,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "loading",
+          "spectrumChip": "theme"
+        }
+      },
+      {
+        "label": "after asking the window and the document to scroll",
+        "state": {
+          "route": "#/now",
+          "header": {
+            "top": 0,
+            "height": 58,
+            "bottom": 58
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1660,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "loading",
+          "spectrumChip": "theme"
+        }
+      },
+      {
+        "label": "lyrics mode, before asking it to scroll",
+        "state": {
+          "route": "#/now",
+          "header": {
+            "top": 0,
+            "height": 58,
+            "bottom": 58
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1660,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "loading",
+          "spectrumChip": "theme"
+        }
+      },
+      {
+        "label": "after asking the window and the document to scroll (lyrics mode)",
+        "state": {
+          "route": "#/now",
+          "header": {
+            "top": 0,
+            "height": 58,
+            "bottom": 58
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1660,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "loading",
+          "spectrumChip": "theme"
+        }
+      },
+      {
+        "label": "after scrolling the frozen container itself, programmatically",
+        "state": {
+          "route": "#/now",
+          "header": {
+            "top": 0,
+            "height": 58,
+            "bottom": 58
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll.scroll-locked:nth-of-type(1)",
+          "scrollTop": 1000,
+          "scrollable": 1660,
+          "overflowY": "hidden",
+          "overscrollY": "none",
+          "nowOpen": true,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "loading",
+          "spectrumChip": "theme"
+        }
+      },
+      {
+        "label": "the list, after closing the spectrum",
+        "state": {
+          "route": "#/playlist/pl-stress-long",
+          "header": {
+            "top": 0,
+            "height": 58,
+            "bottom": 58
+          },
+          "headerPosition": "sticky",
+          "documentScrollTop": 0,
+          "windowScrollY": 0,
+          "documentScrollable": 0,
+          "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+          "scrollTop": 400,
+          "scrollable": 1660,
+          "overflowY": "auto",
+          "overscrollY": "contain",
+          "nowOpen": false,
+          "nowOverscroll": "none",
+          "nowTouchAction": "pan-y pinch-zoom",
+          "lyricsScrollTop": 0,
+          "lyricsScrollable": 0,
+          "lyricsOverscrollY": "contain",
+          "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+          "engineState": "loading",
+          "spectrumChip": "theme"
+        }
+      }
+    ],
+    "hitTest": {
+      "points": [
+        {
+          "x": 39,
+          "y": 76,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 76,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 76,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 76,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 76,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 39,
+          "y": 202,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 202,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 202,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 202,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 202,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 39,
+          "y": 341,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 341,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 341,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 341,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 341,
+          "selector": "div#app > section.now > div.now-visualizer:nth-of-type(3) > canvas.now-canvas",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 39,
+          "y": 486,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 486,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 486,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 486,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 486,
+          "selector": "div#app > section.now",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 39,
+          "y": 646,
+          "selector": "div#app > section.now > div.now-bar:nth-of-type(6)",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 122,
+          "y": 646,
+          "selector": "section.now > div.now-bar:nth-of-type(6) > button.transport:nth-of-type(2) > svg",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 200,
+          "y": 646,
+          "selector": "section.now > div.now-bar:nth-of-type(6) > button.transport.big:nth-of-type(3) > svg",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 279,
+          "y": 646,
+          "selector": "div#app > section.now > div.now-bar:nth-of-type(6) > button.transport:nth-of-type(4)",
+          "insideNow": true,
+          "outsideViewport": false
+        },
+        {
+          "x": 362,
+          "y": 646,
+          "selector": "div#app > section.now > div.now-bar:nth-of-type(6)",
+          "insideNow": true,
+          "outsideViewport": false
+        }
+      ],
+      "width": 393,
+      "height": 695,
+      "allInsideNow": true
+    },
+    "controls": {
+      "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+      "engineState": "loading",
+      "transport": 5,
+      "lyricsMode": true,
+      "spectrumMode": true,
+      "mode": "spectrum"
+    },
+    "programmatic": {
+      "moved": 600
+    },
+    "before": {
+      "route": "#/playlist/pl-stress-long",
+      "header": {
+        "top": 0,
+        "height": 58,
+        "bottom": 58
+      },
+      "headerPosition": "sticky",
+      "documentScrollTop": 0,
+      "windowScrollY": 0,
+      "documentScrollable": 0,
+      "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+      "scrollTop": 400,
+      "scrollable": 1660,
+      "overflowY": "auto",
+      "overscrollY": "contain",
+      "nowOpen": false,
+      "nowOverscroll": "none",
+      "nowTouchAction": "pan-y pinch-zoom",
+      "lyricsScrollTop": 0,
+      "lyricsScrollable": 0,
+      "lyricsOverscrollY": "contain",
+      "context": null,
+      "engineState": "idle",
+      "spectrumChip": "idle"
+    },
+    "after": {
+      "route": "#/playlist/pl-stress-long",
+      "header": {
+        "top": 0,
+        "height": 58,
+        "bottom": 58
+      },
+      "headerPosition": "sticky",
+      "documentScrollTop": 0,
+      "windowScrollY": 0,
+      "documentScrollable": 0,
+      "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+      "scrollTop": 400,
+      "scrollable": 1660,
+      "overflowY": "auto",
+      "overscrollY": "contain",
+      "nowOpen": false,
+      "nowOverscroll": "none",
+      "nowTouchAction": "pan-y pinch-zoom",
+      "lyricsScrollTop": 0,
+      "lyricsScrollable": 0,
+      "lyricsOverscrollY": "contain",
+      "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+      "engineState": "loading",
+      "spectrumChip": "theme"
+    },
+    "headerUnchanged": true,
+    "listRestored": true,
+    "documentNeverScrolled": true,
+    "headerNeverMoved": true,
+    "listNeverMoved": true,
+    "documentFrozen": true,
+    "swipe": {
+      "route": "#/playlists",
+      "state": {
+        "route": "#/playlists",
+        "header": {
+          "top": 0,
+          "height": 58,
+          "bottom": 58
+        },
+        "headerPosition": "sticky",
+        "documentScrollTop": 0,
+        "windowScrollY": 0,
+        "documentScrollable": 0,
+        "scrollSurface": "div#app > div.view-scroll:nth-of-type(1)",
+        "scrollTop": 0,
+        "scrollable": 0,
+        "overflowY": "auto",
+        "overscrollY": "contain",
+        "nowOpen": false,
+        "nowOverscroll": "none",
+        "nowTouchAction": "pan-y pinch-zoom",
+        "lyricsScrollTop": 0,
+        "lyricsScrollable": 0,
+        "lyricsOverscrollY": "contain",
+        "context": "Playing from 夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前） (1/35)",
+        "engineState": "loading",
+        "spectrumChip": "theme"
+      }
+    },
+    "checks": {
+      "documentFrozen": true,
+      "documentNeverScrolled": true,
+      "headerNeverMoved": true,
+      "listNeverMoved": true,
+      "listRestored": true,
+      "overlayIsTheOnlyHitTarget": true,
+      "swipeStillWorks": true,
+      "controlsStillWork": true
+    },
+    "passed": true
+  },
+  "probe": {
+    "source": "page",
+    "href": "http://127.0.0.1:4612/#/playlists",
+    "at": "2026-10-11T03:32:13.267Z"
+  }
+}

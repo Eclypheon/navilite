@@ -24,13 +24,14 @@ source, not binaries), and stay far under the ~50 MB a Telegram bot can deliver:
 
 | Artifact | Bytes | Why that size |
 |---|---|---|
-| `artifacts/Navilite-1.3.0-debug.apk` | 8,783,060 (8.4 MiB) | AndroidX + Capacitor core + ExoPlayer (the native audio plugin), plus 17 web payload files. Debug-signed, so it sideloads without any signing setup. |
-| `artifacts/Navilite-1.3.0-unsigned.ipa` | 864,867 (0.8 MiB) | No engine is bundled: WKWebView and AVFoundation are the OS's. Just the arm64 binary and the web payload. Unsigned on purpose (`docs/ios-sideload.md`). |
+| `artifacts/Navilite-1.4.0-debug.apk` | 8,782,355 (8.4 MiB) | AndroidX + Capacitor core + ExoPlayer (the native audio plugin), plus 17 web payload files. Debug-signed, so it sideloads without any signing setup. |
+| `artifacts/Navilite-1.4.0-unsigned.ipa` | 866,719 (0.8 MiB) | No engine is bundled: WKWebView and AVFoundation are the OS's. Just the arm64 binary and the web payload. Unsigned on purpose (`docs/ios-sideload.md`). |
 
-v1.3 adds 2,273 bytes to the APK (+0.03%) and 800 to the IPA (+0.09%) over v1.2's 8,780,787 /
-864,067: one small module (`src/api/sidecar.ts`) and the source-order change in `src/api/lyrics.ts`.
-No new dependency, and no lyrics text in either file (checked by hash and by grep;
-`docs/verification.md` §11.7).
+v1.4 takes 705 bytes off the APK (−0.01%) and adds 1,852 to the IPA (+0.21%) over v1.3's 8,783,060 /
+864,867: the web side is a shell wrapper plus a scroll lock in `src/ui/app.ts` and `src/styles.css`,
+and the IPA also carries the one Swift file that turns off the web view's elastic scrolling
+(`ios/App/App/ViewController.swift`). No new dependency, and the payload in both files is the exact
+`dist/` the tests ran against (checked by hash; `docs/verification.md` §12.7).
 
 ## What it does
 
