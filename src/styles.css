@@ -269,6 +269,35 @@ button {
   cursor: pointer;
 }
 
+/*
+ * v1.6.1. Every tap target says so, in CSS, and this is half of why taps work again.
+ *
+ * A row is a `<button>` with text in it, and by default that text is *selectable*: iOS is free to read
+ * a press that lasts a moment as a text-selection (or callout) gesture rather than a tap, and when it
+ * does it drops the click the row is waiting for. `user-select: none` and `touch-callout: none` are
+ * what every native-feeling list sets for exactly this reason, and they cost nothing on a row you were
+ * never meant to select.
+ *
+ * `touch-action: pan-y pinch-zoom` says the same thing to the gesture layer: vertical panning belongs
+ * to the list, pinch-zoom is worth keeping, and a horizontal drag starting on a row is the pager's
+ * gesture rather than the browser's — which also means WebKit does not spend its double-tap-to-zoom
+ * window deciding what a single tap was meant to be. The now screen already declares this for itself
+ * (see `.now`); the rows never did.
+ */
+.row,
+.card,
+.tab,
+.icon-button,
+.button,
+.pill-option,
+.transport,
+.brand {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: pan-y pinch-zoom;
+}
+
 .row:hover,
 .row:focus-visible {
   background: var(--bg-raised);

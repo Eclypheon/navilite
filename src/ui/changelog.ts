@@ -106,4 +106,11 @@ export const CHANGELOG: ChangelogRelease[] = [
       'The colours from the album art are back on a fresh launch. A launch that restored your session was quietly losing the theme the cover art sets, which had been fixed once and came back with the swipe pager.',
     ],
   },
+  {
+    version: '1.6.1',
+    date: '2026-10-11',
+    items: [
+      'Tapping works again: a tap on a playlist opens it, and a tap on a song plays it, even if your finger rests on the row for a moment first. Dragging to scroll still only scrolls — nothing starts under your thumb.',
+    ],
+  },
 ];

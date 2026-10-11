@@ -44,10 +44,25 @@ const LYRICS_ROUTE = '#/now/lyrics';
  * horizontal gesture that means anything is a right swipe *back* to the screen they were opened from.
  */
 const STACKED_ROUTES = new Set(['settings', 'changelog', 'connect']);
-/** Pixels of movement that still counts as a tap rather than a scroll. */
+/**
+ * Pixels of movement that still counts as a tap rather than a scroll.
+ *
+ * v1.6.1. The number is the whole discriminator now — it was one of three in v1.6, and the other two
+ * were the ones refusing real taps (see `bindTapSurface`). WebKit's own slop before it gives up on a
+ * tap is the same order of magnitude, so agreeing with it is what makes "a tap" mean the same thing
+ * to the app and to the engine that decides whether to send a click at all.
+ */
 const TAP_SLOP_PX = 10;
-/** A press longer than this is not a tap. */
-const TAP_MAX_MS = 700;
+/**
+ * How long a refusal may wait for the click it belongs to.
+ *
+ * A refusal is armed when a gesture ends as a drag and is consumed by the *very next* click. If that
+ * click never comes — WebKit claims the gesture itself and cancels the touch sequence, or the
+ * browser suppresses the click on its own — the refusal has to expire rather than sit there and eat a
+ * later tap. 700 ms is longer than the gap between a real drag's `touchend` and its click on every
+ * engine here, and shorter than any deliberate pause between two taps.
+ */
+const SUPPRESS_TTL_MS = 700;
 /*
  * The three panes of the swipe pager, in the order the owner asked for: **playlist | spectrum |
  * lyrics**. Pane 0 is the browser screen the app already had; the other two are inside the now
@@ -471,19 +486,11 @@ function buildShell(root: HTMLElement): Shell {
     openNow();
   });
   /*
-   * v1.6, the other half of tap-vs-drag: a press in the list is cancelled the moment the list
-   * scrolls. One listener for the whole container rather than one per row — the row under the finger
-   * registers itself in `pressInFlight`, and this marks it as a scroll rather than a tap. The slop
-   * check in `bindTap` catches a fast drag; this catches the case it cannot, where the finger has
-   * barely moved but the list has (a momentum scroll under a resting finger).
+   * v1.6.1: the list is the tap surface. It owns both facts a tap needs — where the finger went down,
+   * and whether the list moved under it — and refuses exactly one click after a drag, once.
+   * See `bindTapSurface`.
    */
-  viewScroll.addEventListener(
-    'scroll',
-    () => {
-      if (pressInFlight) pressInFlight.dragged = true;
-    },
-    { passive: true },
-  );
+  bindTapSurface(viewScroll);
   bindStackedBack(root);
 
   root.replaceChildren(header, viewScroll, playerBar, nowOverlay, toastNode);
@@ -513,93 +520,150 @@ let queueRefRef: Shell = null as unknown as Shell;
 /* ------------------------------------------------------------ the gesture */
 
 /**
- * A press that is in flight on a row, so a scroll can cancel it without a listener per row.
+ * The finger that is down on the list, and whether it has moved far enough to be a drag.
  *
- * v1.6. The owner's words: *"when in playlist, trying to swipe to scroll seems to highlight the song
- * i don't want this, only if i tap the song without dragging or swiping should the song be selected"*.
- * A row is a `<button>`, and a browser will happily synthesise a click at the end of a drag that
- * started on one — which is exactly a song starting because he scrolled the list.
+ * v1.6.1: one press for the whole list, not one per row. A row cannot be the authority on "was this a
+ * tap" — the touch sequence and the click it may or may not produce need not land on the same element
+ * once a finger drifts a little — and a per-row copy of the state also has to be reset on
+ * `touchcancel`, which v1.6 never did: a touch the engine cancelled left a row believing a press was
+ * still in flight.
  */
 interface Press {
-  armed: boolean;
-  dragged: boolean;
-  startX: number;
-  startY: number;
-  at: number;
+  x: number;
+  y: number;
+  /** True once the finger travelled past {@link TAP_SLOP_PX}, or the list scrolled under it. */
+  moved: boolean;
 }
-let pressInFlight: Press | null = null;
+let press: Press | null = null;
+/**
+ * The one-shot refusal: a timestamp until which the next click is refused, or 0 for "nothing armed".
+ *
+ * Consumed by the first click that arrives ({@link refuseClick}), so one drag can never refuse two
+ * clicks, and cleared when a new finger goes down, so it can never cross into the next gesture.
+ */
+let suppressClickUntil = 0;
+
+/** The gesture ended as a drag: the click it leaves behind is refused, once. */
+function refuseNextClick(): void {
+  suppressClickUntil = performance.now() + SUPPRESS_TTL_MS;
+}
 
 /**
- * Activate an element on a *tap* and on nothing else.
+ * Is this click the one a drag left behind? Always consumes the refusal — armed or expired, it never
+ * survives this call.
+ */
+function refuseClick(now: number): boolean {
+  if (suppressClickUntil === 0) return false;
+  const refuse = now <= suppressClickUntil;
+  suppressClickUntil = 0;
+  return refuse;
+}
+
+/**
+ * Activate an element on a click, and on nothing else.
  *
- * A tap is: one finger, movement under {@link TAP_SLOP_PX} the whole way, released inside
- * {@link TAP_MAX_MS}, and no scroll of the list at any point during the press (the container's own
- * listener sets `dragged` — see `buildShell`). Anything else is a drag, and the click the browser
- * produces at the end of it is cancelled outright rather than being allowed to reach the element.
+ * The click is the browser's own, so a thumb, a keyboard Enter, a switch control, a VoiceOver
+ * double-tap and a script all arrive by the same door. Nothing is reconstructed from touch maths: that
+ * was v1.6's mistake — it rebuilt a tap out of `touchstart`/`touchmove`/`touchend`, and the two
+ * thresholds it invented (a press longer than 700 ms, and *any* `scroll` event during the press)
+ * refused taps that a synthetic one-pixel tap never produces but a real thumb produces constantly.
  *
- * The click is still what activates: a keyboard Enter on a row, or a mouse, has no touch phase at
- * all, so `armed` is false and it goes straight through.
+ * What can be refused is the click a drag leaves behind, and that is decided once, on the surface the
+ * rows sit on — see {@link bindTapSurface}. A click with no drag in front of it cannot be refused: by
+ * construction nothing arms the refusal for it.
  */
 function bindTap<T extends HTMLElement>(element: T, activate: () => void): T {
-  const press: Press = { armed: false, dragged: false, startX: 0, startY: 0, at: 0 };
-  element.addEventListener(
+  element.addEventListener('click', () => activate());
+  return element;
+}
+
+/**
+ * The tap surface: the scroll container every row lives in. It owns the only two facts a tap needs.
+ *
+ *   - where the finger went down, so {@link TAP_SLOP_PX} of travel can be told from a still finger;
+ *   - whether the list moved, which is a scroll however still the finger was.
+ *
+ * A gesture that did either arms {@link refuseNextClick} — a one-shot consumed by the very next click
+ * and expired by {@link SUPPRESS_TTL_MS}, so it can never eat a later tap. The click is read in the
+ * capture phase, so a refused one never reaches the row's own handler.
+ *
+ * Note what is deliberately *not* here: any judgement of a press by how long it lasted. v1.6 refused a
+ * click when the press had been down for more than 700 ms from `touchstart` — and WebKit delivers the
+ * click *after* `touchend` — so a deliberate tap, or a tap WebKit spent a moment deciding about, was
+ * refused for being slow rather than for being a drag. That is the plainest way "tapping does nothing"
+ * becomes *"i'm not even able to tap to go into my playlist"*.
+ */
+function bindTapSurface(surface: HTMLElement): void {
+  surface.addEventListener(
     'touchstart',
     (event) => {
       const touch = event.touches[0];
       if (!touch || event.touches.length !== 1) {
-        press.armed = false;
-        if (pressInFlight === press) pressInFlight = null;
+        press = null;
         return;
       }
-      press.armed = true;
-      press.dragged = false;
-      press.startX = touch.clientX;
-      press.startY = touch.clientY;
-      press.at = performance.now();
-      pressInFlight = press;
+      // A new finger supersedes the last gesture: any click still to come belongs to this press.
+      suppressClickUntil = 0;
+      press = { x: touch.clientX, y: touch.clientY, moved: false };
     },
     { passive: true },
   );
-  element.addEventListener(
+  surface.addEventListener(
     'touchmove',
     (event) => {
-      if (!press.armed) return;
+      const active = press;
+      if (!active) return;
       const touch = event.touches[0];
       if (!touch) return;
-      if (Math.abs(touch.clientX - press.startX) > TAP_SLOP_PX || Math.abs(touch.clientY - press.startY) > TAP_SLOP_PX) {
-        press.dragged = true;
+      if (Math.abs(touch.clientX - active.x) > TAP_SLOP_PX || Math.abs(touch.clientY - active.y) > TAP_SLOP_PX) {
+        active.moved = true;
       }
     },
     { passive: true },
   );
-  element.addEventListener(
-    'touchend',
+  /*
+   * The list moved under a finger that did not — momentum from a flick, or the scroller settling.
+   * That is a scroll, not a tap, and it is the case a movement threshold alone cannot see. Only a
+   * scroll *while a finger is down* counts: engines deliver scroll events coalesced and late, and a
+   * scroll from before this press must not be read as part of it.
+   */
+  surface.addEventListener(
+    'scroll',
     () => {
-      if (pressInFlight === press) pressInFlight = null;
+      if (press) press.moved = true;
     },
     { passive: true },
   );
-  element.addEventListener('click', (event) => {
-    /*
-     * Only a *touch* press can be refused. A click with no touch phase in front of it — a mouse, a
-     * keyboard Enter on the button, an assistive technology, or a script calling `click()` — was
-     * never a drag, and refusing those would take the row away from everything but a thumb.
-     */
-    const touched = press.armed;
-    const dragged = press.dragged;
-    const elapsed = performance.now() - press.at;
-    press.armed = false;
-    press.dragged = false;
-    if (pressInFlight === press) pressInFlight = null;
-    if (touched && (dragged || elapsed > TAP_MAX_MS)) {
-      // A drag that scrolled the list, a long press, or a press the list scrolled out from under.
+  const release = (): void => {
+    const ended = press;
+    press = null;
+    if (ended?.moved) refuseNextClick();
+  };
+  surface.addEventListener('touchend', release, { passive: true });
+  // WebKit fires `touchcancel` the moment it claims a touch sequence for itself. v1.6 had no handler
+  // here at all, which left a row convinced that a press was still in flight.
+  surface.addEventListener('touchcancel', release, { passive: true });
+  surface.addEventListener(
+    'click',
+    (event) => {
+      /*
+       * Only a *user's* click can be the one a drag left behind, and only a user's click is refused.
+       *
+       * `isTrusted` is the whole distinction: a click the browser delivers — from a thumb, a mouse, a
+       * keyboard Enter, a switch control — is trusted, and WebKit's click at the end of a drag is one
+       * of those. A click a script synthesises (`element.click()`) is not a gesture at all, and
+       * refusing it would take the rows away from every diagnostic that drives them — measured here,
+       * not reasoned: an untrusted click arriving inside the refusal's 700 ms window was eaten, which
+       * is what `test/pager.test.ts` and `test/scroll-containment.test.ts` caught within a minute of
+       * this being written.
+       */
+      if (!event.isTrusted) return;
+      if (!refuseClick(performance.now())) return;
       event.preventDefault();
       event.stopPropagation();
-      return;
-    }
-    activate();
-  });
-  return element;
+    },
+    true,
+  );
 }
 
 /** The route the app is on right now, by its first segment. */
