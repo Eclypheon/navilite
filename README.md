@@ -291,6 +291,12 @@ the palette the app applied (`test/palette-apply.test.ts`).
 The device probe needs an app built with `server.url` pointing at the probe (a measurement-only
 `capacitor.config.ts`, reverted straight after — see `docs/verification.md` §10).
 
+## Versioning, branches and tags
+
+One branch (`main`, no feature/release/worktree branches), the list of files a
+version bump must touch, and the rule that a build happens only after a commit
+with an empty `git status`: `docs/VERSIONING.md`.
+
 ## Building the Android APK
 
 Requirements: **JDK 21** (`brew install openjdk@21` — keg-only, `tools/build-apk.sh` finds it),
