@@ -45,11 +45,13 @@ interface NaviliteRemotePlugin {
 }
 
 /**
- * Our own iOS plugin, second job: the spectrum, taken from a tap on a second silent `AVPlayer`
- * playing the same stream. See `ios/App/App/NaviliteSpectrum.swift` — the short version is that the
- * web layer cannot read this stream's samples (a CORS-cross-origin media element hands over
- * silence, by spec, and WebKit's session handling was what paused playback on return), so the FFT
- * is done natively with vDSP and handed over as the 64 bands the canvas draws.
+ * Our own iOS plugin, second job: the spectrum, taken from a tap (`MTAudioProcessingTap`) on the
+ * **audible** player's own item — the same `AVPlayer` that makes the sound, borrowed read-only for
+ * its samples. See `ios/App/App/NaviliteSpectrum.swift`: the web layer cannot read this stream's
+ * samples (a CORS-cross-origin media element hands over silence, by spec, and WebKit's session
+ * handling was what paused playback on return), so the FFT is done natively with vDSP and handed
+ * over as the 64 bands the canvas draws. Until v1.7.6 the tap was on a *second*, silent player
+ * playing the same stream; that copy is deleted, so there is one decode and one clock.
  */
 interface NaviliteSpectrumPlugin {
   start(options: { url: string; positionMs: number }): Promise<{ started: boolean; sampleRate: number; bandCount: number }>;

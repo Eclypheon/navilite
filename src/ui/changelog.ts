@@ -168,4 +168,11 @@ export const CHANGELOG: ChangelogRelease[] = [
     'More exact, everywhere your finger goes: picking a second song right after a first never plays the wrong one, dragging the bar no longer risks stopping the sound while it moves, the time no longer counts up before the music has actually started, and the bars keep moving right to the end of a song instead of disappearing in its last seconds.',
     ],
   },
+  {
+    version: '1.7.6',
+    date: '2026-10-11',
+    items: [
+    'The bars are drawn from the song you are hearing, and nothing else plays underneath it. Up to now a second, silent copy of the same song was fetched and decoded alongside it — two copies of one stream, which is extra work for the phone and for your library in the one place that can make the sound stutter. That copy is gone: one player, the one you can hear.',
+    ],
+  },
 ];

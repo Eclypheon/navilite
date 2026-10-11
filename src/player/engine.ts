@@ -198,12 +198,11 @@ const SPECTRUM_RESTART_MS = 5000;
 /**
  * How close to the end of a track the tap may report "not playing" without being rebuilt.
  *
- * The silent copy the tap reads from finishes a beat before the audible player does, so at the end
- * of every track the tap reports `playing: false` while sound is still coming out. That is not a
- * dead tap, and treating it as one tore the tap down, rebuilt it (up to
- * {@link MAX_SPECTRUM_RESTARTS} times) and emptied the bars to the theme for the last seconds of
- * every song. Four seconds is far longer than the offset between the two decodes and far shorter
- * than anything anyone would call the end of a track.
+ * Kept from v1.7.5, when the tap read a *silent copy* of the stream that finished a beat before the
+ * audible player did, so at the end of every track the tap reported `playing: false` while sound was
+ * still coming out. v1.7.6 deleted that copy — the tap is on the audible item now, so the two cannot
+ * disagree — but the guard stays: the last seconds of a track are still not a dead tap, and treating
+ * them as one tore the tap down and emptied the bars to the theme for the last seconds of every song.
  */
 const SPECTRUM_NEAR_END_MS = 4000;
 /**
@@ -1027,11 +1026,10 @@ export class AudioEngine {
     /*
      * Start reading **now**, not when the plugin says it has started.
      *
-     * `startSpectrum` resolves only once the second player has loaded the stream's audio track and
-     * installed its tap, which on a real library is a network round trip (measured on the
-     * simulator at 1.2–1.7 s). Waiting for that promise left the bars flat for that whole window
-     * even though the tap was already producing frames. The poll is safe before the tap exists — a
-     * frame that is not live yet is exactly what the zero-poll counter is for.
+     * `startSpectrum` resolves once the tap is on the audible player's item, which means waiting for
+     * the item to know its audio track. That is a formality when the player is already playing, but
+     * the poll is safe before the tap exists — a frame that is not live yet is exactly what the
+     * zero-poll counter is for, and it costs nothing to start reading first.
      */
     this.spectrumPoll = setInterval(() => void this.pollSpectrum(), SPECTRUM_POLL_MS);
     this.lastSpectrumRestartAt = this.clockNow();
