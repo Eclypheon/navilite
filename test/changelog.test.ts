@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.6.2, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2']);
+test('the changelog is the owner-visible list: v1.0 through v1.7, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -126,6 +126,21 @@ test('the press highlight the owner asked to remove is described in his own term
   for (const item of v162?.items ?? []) {
     // Invisible plumbing does not belong in this list.
     assert.doesNotMatch(item, /:active|:hover|CSS|selector|stylesheet|media query|tap-highlight|TAP_SLOP|px of movement/i);
+  }
+});
+
+test('the background playback the owner asked for is described in his own terms', () => {
+  const v17 = CHANGELOG.find((release) => release.version === '1.7');
+  const text = v17?.items.join('\n') ?? '';
+  // His ask, in his words: "try to make backgrounding work all the time seamlessly without the pause".
+  assert.match(text, /keeps playing when you leave the app/, 'the ask: leaving the app must not stop the music');
+  assert.match(text, /lock screen/, 'the lock-screen controls the card promises him');
+  assert.match(text, /same second/, 'the exact resume, which v1.6 already got right and must keep');
+  // The spectrum is his signature feature: a v1.7 entry that does not say it survived would read as a loss.
+  assert.match(text, /spectrum is still the real one/, 'the real spectrum, which must not regress');
+  for (const item of v17?.items ?? []) {
+    // Invisible plumbing does not belong in his list.
+    assert.doesNotMatch(item, /AVAudioSession|AVFoundation|MPRemoteCommandCenter|plugin|visibilitychange|ExoPlayer|analyser|Web Audio|snapshot|localStorage/i);
   }
 });
 

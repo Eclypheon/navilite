@@ -17,12 +17,32 @@
 import type { Song, QueueContext, QueueItem } from '../api/types.ts';
 import type { AudioEngine, TrackRequest } from '../player/engine.ts';
 import { updateNowPlaying, updatePlaybackState, updatePositionState, mediaSessionAvailable } from '../player/mediasession.ts';
+import { clearSnapshot, saveSnapshot } from '../storage/session.ts';
 import type { Library } from './library.ts';
 
 const SAVE_QUEUE_DEBOUNCE_MS = 5000;
+/** How often the local resume snapshot is allowed to be written (see `src/storage/session.ts`). */
+const SNAPSHOT_INTERVAL_MS = 5000;
 const PLAY_THRESHOLD_MS = 240000; // Subsonic: half the song, or four minutes
 
 export type RepeatMode = 'off' | 'all' | 'one';
+
+/** What a snapshot needs to bring a session back exactly (`src/storage/session.ts`). */
+export interface ResumeSessionState {
+  songs: Song[];
+  order: number[];
+  cursor: number;
+  shuffle: boolean;
+  repeat: RepeatMode;
+  context: QueueContext | null;
+}
+
+/** The context a restored queue shows when the session did not record where it came from. */
+export const LAST_SESSION: QueueContext = { kind: 'song', name: 'your last session' };
+
+function isRepeatMode(value: unknown): value is RepeatMode {
+  return value === 'off' || value === 'all' || value === 'one';
+}
 
 /**
  * Subsonic's rule for counting a play: half the track, or four minutes, whichever
@@ -93,6 +113,7 @@ export class PlaybackQueue {
   private submitted = false;
   private submittedIds = new Set<string>();
   private lastPositionMs = 0;
+  private lastSnapshotAt = 0;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private playToken = 0;
 
@@ -107,6 +128,9 @@ export class PlaybackQueue {
     this.library = library;
     engine.onEnded = () => void this.advance(true);
     engine.onProgress = (positionMs, durationMs) => this.trackProgress(positionMs, durationMs);
+    // The lock screen's next/previous (v1.7): the platform delivers them, the queue acts on them.
+    engine.onNextRequested = () => void this.next();
+    engine.onPreviousRequested = () => void this.previous();
   }
 
   get current(): QueueItem | null {
@@ -173,6 +197,48 @@ export class PlaybackQueue {
     this.onChanged?.();
   }
 
+  /**
+   * The whole resumable session: the queue, the play order, where we are in it, and the flags.
+   * What `src/storage/session.ts` snapshots on a timer, so a relaunch can be exact.
+   */
+  resumeState(): ResumeSessionState {
+    return {
+      songs: this.items.map((item) => item.song),
+      order: [...this.order],
+      cursor: this.cursor,
+      shuffle: this.shuffled,
+      repeat: this.repeatMode,
+      context: this.context,
+    };
+  }
+
+  /**
+   * Put a whole session back **exactly** — the same songs, the same play order, the same cursor,
+   * the same flags, at the same second. Nothing comes from the server and nothing is re-derived:
+   * a shuffled queue is not re-shuffled, and a restore cannot land on a different track because
+   * the server's copy of the queue was older than the one the app had (that is what makes this
+   * path safe to prefer over `savePlayQueue` at launch).
+   */
+  restoreExact(state: ResumeSessionState, positionMs = 0): void {
+    this.items = state.songs.map((song) => ({ song, context: state.context ?? LAST_SESSION }));
+    const usable =
+      state.order.length === this.items.length && state.order.every((index) => Number.isInteger(index) && index >= 0 && index < this.items.length);
+    this.order = usable ? [...state.order] : identityOrder(this.items.length);
+    this.cursor = Math.min(Math.max(0, state.cursor), Math.max(0, this.items.length - 1));
+    this.shuffled = state.shuffle;
+    this.repeatMode = isRepeatMode(state.repeat) ? state.repeat : 'off';
+    this.context = state.context;
+    this.pendingStartMs = Math.max(0, positionMs);
+    this.lastPositionMs = this.pendingStartMs;
+    this.onChanged?.();
+  }
+
+  /** Start the track the queue is sitting on, at its pending position. The resume path. */
+  async start(): Promise<void> {
+    if (!this.current) return;
+    await this.startCurrent();
+  }
+
   /** Append without interrupting playback. */
   enqueue(items: QueueItem[]): void {
     this.items = [...this.items, ...items];
@@ -213,6 +279,9 @@ export class PlaybackQueue {
   async seek(positionMs: number): Promise<void> {
     await this.engine.seek(positionMs);
     this.lastPositionMs = positionMs;
+    // A seek is the one position change worth writing immediately: it is the difference between
+    // coming back at the right second and coming back where the listener left off.
+    this.persistSnapshot(true);
   }
 
   /** Shuffle on/off. Turning it on keeps the current track; turning it off keeps the order. */
@@ -241,6 +310,7 @@ export class PlaybackQueue {
     this.cursor = -1;
     this.context = null;
     this.pendingStartMs = 0;
+    clearSnapshot();
     await this.engine.stop();
     this.onChanged?.();
   }
@@ -301,6 +371,8 @@ export class PlaybackQueue {
     this.reportNowPlaying(song);
     this.setupMediaSession(song, artworkUrl);
     this.scheduleSaveQueue();
+    // A new track, at a known position: the snapshot is written now rather than on the next tick.
+    this.persistSnapshot(true);
     this.onChanged?.();
   }
 
@@ -318,6 +390,8 @@ export class PlaybackQueue {
     if (delta > 0 && delta < 3000) this.playedMs += delta;
     this.lastPositionMs = positionMs;
     updatePositionState(durationMs || (song.duration ?? 0) * 1000, positionMs);
+    // The exact-resume snapshot rides on the position stream, throttled: see `persistSnapshot`.
+    this.persistSnapshot();
 
     const threshold = playThresholdMs((song.duration ?? 0) * 1000);
     if (!this.submitted && this.playedMs >= threshold) {
@@ -349,6 +423,35 @@ export class PlaybackQueue {
       },
     );
     updatePlaybackState('playing');
+  }
+
+  /**
+   * Write the whole session — queue, play order, cursor, position, flags — to the device, so a
+   * relaunch lands on the same second of the same track. Throttled, and forced on the changes that
+   * matter (a new track, a seek) and on the way into the background (`flushSnapshot`).
+   *
+   * v1.6's rule holds here: this only ever *reads* the queue's state. It cannot move the queue, and
+   * a snapshot that fails to parse is thrown away rather than half-restored (`parseSnapshot`).
+   */
+  private persistSnapshot(force = false): void {
+    const song = this.currentSong;
+    if (!song) return;
+    const now = Date.now();
+    if (!force && now - this.lastSnapshotAt < SNAPSHOT_INTERVAL_MS) return;
+    const status = this.engine.status();
+    this.lastSnapshotAt = now;
+    saveSnapshot({
+      savedAt: now,
+      songId: song.id,
+      positionMs: Math.max(0, Math.round(status.positionMs)),
+      playing: status.state === 'playing',
+      ...this.resumeState(),
+    });
+  }
+
+  /** Write the snapshot now, whatever the throttle says — the app is going into the background. */
+  flushSnapshot(): void {
+    this.persistSnapshot(true);
   }
 
   /** Push the queue to the server so it survives a restart. Debounced. */

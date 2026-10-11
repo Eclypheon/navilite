@@ -76,3 +76,10 @@ Plain language, user-visible changes only. The app shows this same list under
 ## 1.6.2 — 2026-10-11
 
 - Holding a song no longer highlights it. Pressing a track used to paint a plate and a ring around it for as long as your finger was down — before it had moved at all — and a row you had touched stayed painted after you let go; nothing is painted on a press now, and the only row that stands out is the one playing. A press you then turn into a swipe is also read as a swipe sooner, so a track under a thumb on its way to a scroll never reads as a tap.
+
+## 1.7 — 2026-10-11
+
+- The music keeps playing when you leave the app. Playback now runs through the phone's own audio engine instead of the page, so leaving the app, locking the screen or switching to something else no longer stops the track you were on. (It already came back on the right track; it now simply never stops in the first place.)
+- Your lock screen and the Control Centre have real previous and next buttons next to play/pause, and they work from there — no need to open the app to skip a track.
+- Come back and it is exactly where you left it: the same track, at the same second, in the same order. If the phone closed the app while you were away, it picks up from that point rather than from the top of the song.
+- The spectrum is still the real one — the reading of the music that is actually playing. It is a foreground picture now: while the app is in the background the screen is off anyway, and it returns the moment you open it.

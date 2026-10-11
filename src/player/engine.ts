@@ -1,14 +1,24 @@
 /**
- * The audio engine: one <audio> element, one Web Audio graph, plus the native engine
- * when we are wrapped.
+ * The audio engine: the native AVFoundation/ExoPlayer player when we are wrapped, and one
+ * `<audio>` element + Web Audio graph.
  *
- * The honest part is `spectrum`. A spectrum only exists when the browser hands us
- * real samples: `createMediaElementSource(el) → AnalyserNode`. When it cannot (a
- * tainted cross-origin stream with no ACAO, a suspended AudioContext, or native
- * playback with no buffer access), the analyser returns *zeros with no error* — the
- * classic silent flatline. Rather than animate a lie, the engine watches for that and
- * reports `spectrum: false` with a reason, and the UI switches to the album-art theme
- * and says which mode it is in.
+ * v1.7 turned this around. Playback is **native** on a wrapped build — chosen when the track
+ * starts, never at the moment the app goes out of sight — because a native player is not
+ * suspended the way WKWebView's audio is, and because the swap that v1.6 did at `visibilitychange`
+ * had to finish before iOS suspended the app, which is exactly the race that made backgrounding
+ * work "sometimes". The `<audio>` element did not disappear: it is now the **silent analysis
+ * copy** of the same stream (`analysisRunning`), routed into the analyser and never into the
+ * speakers, running only while a track plays and the app is on screen, so the spectrum stays real.
+ * On the web (the PWA, or `preference: 'web'`) the element is still the audible engine, exactly as
+ * it always was.
+ *
+ * The honest part is `spectrum`. A spectrum only exists when the browser hands us real samples:
+ * `createMediaElementSource(el) → AnalyserNode`. When it cannot (a tainted cross-origin stream with
+ * no ACAO, a suspended AudioContext, an analysis copy the platform refused to start, or native
+ * playback with no second copy running), the analyser returns *zeros with no error* — the classic
+ * silent flatline. Rather than animate a lie, the engine watches for that and reports
+ * `spectrum: false` with a reason, and the UI switches to the album-art theme and says which mode
+ * it is in.
  */
 import { platformInfo, type OsName } from '../platform.ts';
 import type { PlaybackPreference } from '../storage/settings.ts';
@@ -73,8 +83,22 @@ export class AudioEngine {
   private native: NativeBridge | null = null;
   private nativeReady: Promise<NativeBridge | null> | null = null;
   private nativePositionMs = 0;
+  private nativeDurationMs = 0;
   private crossOriginRetry = false;
-  private handoffInFlight = false;
+  /**
+   * True while the native engine is swapping its asset (unload + preload of the next track).
+   *
+   * v1.6 found this: a swap stops the previous asset, and the plugin reports that stop — a
+   * `stopped` state or a `complete` — while `backend` is still `'native'`, which is indistinguishable
+   * from the song ending. v1.7 keeps the guard: the swap is the one path that runs a stop the user
+   * never asked for.
+   */
+  private assetSwap = false;
+  /** True while the silent analyser copy of the stream is running. */
+  private analysisRunning = false;
+  /** The platform refused to start the silent copy (no user gesture yet) — say so, do not flatline. */
+  private analysisBlocked = false;
+  private remoteDetach: (() => void) | null = null;
   private meterTimer: ReturnType<typeof setInterval> | null = null;
   private listeners = new Set<(status: EngineStatus) => void>();
 
@@ -82,6 +106,9 @@ export class AudioEngine {
   onEnded: (() => void) | null = null;
   /** Called on every position update, for play reporting. */
   onProgress: ((positionMs: number, durationMs: number) => void) | null = null;
+  /** Lock-screen next / previous, when the platform delivers them. */
+  onNextRequested: (() => void) | null = null;
+  onPreviousRequested: (() => void) | null = null;
 
   constructor() {
     const info = platformInfo();
@@ -91,6 +118,9 @@ export class AudioEngine {
     const el = new Audio();
     el.preload = 'auto';
     el.addEventListener('play', () => {
+      // In native mode the element is the silent analysis copy; it must not be allowed to speak for
+      // the transport (a user pause would be undone by it starting to measure).
+      if (this.backend !== 'web') return;
       this.state = 'playing';
       this.error = null;
       this.startMeter();
@@ -127,8 +157,15 @@ export class AudioEngine {
     return () => this.listeners.delete(listener);
   }
 
+  /** Duration in ms: the native player's own when it reports one, the track metadata otherwise. */
+  private durationMs(): number {
+    if (this.backend === 'native') return this.nativeDurationMs || this.track?.durationMs || 0;
+    if (Number.isFinite(this.el.duration) && this.el.duration > 0) return this.el.duration * 1000;
+    return this.track?.durationMs ?? 0;
+  }
+
   status(): EngineStatus {
-    const durationMs = this.backend === 'native' ? this.track?.durationMs ?? 0 : (this.el.duration || 0) * 1000;
+    const durationMs = this.durationMs();
     const positionMs = this.backend === 'native' ? this.nativePositionMs : this.el.currentTime * 1000;
     return {
       state: this.state,
@@ -162,7 +199,7 @@ export class AudioEngine {
    * over exactly as before.
    */
   readSpectrum(): Uint8Array | null {
-    if (!this.spectrumLive || !this.analyser || this.backend !== 'web') return null;
+    if (!this.spectrumLive || !this.analyser || !this.analysisRunning) return null;
     if (this.ctx?.state === 'suspended') return null;
     this.analyser.getByteFrequencyData(this.freq);
     return this.freq;
@@ -200,38 +237,59 @@ export class AudioEngine {
         onPosition: (seconds) => {
           this.nativePositionMs = seconds * 1000;
           this.emit();
-          this.onProgress?.(this.nativePositionMs, this.track?.durationMs ?? 0);
+          this.onProgress?.(this.nativePositionMs, this.durationMs());
         },
         onState: (state, isPlaying) => {
           if (this.backend !== 'native') return;
-          // v1.6: a hand-off stops the native engine on purpose; that stop is not a pause the user
-          // asked for and it must not be read out as one (a `stopped` state would otherwise leave the
-          // transport showing "idle" behind a track that is about to be playing).
-          if (this.handoffInFlight) return;
+          // v1.6/v1.7: an asset swap stops the outgoing asset on purpose; that stop is not a pause
+          // the user asked for and it must not be read out as one (a `stopped` state would otherwise
+          // leave the transport showing "idle" behind a track that is about to be playing).
+          if (this.assetSwap) return;
           this.state = isPlaying ? 'playing' : state === 'stopped' ? 'idle' : 'paused';
           this.emit();
         },
         onComplete: () => {
           if (this.backend !== 'native') return;
-          // v1.6: never on the back of a hand-off — this is the one event that moves the queue.
-          if (this.handoffInFlight) return;
+          // v1.6/v1.7: never on the back of an asset swap — this is the one event that moves the queue.
+          if (this.assetSwap) return;
           this.state = 'paused';
           this.emit();
           this.onEnded?.();
         },
       });
+      const bridge = await this.nativeReady;
+      // The lock-screen next/previous are the platform's to deliver; register once, at the same
+      // moment the engine exists, so a lock-screen button works before the screen is ever opened.
+      if (bridge && !this.remoteDetach) {
+        this.remoteDetach = bridge.listenRemoteCommands({
+          next: () => this.onNextRequested?.(),
+          previous: () => this.onPreviousRequested?.(),
+        });
+      }
     }
     this.native = await this.nativeReady;
     return this.native;
   }
 
-  /** True when native playback is the right backend right now. */
+  /**
+   * True when native playback is the right backend right now.
+   *
+   * v1.7 changed the answer, and that change *is* the fix for the owner's report ("sending it to
+   * background … most times it just stops playing"): on a wrapped build the native engine is the
+   * default engine, chosen when a track starts, **not** at the moment the app goes out of sight.
+   *
+   * v1.6 tried to be clever and started on Web Audio, then swapped to native inside the
+   * `visibilitychange` handler. That swap has to finish — unload, preload a fresh AVPlayer item over
+   * the network, then play — inside the window iOS leaves the app between "hidden" and "suspended",
+   * and when it does not finish, the audio simply stops. Choosing the engine up front removes the
+   * race instead of narrowing it: nothing has to happen at hide time any more.
+   *
+   * `preference: 'web'` is still honoured — it is the escape hatch for the PWA and for debugging,
+   * and it now means "no native engine at all", not "later".
+   */
   private async wantNative(): Promise<boolean> {
     if (this.preference === 'web') return false;
     if (!this.nativePlatform) return false;
-    if (this.preference === 'native') return (await this.ensureNative()) !== null;
-    // auto: native only once the app is out of sight, where Web Audio on iOS dies.
-    if (typeof document === 'undefined' || !document.hidden) return false;
     return (await this.ensureNative()) !== null;
   }
 
@@ -254,6 +312,9 @@ export class AudioEngine {
     if (this.backend === 'native') {
       await this.native?.pause();
       this.state = 'paused';
+      // The silent copy exists only to feed a spectrum of what is being heard. Nothing is being
+      // heard, so it is dropped rather than left decoding a stream for a canvas that will not draw.
+      this.stopAnalysis();
       this.emit();
       return;
     }
@@ -264,6 +325,7 @@ export class AudioEngine {
     if (this.backend === 'native') {
       await this.native?.resume();
       this.state = 'playing';
+      this.restartAnalysis();
       this.emit();
       return;
     }
@@ -276,6 +338,7 @@ export class AudioEngine {
     if (this.backend === 'native') {
       await this.native?.seek(positionMs / 1000);
       this.nativePositionMs = positionMs;
+      this.syncAnalysis(positionMs);
       this.emit();
       return;
     }
@@ -286,71 +349,154 @@ export class AudioEngine {
   async stop(): Promise<void> {
     this.el.pause();
     this.el.removeAttribute('src');
-    this.native?.stop();
+    this.analysisRunning = false;
+    void this.native?.stop();
     this.stopMeter();
     this.state = 'idle';
     this.track = null;
+    this.nativePositionMs = 0;
+    this.nativeDurationMs = 0;
     this.spectrumLive = false;
     this.modeReason = 'nothing playing';
     this.emit();
   }
 
+  /* ------------------------------------------------------ the silent analysis copy */
+
   /**
-   * Entering/leaving the background on a wrapped build: hand the stream to the native
-   * engine (keeps playing when iOS suspends Web Audio) and back again for the real
-   * spectrum. Deliberately a hand-off at the same position, not a second stream.
+   * Start the *silent* copy of the stream that feeds the analyser — the whole trick of v1.7.
    *
-   * v1.6 — what this must never do is move the queue.
-   *
-   * The owner: *"when i swipe up, the music stops and it seems to go to another track"*, and
-   * *"when going back into the app from the background i seem to have issues playing and pausing
-   * the song"*. A hand-off is a `stop()` of one backend and a `play()` of the other on the *same*
-   * track, so the one app-side path that can turn it into a track change is a plugin event arriving
-   * inside it: `NativeAudio.stop()` during the return trip, and the `unload`/`preload` of the
-   * outgoing asset on the way out, both run while `backend` is still `'native'`, so a `complete` (or
-   * a `stopped` state) that the plugin raises for *its own* stop is indistinguishable to the queue
-   * from the song ending — and `onEnded` advances to the next track. `handoffInFlight` therefore
-   * covers the whole hand-off and both native listeners ignore events while it is set; once the web
-   * element is back, `backend !== 'native'` ignores anything the native engine says afterwards.
-   *
-   * No device here can reproduce LiveContainer's container, and this file cannot be driven without
-   * one (the engine needs a real `<audio>` and a native bridge), so what is verified is the part that
-   * is ours: the hand-off is the only path that touches the queue on resume, and every native event
-   * that could reach it is now ignored while it runs.
+   * The native player hands JavaScript no samples (transport and metadata only), so a real spectrum
+   * cannot be read from it. The spectrum stays real by playing the same stream a second time in the
+   * web layer, routed `source → analyser` with the analyser **not** connected to the destination:
+   * it is inaudible, and what you hear is the native engine. Because it is only a measurement, it
+   * runs only while a track is playing *and* the app is on screen — the app drawing it is the only
+   * time it is worth a second connection to the library, and it stops itself in the background where
+   * the native engine is the one that must keep going.
    */
-  async handleVisibility(hidden: boolean): Promise<void> {
-    if (!this.track || this.preference === 'web' || this.handoffInFlight) return;
-    if (hidden && this.backend === 'web' && this.state === 'playing') {
-      this.handoffInFlight = true;
-      try {
-        const bridge = await this.ensureNative();
-        if (!bridge) return;
-        const positionMs = this.el.currentTime * 1000;
-        this.el.pause();
-        await this.startNative(this.track, positionMs);
-      } finally {
-        this.handoffInFlight = false;
-      }
+  private async startAnalysis(track: TrackRequest, startMs: number): Promise<void> {
+    if (typeof document === 'undefined' || document.hidden) return;
+    this.analysisRunning = true;
+    this.analysisBlocked = false;
+    this.crossOriginRetry = false;
+    // A new load invalidates any previous frame: forget it so the honesty checks start from a clean
+    // slate instead of comparing against the last track.
+    this.lastChecksum = -1;
+    this.identicalFrames = 0;
+    this.zeroFrames = 0;
+    // crossOrigin must be set before src, otherwise the request is already in flight and the element
+    // stays tainted for the life of the load.
+    this.el.crossOrigin = track.crossOrigin ? 'anonymous' : null;
+    this.el.src = track.url;
+    await this.ensureGraph();
+    this.setGraphOutput(false);
+    if (this.graphFailedReason) {
+      this.spectrumLive = false;
+      this.modeReason = this.graphFailedReason;
+    }
+    await this.resumeContext();
+    try {
+      await this.el.play();
+    } catch {
+      this.analysisRunning = false;
+      this.analysisBlocked = true;
+      this.spectrumLive = false;
+      this.modeReason = 'the silent copy of the stream needs a tap before the platform will start it — the audio is native and playing, the spectrum comes back on the next tap';
+      this.emit();
       return;
     }
-    if (!hidden && this.backend === 'native' && this.track) {
-      const track = this.track;
-      // The position the native engine last reported — the same track, the same second.
-      const positionMs = this.nativePositionMs;
-      this.handoffInFlight = true;
+    if (startMs > 0) {
       try {
-        await this.native?.stop();
-        await this.startWeb(track, positionMs);
-      } finally {
-        this.handoffInFlight = false;
+        this.el.currentTime = startMs / 1000;
+      } catch {
+        // Not seekable yet; `syncAnalysis` lines it up on the next seek.
       }
+    }
+    this.startMeter();
+  }
+
+  /** Whether the analyser element is connected to the speakers (web path) or to nothing (native). */
+  private setGraphOutput(audible: boolean): void {
+    if (!this.analyser) return;
+    try {
+      this.analyser.disconnect();
+    } catch {
+      // Not connected yet — `disconnect()` throws when there is nothing to disconnect.
+    }
+    if (audible && this.ctx) this.analyser.connect(this.ctx.destination);
+  }
+
+  private stopAnalysis(): void {
+    this.analysisRunning = false;
+    this.el.pause();
+    this.stopMeter();
+    if (this.track) {
+      this.spectrumLive = false;
+      this.modeReason =
+        'the spectrum reads the stream in the foreground only; playback itself is native, which is what keeps it going when you leave the app';
       this.emit();
     }
+  }
+
+  /** Re-align the silent copy with the native player after a seek, so the bars match what is heard. */
+  private syncAnalysis(positionMs: number): void {
+    if (!this.analysisRunning) return;
+    try {
+      this.el.currentTime = Math.max(0, positionMs / 1000);
+    } catch {
+      // Not seekable yet.
+    }
+  }
+
+  private restartAnalysis(): void {
+    if (!this.analysisRunning || !this.track) return;
+    this.analysisRunning = false;
+    void this.startAnalysis(this.track, this.nativePositionMs);
+  }
+
+  /**
+   * Entering and leaving the background, on a wrapped build.
+   *
+   * v1.7: **nothing has to happen here for the audio to survive** — it is native, and native playback
+   * is not suspended the way WebKit's is. What this does is (a) drop the silent analysis copy on the
+   * way out, because a suspended WebKit must not be left holding a stream, and (b) on the way back in,
+   * re-arm the audio session and *ask the player* what it is doing rather than trusting our own copy
+   * of the state.
+   *
+   * (b) is the second half of the owner's report — *"when going back into the app from the background
+   * i seem to have issues playing and pausing the song"*. A call, Siri, another app taking the
+   * session, or the OS pausing us are all invisible from JavaScript; a `sync()` after the return is
+   * the only way the transport can be right without the user touching anything.
+   */
+  async handleVisibility(hidden: boolean): Promise<void> {
+    if (!this.track) return;
+    if (this.backend !== 'native') {
+      // The web path (the PWA, or `preference: 'web'`): no native engine is carrying it, so there is
+      // nothing to hand over to. Re-resume the audio context on the way in; that is all that helps.
+      if (!hidden && this.state === 'playing') await this.resumeContext();
+      return;
+    }
+    if (hidden) {
+      this.stopAnalysis();
+      return;
+    }
+    await this.native?.activateSession();
+    const truth = await this.native?.sync();
+    if (truth) {
+      this.nativePositionMs = truth.positionMs;
+      if (truth.durationMs > 0) this.nativeDurationMs = truth.durationMs;
+      this.state = truth.playing ? 'playing' : this.state === 'idle' ? 'idle' : 'paused';
+    }
+    if (this.state === 'playing') await this.startAnalysis(this.track, this.nativePositionMs);
+    this.emit();
+    this.onProgress?.(this.nativePositionMs, this.durationMs());
   }
 
   private async startWeb(track: TrackRequest, startMs: number): Promise<void> {
     this.backend = 'web';
     this.el.pause();
+    // The element is the audible engine here, and it is the analyser source: one flag for both paths.
+    this.analysisRunning = true;
     // A new load invalidates any previous frame: forget it so the honesty checks below
     // start from a clean slate instead of comparing against the last track.
     this.lastChecksum = -1;
@@ -361,6 +507,8 @@ export class AudioEngine {
     this.el.crossOrigin = track.crossOrigin ? 'anonymous' : null;
     this.el.src = track.url;
     await this.ensureGraph();
+    // The web path is audible: the analyser feeds the speakers, as it always has.
+    this.setGraphOutput(true);
     if (this.graphFailedReason) {
       this.spectrumLive = false;
       this.modeReason = this.graphFailedReason;
@@ -390,18 +538,25 @@ export class AudioEngine {
     }
     this.backend = 'native';
     this.nativePositionMs = startMs;
+    this.nativeDurationMs = track.durationMs;
     this.spectrumLive = false;
     this.modeReason =
-      'native playback (ExoPlayer / AVFoundation) — real background audio and lock-screen controls, but the plugin exposes no audio buffer to JavaScript, so this screen shows the album-art theme';
+      'native playback (AVFoundation / ExoPlayer) — this is the engine that keeps going when you leave the app and the one the lock screen drives; the spectrum is read from a silent second copy of the stream while the app is on screen';
     this.state = 'loading';
     this.emit();
+    // A load is an unload + preload: the outgoing asset's stop must not be read as a track ending.
+    this.assetSwap = true;
     try {
       await bridge.load(track);
       await bridge.play(startMs / 1000);
       this.state = 'playing';
     } catch (cause) {
       this.fail(cause);
+    } finally {
+      this.assetSwap = false;
     }
+    // The spectrum, foreground only, and only if there is something to draw it for.
+    if (this.state === 'playing') void this.startAnalysis(track, startMs);
     this.emit();
   }
 
@@ -481,7 +636,21 @@ export class AudioEngine {
   }
 
   private handleMediaError(): void {
-    if (this.backend !== 'web') return;
+    if (this.backend !== 'web') {
+      // Native playback is untouched by this: the element that failed is the silent analysis copy.
+      if (this.el.crossOrigin === 'anonymous' && !this.crossOriginRetry && this.track?.crossOrigin) {
+        this.modeReason =
+          'the library refused cross-origin sample access for this stream, so the analyser cannot see the audio — playing it natively anyway, with the album-art theme';
+        void this.retryAnalysisWithoutCrossOrigin();
+        return;
+      }
+      this.analysisRunning = false;
+      this.analysisBlocked = true;
+      this.spectrumLive = false;
+      this.modeReason = 'the silent copy of the stream could not be read, so the spectrum is on the album-art theme — the audio itself is native and playing';
+      this.emit();
+      return;
+    }
     if (this.el.crossOrigin === 'anonymous' && !this.crossOriginRetry && this.track?.crossOrigin) {
       this.modeReason =
         'the library refused cross-origin sample access for this stream, so the analyser cannot see the audio — playing it anyway, with the album-art theme';
@@ -490,6 +659,31 @@ export class AudioEngine {
     }
     const media = this.el.error;
     this.fail(new Error(media ? `${media.message} (code ${media.code})` : 'the audio element failed to load the stream'));
+  }
+
+  /**
+   * The native-mode twin of `retryWithoutCrossOrigin`: only the analyser is at stake, so a failure
+   * here leaves the audio alone and just stops claiming to have samples.
+   */
+  private async retryAnalysisWithoutCrossOrigin(): Promise<void> {
+    const track = this.track;
+    if (!track) return;
+    const positionMs = this.nativePositionMs;
+    this.crossOriginRetry = true;
+    this.el.crossOrigin = null;
+    this.el.src = track.url;
+    try {
+      await this.el.play();
+      if (positionMs > 0) this.el.currentTime = positionMs / 1000;
+      this.analysisRunning = true;
+      this.startMeter();
+    } catch {
+      this.analysisRunning = false;
+      this.analysisBlocked = true;
+      this.spectrumLive = false;
+      this.modeReason = 'the silent copy of the stream could not be read, so the spectrum is on the album-art theme — the audio itself is native and playing';
+      this.emit();
+    }
   }
 
   private startMeter(): void {
@@ -507,7 +701,7 @@ export class AudioEngine {
 
   /** One analyser frame, and the honesty check on top of it. */
   private sample(): void {
-    if (!this.analyser || this.backend !== 'web') return;
+    if (!this.analyser || !this.analysisRunning) return;
     const freq = this.freq;
     // Clear first. A tainted (cross-origin, no ACAO) analyser has been observed to leave
     // the destination array untouched rather than zeroing it — which would display the
@@ -554,6 +748,9 @@ export class AudioEngine {
 
   /** Why there are no real samples, as specifically as we can honestly say. */
   private silenceReason(): string {
+    if (this.analysisBlocked) {
+      return 'the silent copy of the stream never started (the platform wants a tap first), so there is nothing to analyse — the audio itself is native and playing';
+    }
     if (this.crossOriginRetry) {
       return 'the library sent no Access-Control-Allow-Origin for this stream, so the browser will not hand over its samples — it is playing, but the spectrum cannot be real';
     }

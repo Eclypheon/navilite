@@ -92,3 +92,49 @@ xcodebuild -exportArchive -archivePath ../../build-ios/Navilite.xcarchive \
 
 That still uses a free personal team. It becomes a *pleasant* path only with the $99/yr programme
 (TestFlight, 1-year certificates) — deferred by the owner, see `DECISIONS.md`.
+
+## Step 4 — install Navilite as its own app, not inside LiveContainer (v1.7)
+
+**This is the part of v1.7 that only you can do.** A music player needs to be the app iOS *launched*:
+inside LiveContainer the guest's `UIBackgroundModes: audio` is never consulted (iOS reads it from
+LiveContainer, not from the guest), so background audio there is the container's decision, not
+Navilite's. Install the `.ipa` with Sideloadly as its own app and that key counts. It costs one of
+the three free-app slots — see `DECISIONS.md` for the trade-off, and the researcher's cited note at
+`~/.hermes/kanban/attachments/t_de189bde/navilite-livecontainer-background-audio.md`.
+
+Nothing in the build depends on LiveContainer either way.
+
+## What to check after you reinstall (v1.7)
+
+Five things, in the order they are worth checking. These are the ones that need a real device — they
+cannot be measured on this machine, because the audio path is the phone's own AVFoundation and the
+lock screen is the phone's own lock screen. Everything else in this release is covered by the
+existing checks in `tools/` (`npm test`).
+
+1. **Play a track, then leave the app (swipe up to the home screen) and leave it a minute.** The music
+   must keep playing. This is the report v1.7 exists for. If it stops here, then the app is still not
+   the app iOS launched, or `UIBackgroundModes: audio` did not survive signing.
+2. **Lock the screen while it plays.** It must keep playing, and the lock screen should show the track
+   with play/pause **and previous/next** beside it. Press next from the lock screen: the app must move
+   to the next track.
+3. **Come back into the app.** The transport must answer on the first tap (play/pause, next), the
+   track must be the same one, and it must be at the second you left it — the progress bar is the
+   check.
+4. **The spectrum, with the app open.** Open the spectrum screen while a track plays: it must move
+   with the music (a real reading, not the album-art theme). Allow a second after playback starts —
+   the reading comes from a second, silent copy of the stream that the app starts once a track is
+   playing, and it is a foreground-only picture by design. So after a spell in the background, the
+   first thing you see on return is the theme for a moment while that copy starts up: expected, not a
+   regression.
+5. **Kill the app (swipe it away in the app switcher) while a track is playing, then open it again.**
+   It should come back on the same track, at the same second, and carry on playing. The old behaviour
+   came back at the top of the song.
+
+Two normal-looking things that are not faults: the status chip reads `native audio` while the app is
+open, and nothing appears on the lock screen until a track has actually started.
+
+**What could not be checked here:** that iOS keeps us alive in the background, that the lock-screen
+buttons appear and are routed, and that a WebKit that has been suspended restarts the silent
+analysis copy on return. All three are device-only. What *is* checked on this machine: the whole
+JavaScript suite (`npm test`), the type check, that both artifacts build, and that the app, its
+charts and its behaviour in a real browser are unchanged by the move to native playback.

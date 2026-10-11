@@ -24,6 +24,7 @@ import { Library, type AlbumListType } from '../state/library.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
 import { loadSettings, saveSettings, type PlaybackPreference, type Settings } from '../storage/settings.ts';
+import { loadSnapshot } from '../storage/session.ts';
 import { CHANGELOG } from './changelog.ts';
 import { ICONS, cover, formatDuration, formatTime, h, icon, playIcon, replace, starIcon } from './dom.ts';
 import { createLyricsView, type LyricsView } from './lyrics.ts';
@@ -204,7 +205,11 @@ export async function boot(root: HTMLElement): Promise<void> {
   engine.subscribe((status) => updatePlayerBar(ctx, shell, status));
   document.addEventListener('visibilitychange', () => {
     void ctx.engine.handleVisibility(document.hidden);
+    // Going out of sight is the last moment the app is guaranteed to be running: write the exact
+    // resume snapshot here rather than hope the OS gives us another tick.
+    if (document.hidden) ctx.queue?.flushSnapshot();
   });
+  window.addEventListener('pagehide', () => ctx.queue?.flushSnapshot());
   window.addEventListener('keydown', (event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
     if (event.key === ' ') {
@@ -890,11 +895,53 @@ async function restoreSession(ctx: AppContext, shell: Shell, applyPalette: Apply
 }
 
 /**
+ * Bring back exactly what was playing, without asking the server first.
+ *
+ * The device's own snapshot (`src/storage/session.ts`) is written every few seconds while a track
+ * plays and holds the play order as well as the position, so a relaunch lands on the same second of
+ * the same track in the same order. The server's `savePlayQueue` — which v1.6 restored from — is
+ * written debounced on a track change, so it knows the right *track* but only an approximate
+ * position; it stays as the fallback for a fresh install or a snapshot older than 12 hours.
+ *
+ * If the snapshot says it was playing, it is started again: that is what "the resume is exact" has
+ * to mean when the OS killed the app in the background. On the web the browser will refuse audio
+ * without a gesture — that is not an error, the queue simply stays restored and paused, which is
+ * what v1.1 promised.
+ */
+async function restorePlayQueue(ctx: AppContext): Promise<boolean> {
+  const queue = ctx.queue;
+  if (!queue) return false;
+  const snapshot = loadSnapshot();
+  if (snapshot) {
+    queue.restoreExact(
+      {
+        songs: snapshot.songs,
+        order: snapshot.order,
+        cursor: snapshot.cursor,
+        shuffle: snapshot.shuffle,
+        repeat: snapshot.repeat,
+        context: snapshot.context,
+      },
+      snapshot.positionMs,
+    );
+    if (snapshot.playing) {
+      try {
+        await queue.start();
+      } catch (error) {
+        console.warn('[navilite] could not start the restored track; leaving it paused', error);
+      }
+    }
+    return true;
+  }
+  return restoreServerQueue(ctx);
+}
+
+/**
  * The queue the server saved for us (`savePlayQueue` on every track change), put back
  * without starting playback. This is what makes a cold start land on the spectrum screen
  * for the track that was playing, as the owner asked.
  */
-async function restorePlayQueue(ctx: AppContext): Promise<boolean> {
+async function restoreServerQueue(ctx: AppContext): Promise<boolean> {
   const client = ctx.library?.client;
   const queue = ctx.queue;
   if (!client || !queue) return false;
@@ -1557,9 +1604,9 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
   const preferenceSelect = h('select', { class: 'field inline' }, [
     ...(
       [
-        ['auto', 'Automatic — real spectrum in the foreground, native engine in the background'],
-        ['web', 'Web Audio only — always the real spectrum (background playback depends on the platform)'],
-        ['native', 'Native engine only — background and lock screen first, visualiser is the album-art theme'],
+        ['auto', 'Automatic — native playback, with the real spectrum while the app is open (recommended)'],
+        ['web', 'Web Audio only — the real spectrum, at the cost of stopping when the platform suspends the page'],
+        ['native', 'Native only — no second stream for the analyser, so the spectrum stays the album-art theme'],
       ] as Array<[PlaybackPreference, string]>
     ).map(([value, label]) => {
       const option = h('option', { value, text: label });
@@ -1615,7 +1662,7 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
         : 'Plain web storage. That is the honest limit of an installable PWA on iOS and Android — the wrapped builds avoid it.' }),
       h('h2', { class: 'section', text: 'Playback and visualiser' }),
       preferenceSelect,
-      h('p', { class: 'muted small', text: 'Web Audio does not survive backgrounding on iOS, so the real spectrum is a foreground feature there. Android keeps Web Audio alive while playing.' }),
+      h('p', { class: 'muted small', text: 'Automatic plays through the phone\'s own audio engine, which is the one that keeps going when you leave the app, and reads the spectrum from a silent second copy of the same stream — only while the app is open. Web Audio only means the page does the playing, which some platforms stop as soon as you leave; it is here for the web page and for debugging.' }),
       h('h2', { class: 'section', text: 'Lyrics' }),
       h('p', { class: 'muted small', text: `Lyrics come from your own library — the lyrics file that sits next to the song — and are cached on this device only (${ctx.lyrics.cachedTracks} track${ctx.lyrics.cachedTracks === 1 ? '' : 's'} right now). Nothing is bundled with the app and nothing is fetched from anyone else.` }),
       h('div', { class: 'row' }, [clearLyrics]),
