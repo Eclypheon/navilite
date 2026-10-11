@@ -57,6 +57,15 @@ interface NaviliteSpectrumPlugin {
   start(options: { url: string; positionMs: number }): Promise<{ started: boolean; sampleRate: number; bandCount: number }>;
   stop(): Promise<{ stopped: boolean }>;
   bands(): Promise<NativeSpectrumFrame>;
+  /**
+   * Aim the audible item at a forward buffer of `seconds` (v1.9.2).
+   *
+   * Ours to reach because our plugin holds the audible `AVPlayer` already (the same reflective
+   * lookup the tap uses); the vendor plugin has no API for it. Optional in the type so a build
+   * whose plugin predates it degrades to "no forward-buffer target", which is what every build
+   * before this one had.
+   */
+  configureBuffer(options: { seconds: number }): Promise<{ buffered: boolean; seconds?: number }>;
 }
 
 /** One frame of the native spectrum, plus what the tap thinks about it. */
@@ -102,6 +111,38 @@ export interface NativeTruth {
 
 export interface NativeBridge {
   load(info: NativeTrackInfo): Promise<void>;
+  /**
+   * Put the **next** track on the player, prepared and silent (v1.9.1).
+   *
+   * Its own asset id, its own `AVPlayerItem`, its own `AVPlayer` — and nothing ever sends that
+   * player `play`. It is not a second engine: it makes no sound, it is not tapped for the spectrum,
+   * and it is not in the engine's state machine. What it is, is buffered: adopted at the boundary,
+   * the track starts within a seek's time instead of paying for a cold fetch after the previous
+   * track has already stopped.
+   *
+   * Optional, so a bridge without it (an older plugin, the fake bridge in the tests) is a bridge
+   * that still plays — with a cold fetch at the track boundary, which is where v1.9.0 left it.
+   */
+  prepare?(info: NativeTrackInfo): Promise<boolean>;
+  /**
+   * Make the prepared track the audible one and free the slot it came from (v1.9.1).
+   *
+   * Answers `false` when there is nothing prepared to adopt, and the caller then loads normally.
+   */
+  adopt?(): Promise<boolean>;
+  /** Throw the prepared track away — the queue is not going where it was prepared for. */
+  discard?(): Promise<void>;
+  /**
+   * A prepare the listener did not ask for must issue nothing (v1.9.2).
+   *
+   * The queue prepares the track that *follows* the one playing, which is a bet on the listener
+   * staying where he is. When he moves — a tap far down the list, a next he pressed — that bet is
+   * off, and the prepare for the abandoned chain must not touch the player: on a phone holding two
+   * slots on a link with room for one stream, an unasked-for preload is competing with the very
+   * track he is waiting for. Bumped by the bridge itself whenever a load or a discard takes the
+   * slot, and safely callable from anywhere.
+   */
+  invalidatePrepared?(): void;
   play(startSeconds: number): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -141,6 +182,97 @@ const BACKGROUND_AUDIO_SERVICE = 'BackgroundAudio';
 const NAVILITE_REMOTE = 'NaviliteRemote';
 const NAVILITE_SPECTRUM = 'NaviliteSpectrum';
 
+/**
+ * How long a bridge call may hold a JS `await` before the engine is told to carry on without it.
+ *
+ * Every transport call is bounded (v1.9.1). A plugin call that never settles used to leave the
+ * engine's `await` pending for the rest of the session — which is one half of the owner's *"using
+ * the seek bar seems to disable the playlist from advancing"*: `setCurrentTime` resolves only from
+ * AVFoundation's own seek completion, and a zero-tolerance seek on a transcoded remote item can
+ * report `finished == false`, which the plugin turns into a promise that never settles. Nothing in
+ * this app's state machine may depend on a bridge call coming back.
+ */
+const BRIDGE_TIMEOUT_MS = 5000;
+/** A seek is short by nature, and the position the UI shows is written optimistically. */
+const SEEK_TIMEOUT_MS = 1500;
+/**
+ * How long after a slot is written a completion for it is still the plugin's own doing (v1.9.1).
+ *
+ * `unload` stops the asset it holds, and the plugin reports a **completion** for it — on its own
+ * audio queue, so the report can land after the call has already resolved. With two slots in the
+ * player, one of them prepared and silent, that is a completion nobody asked for arriving at the
+ * exact moment the listener has changed track: the engine's one event that moves the queue would act
+ * on it and skip a track. A real completion inside this window is not music.
+ */
+const SLOT_WRITE_GRACE_MS = 800;
+
+/**
+ * Run a bridge call under a deadline: it resolves with `fallback` if the plugin does not answer.
+ *
+ * A rejected call is not an error the listener should see either — it is reported and the fallback
+ * stands, exactly as the plugin's own `missing-plugin` path does.
+ *
+ * v1.9.2 — **the result says whether the plugin answered at all.** A call that timed out and a call
+ * that answered `undefined` used to be the same value, and for the prepared slot that difference is
+ * the whole bug: a prepare that timed out was recorded as a prepared track, so the next boundary
+ * adopted nothing and nothing said so. Callers that care about the distinction use this; callers
+ * that only need the answer use {@link bounded}.
+ */
+async function boundedSettled<T>(
+  work: Promise<T>,
+  fallback: T,
+  what: string,
+  ms = BRIDGE_TIMEOUT_MS,
+): Promise<{ value: T; settled: boolean }> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const value = await Promise.race([
+      work.then((answer) => ({ value: answer, settled: true })),
+      new Promise<{ value: T; settled: false }>((resolve) => {
+        timer = setTimeout(() => {
+          console.warn(`[navilite] the native bridge call "${what}" did not answer within ${ms} ms`);
+          resolve({ value: fallback, settled: false });
+        }, ms);
+      }),
+    ]);
+    return value;
+  } catch (error) {
+    console.warn(`[navilite] the native bridge call "${what}" failed`, error);
+    return { value: fallback, settled: false };
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+/** The same, for the calls where the answer is all that matters. */
+async function bounded<T>(work: Promise<T>, fallback: T, what: string, ms = BRIDGE_TIMEOUT_MS): Promise<T> {
+  return (await boundedSettled(work, fallback, what, ms)).value;
+}
+
+/**
+ * How long the native bridge itself may take to build before a start gives up on it (v1.9.2).
+ *
+ * Building it is a dynamic import plus `configure` plus three `addListener` round trips — three
+ * more round trips through the same bridge that every transport call queues on, and none of them
+ * was bounded. A plugin that never answers them left the first tap of a session waiting on a
+ * promise that would never settle: the app fetched nothing, played nothing and said nothing. Ten
+ * seconds is longer than any healthy build (it is measured in tens of milliseconds) and it is the
+ * whole of the first tap's budget.
+ */
+const BRIDGE_BUILD_TIMEOUT_MS = 10000;
+
+export { BRIDGE_BUILD_TIMEOUT_MS };
+
+/**
+ * How far ahead of the play position the audible item is asked to fill, in seconds (v1.9.2).
+ *
+ * This is the owner's own request — *"play as soon as ~5 seconds of audio are buffered, then keep
+ * filling behind it"* — and it is the one lever AVFoundation exposes for it. Unset, the player
+ * fills as much as it can and playback begins when it decides it has enough; set, it is the target
+ * the player starts on and keeps filling behind.
+ */
+const BUFFER_AHEAD_SECONDS = 5;
+
 export async function createNativeBridge(os: OsName, events: NativeBridgeEvents): Promise<NativeBridge | null> {
   if (os === 'web') return null;
   try {
@@ -153,9 +285,57 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       backgroundPlayback: os === 'android',
       focus: true,
     });
-    await NativeAudio.addListener('currentTime', (event) => events.onPosition(event.currentTime));
-    await NativeAudio.addListener('playbackState', (event) => events.onState(event.state, event.isPlaying));
-    await NativeAudio.addListener('complete', () => events.onComplete());
+
+    /*
+     * Two slots, one name each, and **the names swap at a track boundary** (v1.9.1).
+     *
+     * One slot is what the listener hears; the other holds the track after it, loaded on the same
+     * plugin and never sent `play` — prepared and silent, not a second engine. Adopting the
+     * prepared slot at the boundary is what makes the end of a track instant: the bytes are
+     * already there, so the first audio of the next track is a seek's time away.
+     *
+     * Because the roles swap, every call in this file is keyed on `audibleId` and never on a
+     * literal — a literal would address the silent half once the swap has happened.
+     */
+    const SLOTS: readonly string[] = ['navilite-current', 'navilite-next'];
+    let audibleId = SLOTS[0] ?? 'navilite-current';
+    let preparedId = SLOTS[1] ?? 'navilite-next';
+    /** When a slot was last written. See {@link SLOT_WRITE_GRACE_MS}. */
+    let slotWrittenAt = 0;
+    /**
+     * The prepare epoch (v1.9.2). See {@link NativeBridge.invalidatePrepared}.
+     *
+     * A prepared job captures the epoch when it is asked for, and checks it again when its turn on
+     * the lane comes: a prepare for a chain the listener has left is not merely late, it is a
+     * request nobody made, so it issues nothing at all. Bumped here, by the two things that take
+     * the slot over — a load and a discard.
+     */
+    let preparedEpoch = 0;
+
+    /**
+     * Whether an event is about the asset the listener is hearing.
+     *
+     * With a prepared asset in the player, *its* events are not the engine's business: unloading a
+     * slot makes the plugin emit a completion for it (so a stale slot would otherwise advance the
+     * queue), and a playback state belonging to a silent item says nothing about what is playing.
+     * An event with no `assetId` (an older plugin) is passed through, as it always was.
+     */
+    const isAudible = (event: { assetId?: string } | undefined): boolean => !event?.assetId || event.assetId === audibleId;
+
+    await NativeAudio.addListener('currentTime', (event) => {
+      if (!isAudible(event)) return;
+      events.onPosition(event.currentTime);
+    });
+    await NativeAudio.addListener('playbackState', (event) => {
+      if (!isAudible(event)) return;
+      events.onState(event.state, event.isPlaying);
+    });
+    await NativeAudio.addListener('complete', (event) => {
+      if (!isAudible(event)) return;
+      // A slot we wrote a moment ago: this completion is the plugin stopping the asset we replaced.
+      if (Date.now() - slotWrittenAt < SLOT_WRITE_GRACE_MS) return;
+      events.onComplete();
+    });
 
     const service = Capacitor.isPluginAvailable(BACKGROUND_AUDIO_SERVICE)
       ? registerPlugin<BackgroundAudioPlugin>(BACKGROUND_AUDIO_SERVICE)
@@ -166,17 +346,18 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       ? registerPlugin<NaviliteSpectrumPlugin>(NAVILITE_SPECTRUM)
       : null;
 
-    const assetId = 'navilite-current';
     let lastPositionMs = 0;
 
     /*
-     * One lane for the asset, so two loads can never be in flight at once.
+     * One lane for the two asset slots, so two writes to a slot can never be in flight at once.
      *
-     * Every track is loaded under this single `assetId`, which makes an unfinished `preload` and the
-     * next track's `unload`+`preload` two writers on one slot: the older one can finish last and
-     * leave the plugin holding the wrong stream. The engine already refuses to *play* a superseded
-     * load (`startNative`); this is the other half — the loads themselves run in the order the taps
-     * were made, so the last preload to complete is the last one asked for.
+     * A track is loaded with `unload`+`preload` under its slot's name, which makes an unfinished
+     * `preload` and the next track's `unload`+`preload` two writers on one slot: the older one can
+     * finish last and leave the plugin holding the wrong stream. The engine already refuses to
+     * *play* a superseded load (`startNative`); this is the other half — the loads themselves run in
+     * the order the taps were made, so the last preload to complete is the last one asked for. The
+     * prepared slot goes through the same lane, so an adopt at a boundary cannot be overtaken by the
+     * preload for the track after it.
      */
     let assetLane: Promise<unknown> = Promise.resolve();
     const inAssetLane = <T>(work: () => Promise<T>): Promise<T> => {
@@ -186,6 +367,47 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         () => undefined,
       );
       return next;
+    };
+
+    /** What the lock-screen card shows for a track, in one place — the audible and prepared alike. */
+    const metadata = (info: NativeTrackInfo) => ({
+      title: info.title,
+      artist: info.artist,
+      album: info.album,
+      artworkUrl: info.artworkUrl ?? undefined,
+    });
+
+    /** Put `info` into `slot`, replacing whatever it held. Best-effort: the plugin rejects both on an empty slot. */
+    const fillSlot = async (slot: string, info: NativeTrackInfo): Promise<void> => {
+      slotWrittenAt = Date.now();
+      try {
+        await NativeAudio.unload({ assetId: slot });
+      } catch {
+        // Nothing loaded under that name yet — unload is best-effort.
+      }
+      await NativeAudio.preload({ assetId: slot, assetPath: info.url, isUrl: true, notificationMetadata: metadata(info) });
+    };
+
+    /**
+     * Tell the player how far ahead to fill the item the listener is hearing (v1.9.2).
+     *
+     * This is ours to do because the audible item is reachable from our own iOS plugin, which
+     * already finds the audible `AVPlayer` reflectively for the spectrum tap (see
+     * `ios/App/App/NaviliteSpectrum.swift`); the vendor plugin exposes no API for it. It runs
+     * *after* the item is in place — a load, or an adoption at a boundary — so it is a property
+     * written on an item that is already the right one, and it makes no sound.
+     *
+     * Android has no equivalent call: the vendor's player builds stock `DefaultLoadControl`, which
+     * fills 50 s of media before it will start. That one is patched at the source by
+     * `tools/patch-native-audio.mjs`, which is the only way to reach it.
+     */
+    const configureBuffer = async (): Promise<void> => {
+      if (!spectrum) return;
+      try {
+        await spectrum.configureBuffer({ seconds: BUFFER_AHEAD_SECONDS });
+      } catch (error) {
+        console.warn('[navilite] the player would not take a forward-buffer target', error);
+      }
     };
 
     const startService = async () => {
@@ -207,44 +429,139 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
 
     return {
       async load(info) {
-        await inAssetLane(async () => {
-          try {
-            await NativeAudio.unload({ assetId });
-          } catch {
-            // Nothing loaded yet — unload is best-effort.
-          }
-          await NativeAudio.preload({
-            assetId,
-            assetPath: info.url,
-            isUrl: true,
-            notificationMetadata: {
-              title: info.title,
-              artist: info.artist,
-              album: info.album,
-              artworkUrl: info.artworkUrl ?? undefined,
-            },
-          });
-        });
+        /*
+         * A load is the listener's own request, and it takes the audible slot over (v1.9.2): any
+         * prepare still on the lane for the chain he has left is refused rather than performed.
+         */
+        preparedEpoch += 1;
+        await bounded(inAssetLane(() => fillSlot(audibleId, info)), undefined, 'load');
+      },
+      async prepare(info) {
+        /*
+         * The prepared slot, and **only** it: nothing here touches what is playing, starts anything,
+         * or writes the queue. It is a preload on the same plugin, under the other asset id, and the
+         * player it creates is never sent `play` — which is the whole difference between this and the
+         * second engine v1.7.6 deleted.
+         *
+         * v1.9.2 — **it answers whether it happened, and it performs nothing if the listener has
+         * moved on.** Two halves of one fix: the epoch, checked on the lane rather than at the call,
+         * so a prepare the listener did not ask for issues nothing even when it was queued; and the
+         * boolean, so the queue records a prepared track only when there is one. A prepare that
+         * timed out used to be indistinguishable from a successful one, and the slot it claimed was
+         * never given back.
+         */
+        const epoch = preparedEpoch;
+        const result = await boundedSettled(
+          inAssetLane(async () => {
+            if (epoch !== preparedEpoch) return false;
+            await fillSlot(preparedId, info);
+            return true;
+          }),
+          false,
+          'prepare',
+        );
+        return result.settled && result.value;
+      },
+      invalidatePrepared() {
+        // A caller that knows the chain is abandoned can say so without touching the player; the
+        // lane job that is already waiting for its turn reads this and issues nothing.
+        preparedEpoch += 1;
+      },
+      async adopt() {
+        const from = preparedId;
+        const to = audibleId;
+        /*
+         * Order matters, and it is the order the plugin's own bookkeeping needs.
+         *
+         * The prepared asset is played first: from that instant it is what the listener hears, so
+         * the *next* thing — freeing the slot the old track held — fires the plugin's synthetic
+         * completion for an asset id that is no longer the audible one, reports nothing to the
+         * engine's transport state, and leaves the now-playing card alone. Unloading first would
+         * take the audio session and the card down between the two tracks, audibly.
+         */
+        const started = await bounded(
+          inAssetLane(async () => {
+            await NativeAudio.play({ assetId: from, time: 0 });
+            return true;
+          }),
+          false,
+          'adopt',
+        );
+        if (!started) return false;
+        audibleId = from;
+        preparedId = to;
+        // The adopted item is the audible one now: the forward-buffer target belongs on it, and
+        // the item it was prepared as is a different one by the time it is heard (v1.9.2).
+        await configureBuffer();
+        await startService();
+        slotWrittenAt = Date.now();
+        await bounded(
+          inAssetLane(async () => {
+            try {
+              await NativeAudio.unload({ assetId: to });
+            } catch {
+              // The slot may already be empty (a cold first track) — nothing to free.
+            }
+          }),
+          undefined,
+          'adopt-unload',
+        );
+        lastPositionMs = 0;
+        return true;
+      },
+      async discard() {
+        slotWrittenAt = Date.now();
+        // A discarded slot is a chain nobody is on any more: a prepare still waiting for its turn
+        // for it issues nothing (v1.9.2).
+        preparedEpoch += 1;
+        await bounded(
+          inAssetLane(async () => {
+            try {
+              await NativeAudio.unload({ assetId: preparedId });
+            } catch {
+              // Nothing prepared — nothing to throw away.
+            }
+          }),
+          undefined,
+          'discard',
+        );
       },
       async play(startSeconds) {
         await startService();
         // Behind the same lane: the play for a track whose preload is still running must not
         // overtake it, and it must not start the previous track's asset either.
-        await inAssetLane(() => NativeAudio.play({ assetId, time: Math.max(0, startSeconds) }));
+        await bounded(inAssetLane(() => NativeAudio.play({ assetId: audibleId, time: Math.max(0, startSeconds) })), undefined, 'play');
+        /*
+         * The forward-buffer target, written **after** the play call (v1.9.2).
+         *
+         * The plugin sets its `currentlyPlayingAssetId` when it is asked to play, and that is what
+         * our own plugin finds the audible player by; asking before this point would aim the target
+         * at the outgoing item. Setting it after the play is still in time — the player fills
+         * towards this target for as long as the item plays.
+         */
+        await configureBuffer();
       },
       async pause() {
-        await NativeAudio.pause({ assetId });
+        await bounded(NativeAudio.pause({ assetId: audibleId }), undefined, 'pause');
       },
       async resume() {
-        await NativeAudio.resume({ assetId });
+        await bounded(NativeAudio.resume({ assetId: audibleId }), undefined, 'resume');
       },
       async stop() {
-        await NativeAudio.stop({ assetId });
+        await bounded(NativeAudio.stop({ assetId: audibleId }), undefined, 'stop');
         await stopService();
         lastPositionMs = 0;
       },
       async seek(seconds) {
-        await NativeAudio.setCurrentTime({ assetId, time: Math.max(0, seconds) });
+        /*
+         * The one call with a short deadline, and the one that has been proved to hang: the plugin
+         * settles `setCurrentTime` only from AVFoundation's own seek completion, and a zero-tolerance
+         * seek reports `finished == false` on a transcoded remote item — the completion is never
+         * called, the promise never settles, and everything that waited on it waited for ever. The
+         * position the UI shows is written on the engine's side, so nothing is lost by giving up on
+         * the answer.
+         */
+        await bounded(NativeAudio.setCurrentTime({ assetId: audibleId, time: Math.max(0, seconds) }), undefined, 'seek', SEEK_TIMEOUT_MS);
       },
       positionMs() {
         return lastPositionMs;
@@ -252,9 +569,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       async sync() {
         try {
           const [playing, current, duration] = await Promise.all([
-            NativeAudio.isPlaying({ assetId }),
-            NativeAudio.getCurrentTime({ assetId }),
-            NativeAudio.getDuration({ assetId }),
+            NativeAudio.isPlaying({ assetId: audibleId }),
+            NativeAudio.getCurrentTime({ assetId: audibleId }),
+            NativeAudio.getDuration({ assetId: audibleId }),
           ]);
           lastPositionMs = Number.isFinite(current.currentTime) ? current.currentTime * 1000 : lastPositionMs;
           return {

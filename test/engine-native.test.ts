@@ -52,6 +52,23 @@ interface Recording {
   calls: string[];
   /** Every URL the bridge was asked to load, in order — which track the one asset holds. */
   loads: string[];
+  /**
+   * v1.9.1 — every URL the bridge was asked to **prepare**: the track after the current one, loaded
+   * into its own silent slot, never played. `adopts` counts the times that slot became audible.
+   */
+  prepares: string[];
+  adopts: number;
+  /** The URL the prepared slot holds right now, or null when nothing is prepared. */
+  preparedUrl: string | null;
+  /**
+   * v1.9.1 — the plugin's own leak, made reproducible: `setCurrentTime` resolves only from
+   * AVFoundation's seek completion, and a zero-tolerance seek on a transcoded remote item reports
+   * `finished == false`, so the promise **never settles**. With the old counter that meant the end
+   * of a track was ignored for the rest of the session.
+   */
+  seekNeverSettles: boolean;
+  /** True when fakeBridge.play should not immediately emit onPosition. */
+  deferPosition?: boolean;
   /** The bridge's own event sink, so a test can make the player report a position or a state. */
   events: NativeBridgeEvents | null;
   /** What the player reports from `sync()`, i.e the truth after a foreground return. */
@@ -105,7 +122,16 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
       async play(seconds: number) {
         record.calls.push(`play@${Math.round(seconds)}`);
         await wait(ROUND_TRIP_MS);
-        record.truth = { ...record.truth, playing: true };
+        record.truth = { ...record.truth, playing: true, positionMs: seconds * 1000 };
+        /*
+         * v1.9.2 — a player that has been told to play **reports where it is**, and that report is
+         * what the engine now waits for before it will say the track is playing (`concludeStart`).
+         * A fake that accepted the call and said nothing would be a fake of the bug this release is
+         * about: every round trip answering, and no sound.
+         */
+        if (!record.deferPosition) {
+          record.events?.onPosition(Math.max(0, seconds));
+        }
       },
       pause: () => action('pause'),
       async resume() {
@@ -118,7 +144,41 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
       async seek(seconds: number) {
         record.calls.push(`seek@${Math.round(seconds)}`);
         record.truth = { ...record.truth, positionMs: seconds * 1000 };
+        // The plugin's own leak, when the test asks for it: the promise never settles.
+        if (record.seekNeverSettles) return new Promise<void>(() => {});
         await wait(5);
+      },
+      /*
+       * v1.9.1 — the prepared slot, in the fake bridge as in `src/player/native.ts`: a second asset
+       * loaded on the same plugin, never sent `play`, adopted at a track boundary.
+       */
+      async prepare(info: NativeTrackInfo) {
+        record.calls.push('prepare');
+        record.prepares.push(info.url);
+        record.preparedUrl = info.url;
+        await wait(ROUND_TRIP_MS);
+        // v1.9.2: the answer is whether the player took the track — the queue records a prepared
+        // track only on `true`.
+        return true;
+      },
+      async adopt() {
+        const url = record.preparedUrl;
+        record.preparedUrl = null;
+        if (!url) return false;
+        record.calls.push('adopt');
+        // The real bridge plays the prepared asset here (`NativeAudio.play` on its own asset id),
+        // which is why adopting is a start and not a load.
+        record.calls.push('play@0');
+        record.adopts += 1;
+        record.truth = { ...record.truth, playing: true, positionMs: 0 };
+        await wait(5);
+        // The adopted item is playing now, and it says so: the same report a load's play produces.
+        record.events?.onPosition(0);
+        return true;
+      },
+      async discard() {
+        record.calls.push('discard');
+        record.preparedUrl = null;
       },
       positionMs: () => record.truth.positionMs,
       async sync() {
@@ -311,6 +371,11 @@ function recording(overrides: Partial<Recording> = {}): Recording {
   return {
     calls: [],
     loads: [],
+    prepares: [],
+    adopts: 0,
+    preparedUrl: null,
+    seekNeverSettles: false,
+    deferPosition: false,
     events: null,
     truth: { playing: true, positionMs: 1000, durationMs: 180_000 },
     refuseResume: false,
@@ -793,9 +858,10 @@ test('the press is not behind the bridge round trips', async () => {
     const playing = engine.play(TRACK);
     const stateOnPress = engine.status().state;
     const uiLatencyMs = Math.round(performance.now() - pressedAt);
-    assert.equal(stateOnPress, 'playing', 'the transport is playing on the tick of the press');
+    assert.equal(stateOnPress, 'loading', 'the transport is loading on the tick of the press');
 
     await playing;
+    assert.equal(engine.status().state, 'playing', 'and playing once the player speaks');
     const soundLatencyMs = Math.round(performance.now() - pressedAt);
     // v1.7 flipped the state only after `load` + `play` had both resolved — that is this number.
     assert.ok(soundLatencyMs >= ROUND_TRIP_MS * 2, `the bridge really is in the path (${soundLatencyMs} ms of round trips)`);
@@ -907,10 +973,11 @@ test('the displayed position does not run from the press to the first sound', as
   const engines: AudioEngine[] = [];
   try {
     const record = recording();
+    record.deferPosition = true;
     record.truth = { playing: true, positionMs: 0, durationMs: 180_000 };
     const engine = nativeEngine(record);
     engines.push(engine);
-    await engine.play(TRACK);
+    const playing = engine.play(TRACK);
     await settle(300);
     const beforeReport = engine.status().positionMs;
     say(`the clock between the press and the player's first report: ${Math.round(beforeReport)} ms after 300 ms of real time`);
@@ -918,6 +985,7 @@ test('the displayed position does not run from the press to the first sound', as
 
     // The player's own report is what starts it, and it counts from that position.
     record.events?.onPosition(0.4);
+    await playing;
     await settle(240);
     const afterReport = engine.status().positionMs;
     say(`and from the player's own report of 400 ms: ${Math.round(afterReport)} ms after 240 ms more`);
@@ -1212,9 +1280,62 @@ test('a track that reaches its end starts the next one in the queue', async () =
     say(`the end of song-1: active ${queue.currentSong?.id}, loads ${loads.join(' → ') || 'none'}, plays ${plays.join(', ') || 'none'}`);
     assert.equal(queue.currentSong?.id, 'song-2', 'the next track is the active one');
     assert.equal(queue.position, 1, 'and the queue moved its cursor to it');
-    assert.equal(record.loads[record.loads.length - 1], TRACK_URL('song-2'), 'the engine holds the next track’s stream');
+    /*
+     * v1.9.1 — and it did not fetch a byte to get there. The track after song-1 was put on the player
+     * while song-1 was still playing (`prepare`), and the boundary *adopted* that already-buffered
+     * asset: `loads` is empty for the whole advance. This is the release's claim, and it is the one
+     * v1.9.0 stated falsely — its prefetch fetched bytes on the WebView stack that the player could
+     * never read, so the boundary was a cold fetch.
+     */
+    assert.deepEqual(record.prepares, [TRACK_URL('song-2')], 'the next track was prepared during song-1');
+    assert.equal(record.adopts, 1, 'and the boundary adopted the prepared asset rather than loading one');
+    assert.equal(record.loads.length, 0, `nothing was fetched at the boundary — calls: ${record.calls.join(', ')}`);
     assert.ok(plays.length > 0, `audio for it started — calls: ${record.calls.join(', ')}`);
     assert.equal(engine.status().state, 'playing', 'and the machine is playing, not stuck on the end of the last one');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.9.1 — *"using the seek bar seems to disable the playlist from advancing to the next song"*.
+ *
+ * The state that did it was `inTransition`: a counter, opened before `setCurrentTime` and closed in a
+ * `finally` that only runs when the plugin's promise settles. The plugin settles it only from
+ * AVFoundation's own seek completion, and a zero-tolerance seek of a transcoded remote item reports
+ * `finished == false` — so the promise never settles, the counter stays at one, and both doors that
+ * end a track are shut for the rest of the session.
+ *
+ * This test is that leak, exactly: the bridge's seek never settles, and the track still ends and
+ * still advances. It would fail on the counter, whatever the window around it.
+ */
+test('a seek the plugin never answers cannot stop the queue advancing at the end of the track', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording({ seekNeverSettles: true });
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    const queue = new PlaybackQueue(engine, stubLibrary());
+    await queue.play(queueOf('song-1', 'song-2'), 0, CONTEXT);
+    await settle(80);
+    assert.equal(queue.currentSong?.id, 'song-1');
+
+    // He drags the bar. The plugin accepts the call and never answers it.
+    void queue.seek(30_000);
+    await settle(40);
+    say(`after the seek: ${record.calls.filter((call) => call.startsWith('seek@')).join(', ')}, and it never came back`);
+
+    // Past the seek's own window, and then the track runs out.
+    await settle(1700);
+    record.events?.onComplete();
+    await settle(300);
+
+    assert.equal(queue.currentSong?.id, 'song-2', 'the track after the seek still became the active one');
+    assert.equal(queue.position, 1, 'the cursor moved');
+    assert.equal(engine.status().state, 'playing', 'and the machine is playing, not silent on a stuck seek');
+    say(`after the end: active ${queue.currentSong?.id}, state ${engine.status().state}, seeks unanswered, queue advanced`);
   } finally {
     fakes.restore();
     await stopAll(engines);

@@ -60,9 +60,13 @@ test('builds token auth with a fresh salt, and t really is md5(password + salt)'
   const salt = a.searchParams.get('s');
   assert.ok(salt && salt.length >= 6, 'salt is present and long enough');
   assert.equal(a.searchParams.get('t'), createHash('md5').update(`hunter2${salt}`).digest('hex'));
-  // A new salt per request, exactly as the API asks.
-  assert.notEqual(a.searchParams.get('s'), b.searchParams.get('s'));
-  assert.notEqual(a.searchParams.get('t'), b.searchParams.get('t'));
+  // v1.9.2: ONE salt per session, not per request. Deliberate — a stable URL can be cached, and
+  // over a relayed link the round trips are what cost seconds. The token is exactly as opaque as
+  // it was (salted MD5, salt never leaves the device); what it gives up is per-request freshness.
+  // Reviewed as a security-relevant decision rather than assumed correct.
+  assert.equal(a.searchParams.get('s'), b.searchParams.get('s'), 'the session keeps one salt');
+  assert.equal(a.searchParams.get('t'), b.searchParams.get('t'), 'so the token is stable too');
+  assert.notEqual(new SubsonicClient({ serverUrl: '', username: 'kester', password: 'hunter2' }).authParams().s, salt, 'a different session still gets a different salt');
 });
 
 test('same-origin is the default and is not treated as cross-origin', () => {

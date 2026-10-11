@@ -198,18 +198,31 @@ final class AudibleSpectrumTap {
     /* -------------------------------------------------------------------- the track */
 
     /**
-     * The audio track of `item`, if the item has one loaded.
+     * The audio track of `item`, **awaited** — never blocking the calling thread (v1.9.1).
      *
      * The item's own track list is the cheap answer and the one used first: it is populated as the
      * item becomes ready, so on a player that is already playing it costs nothing and needs no
      * network round trip of its own. The asset's track list is the fallback for an item that is
      * ready but whose `tracks` has not been built yet.
+     *
+     * Until v1.9.1 that fallback was `item.asset.tracks(withMediaType:)` — the deprecated
+     * **synchronous** accessor, which blocks until AVFoundation has loaded the asset, over the
+     * network, on the very stream that is starting. Called from `install` on the main thread, that
+     * one line put every JS callback, every tap and the plugin's own `play` call behind a cold fetch
+     * of the new track, which is why an autoplay after a finished track was *slower* than a tap from
+     * cold and why the bars stayed dark while it was. Nothing in this file blocks any more: the
+     * modern `loadTracks` is awaited, so the main thread carries on and the bars arrive when the
+     * track is known.
      */
-    static func audioTrack(of item: AVPlayerItem) -> AVAssetTrack? {
-        if let track = item.tracks.compactMap({ $0.assetTrack }).first(where: { $0.mediaType == .audio }) {
-            return track
-        }
-        return item.asset.tracks(withMediaType: .audio).first
+    static func audioTrack(of item: AVPlayerItem) async -> AVAssetTrack? {
+        if let track = knownAudioTrack(of: item) { return track }
+        let tracks = try? await item.asset.loadTracks(withMediaType: .audio)
+        return tracks?.first
+    }
+
+    /// The item's own track list, when it has already been built — the free half of the above.
+    static func knownAudioTrack(of item: AVPlayerItem) -> AVAssetTrack? {
+        item.tracks.compactMap({ $0.assetTrack }).first(where: { $0.mediaType == .audio })
     }
 
     /* ------------------------------------------------------------------ attachment */
@@ -225,7 +238,7 @@ final class AudibleSpectrumTap {
      * player already has it); a mismatch is worth a line in the log, but it is not a reason to refuse
      * to measure.
      */
-    func attach(to item: AVPlayerItem, player: AVPlayer, requestedUrl: URL?) -> Result<Double, NativeSpectrumError> {
+    func attach(to item: AVPlayerItem, track: AVAssetTrack?, player: AVPlayer, requestedUrl: URL?) -> Result<Double, NativeSpectrumError> {
         /*
          * **Verify; do not reinstall.** This is the rule v1.7.7 exists for.
          *
@@ -245,7 +258,13 @@ final class AudibleSpectrumTap {
             return .success(sampleRate)
         }
         detach()
-        guard let track = Self.audioTrack(of: item) else {
+        /*
+         * The track is handed in rather than looked up here (v1.9.1): the lookup is asynchronous,
+         * and doing it inside `attach` would either make this whole install asynchronous for no
+         * reason or — as it was until v1.9.1 — block the main thread in the deprecated synchronous
+         * accessor while the new stream is being fetched.
+         */
+        guard let track else {
             return .failure(.failure("the audible player has no loaded audio track yet"))
         }
         /*
@@ -327,6 +346,12 @@ final class AudibleSpectrumTap {
         guard self.item === item, let tap else { return false }
         guard let processor = item.audioMix?.inputParameters.first?.audioTapProcessor else { return false }
         return processor === tap
+    }
+
+    /// Whether this tap is already on `item` — the readiness test `install` uses, so an item whose
+    /// own track list is not built yet is still *verified* rather than re-tapped (v1.9.1).
+    func isTapped(_ item: AVPlayerItem) -> Bool {
+        carriesOurTap(item)
     }
 
     /**
@@ -676,7 +701,8 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "start", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "bands", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "bands", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "configureBuffer", returnType: CAPPluginReturnPromise)
     ]
 
     /// The asset id `src/player/native.ts` loads every track under.
@@ -707,29 +733,41 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
             }
             self.generation += 1
             let generation = self.generation
-            self.install(call: call, player: audible.player, assetId: audible.assetId, requested: requested, generation: generation, waited: 0)
+            /*
+             * v1.9.1: the wait for the item's audio track is *awaited* off the main thread rather
+             * than retried on it, and the readiness test is asynchronous with it. The retry loop is
+             * kept — an item that has just been created genuinely has no track list for a moment —
+             * but every step of it yields the main thread instead of holding it, which is what put
+             * the new stream's cold fetch in front of the play call that was waiting on it.
+             */
+            Task { [weak self] in
+                await self?.install(call: call, player: audible.player, assetId: audible.assetId, requested: requested, generation: generation, waited: 0)
+            }
         }
     }
 
     /// Attach as soon as the player's item has an audio track, giving up after a few attempts.
-    private func install(call: CAPPluginCall, player: AVPlayer, assetId: String, requested: URL?, generation: Int, waited: Double) {
+    private func install(call: CAPPluginCall, player: AVPlayer, assetId: String, requested: URL?, generation: Int, waited: Double) async {
         guard generation == self.generation else {
             call.reject("a newer spectrum request superseded this one")
             return
         }
-        if let item = player.currentItem, AudibleSpectrumTap.audioTrack(of: item) != nil {
-            switch spectrum.attach(to: item, player: player, requestedUrl: requested) {
-            case .success(let sampleRate):
-                call.resolve([
-                    "started": true,
-                    "sampleRate": sampleRate,
-                    "bandCount": AudibleSpectrumTap.bandCount,
-                    "tapped": assetId
-                ])
-            case .failure(let error):
-                call.reject(error.errorDescription ?? "the spectrum could not be tapped onto the audible player")
+        if let item = player.currentItem {
+            let track = await AudibleSpectrumTap.audioTrack(of: item)
+            if track != nil || spectrum.isTapped(item) {
+                switch spectrum.attach(to: item, track: track, player: player, requestedUrl: requested) {
+                case .success(let sampleRate):
+                    call.resolve([
+                        "started": true,
+                        "sampleRate": sampleRate,
+                        "bandCount": AudibleSpectrumTap.bandCount,
+                        "tapped": assetId
+                    ])
+                case .failure(let error):
+                    call.reject(error.errorDescription ?? "the spectrum could not be tapped onto the audible player")
+                }
+                return
             }
-            return
         }
         guard waited < AudibleSpectrumTap.trackWaitSeconds else {
             call.reject(player.currentItem == nil
@@ -737,13 +775,8 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
                 : "the audible player has not loaded an audio track yet, so there is nothing to tap")
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self else {
-                call.reject("the spectrum plugin is gone")
-                return
-            }
-            self.install(call: call, player: player, assetId: assetId, requested: requested, generation: generation, waited: waited + 0.1)
-        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        await install(call: call, player: player, assetId: assetId, requested: requested, generation: generation, waited: waited + 0.1)
     }
 
     /// Stop analysing. The audio that is heard is untouched — this has never owned it.
@@ -774,16 +807,55 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     @objc func bands(_ call: CAPPluginCall) {
         call.resolve(spectrum.snapshot())
     }
+
+    /**
+     * Aim the audible item at a forward buffer of `seconds` (v1.9.2).
+     *
+     * *"play as soon as ~5 seconds of audio are buffered, then keep filling behind it"* is the
+     * owner's request, and `AVPlayerItem.preferredForwardBufferDuration` is the only lever
+     * AVFoundation gives for it. Nothing set it anywhere: the player was left to fill as much as it
+     * could and to decide for itself when it had enough, which is why a track could take a minute
+     * on his link before a note was heard.
+     *
+     * It is here rather than in the audio vendor's plugin because it is *our* plugin that can reach
+     * the audible player (see `AudibleBridgePlayer`, the same reflective, read-only lookup the tap
+     * uses) — the vendor exposes no API for buffer policy. This changes a number on an item that is
+     * already playing; it does not start, stop, seek or reconfigure anything, so it cannot make a
+     * sound. Called after every load's play and after every adoption, because the item that is
+     * audible changes at both.
+     */
+    @objc func configureBuffer(_ call: CAPPluginCall) {
+        let seconds = call.getDouble("seconds") ?? 5
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                call.reject("the spectrum plugin is gone")
+                return
+            }
+            guard let audible = AudibleBridgePlayer.find(from: self.bridge), let item = audible.player.currentItem else {
+                // No audible item yet (a cold start, or the lookup failed): the player keeps its
+                // own policy, which is exactly what every build before this one had.
+                call.resolve(["buffered": false])
+                return
+            }
+            item.preferredForwardBufferDuration = max(1, seconds)
+            call.resolve(["buffered": true, "seconds": item.preferredForwardBufferDuration, "assetId": audible.assetId])
+        }
+    }
 }
 
 /**
  * Reading the audible player off the audio plugin, read-only.
  *
  * The plugin keeps its assets in an internal `[assetId: AudioAsset]` and the `AVPlayer`s of a remote
- * asset in an internal `players` array. Neither is `@objc`-visible, so `Mirror` is the way in. The
- * asset this app plays under is preferred; failing that, any asset whose player is actually playing,
- * then any asset holding an item — which keeps the lookup working if the plugin renames or restages
- * its storage.
+ * asset in an internal `players` array. Neither is `@objc`-visible, so `Mirror` is the way in.
+ *
+ * **Which asset is audible is the plugin's own answer** (v1.9.1). The queue now holds two assets at
+ * once — one audible, one prepared and silent — and the audible one is no longer always the name
+ * this app was written against: at a track boundary the prepared asset is adopted and the two names
+ * are swapped. Preferring the fixed name would then hand back the *silent* player. So the order is
+ * the plugin's `currentlyPlayingAssetId`, then a player that is actually playing, then the fixed
+ * name, then any asset holding an item — which keeps the lookup working if the plugin renames or
+ * restages its storage.
  */
 enum AudibleBridgePlayer {
     static func find(from bridge: CAPBridgeProtocol?) -> (player: AVPlayer, assetId: String)? {
@@ -791,8 +863,8 @@ enum AudibleBridgePlayer {
         var fallback: (player: AVPlayer, assetId: String)?
         for child in Mirror(reflecting: plugin).children where child.label == "audioList" {
             guard let assets = child.value as? [String: Any] else { continue }
-            if let value = assets[NaviliteSpectrum.audibleAssetId] {
-                if let player = players(of: value).first { return (player, NaviliteSpectrum.audibleAssetId) }
+            if let named = currentlyPlaying(from: plugin), let value = assets[named], let player = players(of: value).first {
+                return (player, named)
             }
             for (assetId, value) in assets {
                 for player in players(of: value) where player.currentItem != nil {
@@ -800,8 +872,24 @@ enum AudibleBridgePlayer {
                     if fallback == nil { fallback = (player, assetId) }
                 }
             }
+            if let value = assets[NaviliteSpectrum.audibleAssetId], let player = players(of: value).first {
+                return (player, NaviliteSpectrum.audibleAssetId)
+            }
         }
         return fallback
+    }
+
+    /**
+     * The asset id the plugin itself is playing (`NativeAudio.play` sets it), read reflectively.
+     *
+     * This is the one answer that cannot be confused by the two-slot queue: it is the plugin's own
+     * record of which asset it sent to the speakers, not a name this app assumed.
+     */
+    private static func currentlyPlaying(from plugin: Any) -> String? {
+        for child in Mirror(reflecting: plugin).children where child.label == "currentlyPlayingAssetId" {
+            if let id = child.value as? String, !id.isEmpty { return id }
+        }
+        return nil
     }
 
     /// The `players` array of a remote audio asset, read reflectively.

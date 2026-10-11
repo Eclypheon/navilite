@@ -41,6 +41,11 @@ fi
 
 cd "${ROOT}/ios/App"
 
+# The vendor's own sources are patched before the build (v1.9.2): the precise-duration flag that
+# makes AVFoundation read the whole file for a duration this app never uses, and the Android buffer
+# policy, are not reachable from JavaScript. Fails loudly if an anchor has moved.
+node "${ROOT}/tools/patch-native-audio.mjs"
+
 # Incremental xcodebuild does not remove bundle resources that have since disappeared from the
 # source, so a rebuilt dist/ (new hashed asset names) leaves the previous index-*.js inside
 # App.app — and therefore inside the .ipa. Drop the product so the bundle matches dist/ exactly;

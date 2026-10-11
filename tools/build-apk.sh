@@ -37,6 +37,12 @@ case "${VARIANT}" in
 esac
 
 cd "${ROOT}/android"
+
+# The vendor's own sources are patched before the build, not after it (v1.9.2): the buffer policy
+# the owner asked for is not reachable from JavaScript, and a build made from unpatched sources
+# would be a build that silently ignores it. The script fails loudly if an anchor has moved.
+node "${ROOT}/tools/patch-native-audio.mjs"
+
 ./gradlew --no-daemon "${TASK}"
 
 cp "${APK_PATH}" "${OUT}/${NAME}"
