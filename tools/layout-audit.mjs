@@ -653,14 +653,18 @@ export async function runNowChrome(cdp, options) {
     })()`,
   );
   await navigate(cdp, baseUrl);
-  await read(`window.__naviliteLayoutAudit.waitFor('Boolean(window.__navilite && window.__navilite.libraryReady())', 'the library to connect')`);
+  const PATIENCE = 40000;
+  await read(`window.__naviliteLayoutAudit.waitFor('Boolean(window.__navilite && window.__navilite.libraryReady())', 'the library to connect', ${PATIENCE})`);
   await read(`(location.hash = '#/playlist/pl-stress-ja', true)`);
-  await read(`window.__naviliteLayoutAudit.waitFor("document.querySelectorAll('.row.song').length > 0", 'the stress playlist')`);
+  await read(`window.__naviliteLayoutAudit.waitFor("document.querySelectorAll('.row.song').length > 0", 'the stress playlist', ${PATIENCE})`);
   await read('window.__naviliteLayoutAudit.playRow(0)');
-  await read(`window.__naviliteLayoutAudit.waitFor("location.hash === '#/now'", 'the now screen')`);
-  await read(`window.__naviliteLayoutAudit.waitFor("Boolean(document.querySelector('.now-canvas'))", 'the spectrum canvas')`);
+  await read(`window.__naviliteLayoutAudit.waitFor("location.hash === '#/now'", 'the now screen', ${PATIENCE})`);
+  await read(`window.__naviliteLayoutAudit.waitFor("Boolean(document.querySelector('.now-canvas'))", 'the spectrum canvas', ${PATIENCE})`);
   await read('window.__naviliteLayoutAudit.settlePager()');
-  await new Promise((resolve) => setTimeout(resolve, 900));
+  // A route that has been walked is not always a route that has painted: the album art and the
+  // spectrum arrive after it, and the readings below are about the boxes they end up in.
+  await read(`window.__naviliteLayoutAudit.waitFor("(() => { const el = document.querySelector('.now-cover > *'); return el && el.naturalWidth > 0; })()", 'the album art', ${PATIENCE})`);
+  await new Promise((resolve) => setTimeout(resolve, 1200));
 
   const geometry = await read(`(() => {
     const box = (selector) => {
@@ -710,39 +714,91 @@ export async function runNowChrome(cdp, options) {
   const centre = geometry.progress.input.top + geometry.progress.input.height / 2;
   const x = Math.round(geometry.progress.input.x);
   const clock = `(() => { const e = window.__naviliteMediaElement; return e ? Math.round(e.currentTime * 1000) / 1000 : null; })()`;
+  /** The middle of the track, not its end: seeking to the last tenth rolls the queue on. */
+  const rewind = `window.__naviliteLayoutAudit.seekAudio((window.__naviliteMediaElement ? window.__naviliteMediaElement.duration : 20) * 0.3)`;
+
+  /*
+   * The one thing the tall target could have cost: its lower half reaches into the transport row's
+   * box, and a row that answered for its whole area would have stolen it. The container is
+   * `pointer-events: none` and the buttons `auto`, so a finger on the play button must still land on
+   * the button. Read here, straight after the geometry and before any gesture, so the screen being
+   * measured is the screen being hit-tested.
+   */
+  const transportHit = await read(
+    `(() => {
+      const all = Array.from(document.querySelectorAll('.now-bar .transport.big'));
+      const boxes = all.map((el) => { const r = el.getBoundingClientRect(); return { tag: el.tagName, cls: String(el.className), w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top) }; });
+      const button = all.find((el) => el.getBoundingClientRect().width > 0);
+      if (!button) return { error: 'no play button with a box in the transport row', matches: boxes, route: location.hash };
+      const r = button.getBoundingClientRect();
+      const x = Math.round(r.left + r.width / 2);
+      const y = Math.round(r.top + r.height / 2);
+      const el = document.elementFromPoint(x, y);
+      if (!el) return { error: 'nothing at the play button centre', x: x, y: y, matches: boxes, route: location.hash };
+      const owner = el.closest ? el.closest('button') : null;
+      /* An SVG's className is an object, not a string: read the base value when there is one. */
+      const name = el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className;
+      return {
+        x: x,
+        y: y,
+        matches: boxes,
+        route: location.hash,
+        selector: name ? String(name).split(' ')[0] : el.tagName,
+        button: owner ? (owner.getAttribute('aria-label') || String(owner.className)) : null,
+        insideBar: !!(el.closest && el.closest('.now-bar')),
+      };
+    })()`,
+  );
 
   // Nothing is playing while the gestures run: the clock would otherwise drift under them, and a
   // drift is not a seek.
   await read('window.__naviliteLayoutAudit.pauseAudio()');
-  await read('window.__naviliteLayoutAudit.seekAudio(20)');
+  await read(rewind);
   await new Promise((resolve) => setTimeout(resolve, 300));
 
   const gestureAt = async (dy, how) => {
-    const y = Math.round(centre + dy);
-    const under = await read(
-      `(() => { const el = document.elementFromPoint(${x}, ${y}); if (!el) return null; return el.classList && el.classList.contains('progress') ? 'the seek bar' : (el.className && String(el.className).split(' ')[0]) || el.tagName; })()`,
-    );
+    /*
+     * The point and the element under it are read in *one* expression, so they belong to one layout:
+     * a read taken earlier can be a read of a screen the album art has since pushed down, and a
+     * finger aimed at where the bar *was* proves nothing about where it is.
+     */
+    const spot = await read(`(() => {
+      const input = document.querySelector('.now-progress .progress');
+      const r = input.getBoundingClientRect();
+      const x = Math.round(r.left + r.width * 0.35);
+      const y = Math.round(r.top + r.height / 2 + (${dy}));
+      const el = document.elementFromPoint(x, y);
+      const name = el && el.className && el.className.baseVal !== undefined ? el.className.baseVal : (el ? el.className : null);
+      return { x: x, y: y, under: el ? (el.classList && el.classList.contains('progress') ? 'the seek bar' : (name ? String(name).split(' ')[0] : el.tagName)) : null };
+    })()`);
+    const { x: atX, y: atY, under } = spot;
     const before = await read(clock);
     if (how === 'tap') {
       for (const type of ['mousePressed', 'mouseReleased']) {
-        await cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, pointerType: 'mouse' });
+        await cdp.send('Input.dispatchMouseEvent', { type, x: atX, y: atY, button: 'left', clickCount: 1, pointerType: 'mouse' });
       }
     } else {
-      await read(`window.__naviliteLayoutAudit.fingerDrag({ from: { x: ${x}, y: ${y} }, to: { x: ${x + 80}, y: ${y} }, steps: 4, gapMs: 10 })`);
+      await read(`window.__naviliteLayoutAudit.fingerDrag({ from: { x: ${atX}, y: ${atY} }, to: { x: ${atX + 80}, y: ${atY} }, steps: 4, gapMs: 10 })`);
     }
+    /*
+     * The seek is throttled to one round trip per 120 ms and the last position is committed on
+     * release, so the clock moves a moment after the finger does — and under a loaded machine (this
+     * check runs beside the pager's, which drives its own Chrome) that moment is longer than the
+     * 120 ms it is on an idle one. Bounded, and generous.
+     */
     let after = before;
-    for (let i = 0; i < 5; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
+    for (let i = 0; i < 14; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
       after = await read(clock);
       if (after !== null && before !== null && Math.abs(after - before) > 0.05) break;
     }
     const seeked = before !== null && after !== null && Math.abs(after - before) > 0.05;
     if (seeked) {
       // put it back, so the next probe starts from the same clock
-      await read('window.__naviliteLayoutAudit.seekAudio(20)');
+      await read(rewind);
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    return { dy, y, under, before, after, seeked };
+    return { dy, y: atY, under, before, after, seeked, route: await read('location.hash') };
   };
 
   const gestures = {
@@ -751,24 +807,6 @@ export async function runNowChrome(cdp, options) {
     above: await gestureAt(DRAG_OFFSETS.insideTheTarget, 'drag'),
     text: await gestureAt(DRAG_OFFSETS.onTheTrackText, 'drag'),
   };
-  /*
-   * v1.8.1 gives the transport row's *container* `pointer-events: none` so that it cannot swallow
-   * the lower part of the seek bar's 44 px target, which overflows into it. The buttons inside keep
-   * `auto`; this is the reading that says so.
-   */
-  const transportBox = geometry.transport;
-  const playX = Math.round(transportBox.left + transportBox.width / 2);
-  const playY = Math.round(transportBox.top + transportBox.height / 2);
-  const transportHit = await read(
-    `(() => {
-      const el = document.elementFromPoint(${playX}, ${playY});
-      if (!el) return null;
-      const button = el.closest ? el.closest('button') : null;
-      /* An SVG's className is an object, not a string: read the base value when there is one. */
-      const name = el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className;
-      return { selector: name ? String(name).split(' ')[0] : el.tagName, button: button ? (button.getAttribute('aria-label') || String(button.className)) : null, insideBar: !!(el.closest && el.closest('.now-bar')) };
-    })()`,
-  );
   return { geometry, gestures, transportHit, centre, x, chrome: chromeBands(geometry) };
 }
 
@@ -837,7 +875,9 @@ export function judgeNowChrome(reading) {
   checks.push({
     label: 'the transport buttons still own every tap they had',
     ok: !!reading.transportHit?.button && reading.transportHit?.insideBar === true,
-    detail: `a finger at the centre of the play button lands on ${reading.transportHit?.selector ?? 'nothing'}, inside ${reading.transportHit?.button ?? 'no button'} in the transport row: ${reading.transportHit?.insideBar === true}`,
+    detail: reading.transportHit?.error
+      ? `${reading.transportHit.error} — matches ${JSON.stringify(reading.transportHit.matches)} on ${reading.transportHit.route}`
+      : `a finger at the centre of the play button (${reading.transportHit?.x}, ${reading.transportHit?.y}) lands on ${reading.transportHit?.selector ?? 'nothing'}, inside ${reading.transportHit?.button ?? 'no button'} in the transport row: ${reading.transportHit?.insideBar === true}`,
   });
   return checks;
 }
