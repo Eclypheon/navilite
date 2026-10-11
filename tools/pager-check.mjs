@@ -34,9 +34,11 @@
  *      the finger down**, which is the point of their living outside the strip; and the lyric
  *      highlight still advances mid-drag.
  *   8. **History** walks the panes (the owner's "optional but nice").
- *   9. **The seek bar owns its own drag** (v1.7.1). A finger that starts on the bar and travels most
- *      of the screen must seek the track and move no pane — the owner could not drag it at all,
- *      because the gesture was being read as a page turn.
+ *   9. **The seek bar owns its own drag** (v1.7.1, tightened in v1.7.4). A finger that starts on the
+ *      bar and travels most of the screen must seek the track and move no pane — the owner could not
+ *      drag it at all. v1.7.4 adds what a tap-vs-drag report needs: the bar's own value is read with
+ *      the finger *still down* and must track it (a fifth of the bar → four fifths), and the track
+ *      must be left at that proportion of its length, not merely "somewhere else".
  *  10. **The lyrics follow** leads by one line, never scrolls past the end of the song, and leaves a
  *      hand scroll alone for a few seconds — and the first line is not in the panel's faded band,
  *      which is the v1.5 clipping report.
@@ -75,6 +77,8 @@ const root = join(here, '..');
 
 const IN_PAGE = 'window.__naviliteLayoutAudit.';
 const GEOMETRY = `${IN_PAGE}nowGeometry()`;
+/** What the seek bar itself says, so a drag can be judged on the bar's own number. */
+const SEEK_VALUE = `Number(document.querySelector('.now-progress .progress').value)`;
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const near = (a, b, tolerance) => Math.abs(a - b) <= tolerance;
 const pagerOf = (geometry) => (geometry && geometry.pager) || null;
@@ -105,7 +109,16 @@ async function drag(cdp, { fromX, toX, y, steps = 5, stepDelayMs = 24, afterRele
     // `sampleEvery: 0` reads the geometry at the last move only: reading between moves costs a round
     // trip, which would slow the gesture down and hide the velocity a flick is made of.
     if (sampleEvery === 0 ? step === steps : step % sampleEvery === 0) {
-      samples.push({ x: Math.round(x), geometry: await evaluate(cdp, GEOMETRY) });
+      samples.push({
+        x: Math.round(x),
+        geometry: await evaluate(cdp, GEOMETRY),
+        // The bar's own value, read with the finger still down: v1.7.4 is judged on this, because
+        // "the drag seeks" means the value followed the finger *during* the gesture, not that a
+        // release happened to land somewhere. Not read on the `sampleEvery: 0` path: that one exists
+        // to time a flick down to the millisecond, and a round trip before the release is exactly
+        // what it is avoiding.
+        value: sampleEvery === 0 ? null : await evaluate(cdp, SEEK_VALUE),
+      });
     }
   }
   await touch(cdp, 'touchEnd', 0, 0);
@@ -430,6 +443,14 @@ async function main() {
        */
       const bar = atSpectrum.progress;
       if (!bar) throw new Error('the seek bar is not in the now screen geometry');
+      /*
+       * From a known early position, on purpose. A 20-second track that has been playing for the
+       * length of this run can already be sitting where an 80 % drag lands, and then "the position
+       * moved" is a claim about nothing — the first run of v1.7.4's check failed on exactly that.
+       * Two seconds in, a drag to four fifths of the bar is a sixteen-second move.
+       */
+      await evaluate(cdp, `${IN_PAGE}seekAudio(2)`);
+      await wait(300);
       const positionBefore = await evaluate(cdp, `window.__navilite.status().positionMs`);
       /*
        * The pane the screen is resting on is the baseline, not zero: a rest on the spectrum leaves
@@ -474,11 +495,33 @@ async function main() {
         `pose at rest ${restingPose} · pose during the drag ${[...new Set(posesWhileSeeking)].join(' / ')} · ` +
           `after: pane ${afterSeek.pane} on ${afterSeek.route}`,
       );
+      /*
+       * The proof is the *proportion*, not the distance travelled (v1.7.4).
+       *
+       * A tap already seeked, so "the position moved" proves nothing about dragging — and the old
+       * check here asked only that it moved by more than three seconds, which a *tap* at the far end
+       * of a 20-second track satisfies whenever the track happens to be playing near that end. The
+       * finger goes from a fifth of the bar to four fifths of it, so the track must be left at four
+       * fifths of its length — and, because this is the whole of the owner's report, the bar must
+       * have been saying so *while the finger was still down*.
+       */
+      const valuesWhileDown = seekDrag.samples.map((sample) => sample.value);
       check(
-        'and the same drag seeks the track where the finger went',
-        Math.abs(afterSeek.positionMs - positionBefore) > 3000 && afterSeek.value > 500,
-        `position ${Math.round(positionBefore / 1000)}s → ${Math.round(afterSeek.positionMs / 1000)}s ` +
-          `(slider at ${afterSeek.value}/1000 of ${Math.round(afterSeek.durationMs / 1000)}s, thumb released at 80 % of the bar)`,
+        'the bar follows the finger while the drag is still happening',
+        valuesWhileDown.length >= 5 &&
+          valuesWhileDown.every((value) => typeof value === 'number') &&
+          valuesWhileDown.every((value, index) => index === 0 || value >= valuesWhileDown[index - 1]) &&
+          Math.abs(valuesWhileDown[valuesWhileDown.length - 1] - 800) <= 60,
+        `bar value while the finger was down: ${valuesWhileDown.join(' → ')} (released at 80 % of the bar)`,
+      );
+      check(
+        'and the drag seeks the track to the proportion it was dragged to',
+        Math.abs(afterSeek.value - 800) <= 60 &&
+          Math.abs(afterSeek.positionMs - (afterSeek.durationMs * afterSeek.value) / 1000) <= 1200 &&
+          Math.abs(afterSeek.positionMs - positionBefore) > 1000,
+        `${Math.round(positionBefore / 1000)} s → ${Math.round(afterSeek.positionMs / 1000)} s ` +
+          `(slider at ${afterSeek.value}/1000 of ${Math.round(afterSeek.durationMs / 1000)} s: expected ` +
+          `${Math.round((afterSeek.durationMs * afterSeek.value) / 1_000_000)} s)`,
       );
       // Put the track back where it was: the checks that follow walk the lyrics from a known
       // position, and a track parked at 80 % of its length is a different walk.

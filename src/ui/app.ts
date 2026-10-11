@@ -181,6 +181,7 @@ export async function boot(root: HTMLElement): Promise<void> {
 
   const shell = buildShell(root);
   const visualizer = attachVisualizer(shell.canvas, engine, DEFAULT_PALETTE);
+  visualizerRef = visualizer;
 
   const lyrics = new LyricsService(
     new LyricsCache(),
@@ -207,8 +208,8 @@ export async function boot(root: HTMLElement): Promise<void> {
 
   const applyPalette = (palette: Palette): void => {
     ctx.palette = palette;
+    // The canvas is a consumer of the same palette, applied in the same call — see `applyPaletteVars`.
     applyPaletteVars(shell, palette);
-    visualizer.setPalette(palette);
   };
   applyPalette(DEFAULT_PALETTE);
 
@@ -911,6 +912,22 @@ function setNowMode(mode: NowMode): void {
  * moved — the seek was happening, and the screen said nothing about it. `shell.scrubMs` is the
  * destination: written on every move, by whichever of the two bars is being dragged, and cleared on
  * release (which commits it) or on cancel (which does not, and puts the real position back).
+ *
+ * v1.7.4 — *"seek bar doesn't work on drag nothing happens but tapping does let me seek"*, and v1.7.3
+ * shipped a bar whose drag was still the *platform's*. Everything v1.7.1 did made the gesture reach
+ * the control (the pager refuses it by name and by hit-test, `touch-action: none` keeps the platform
+ * from reading it as a pan) — and then the control's own slider behaviour was the only thing that
+ * could turn the movement into a value. In the installed app it evidently never ran: nothing was
+ * written, so nothing was seeked, while a tap still jumped the thumb because that is a `click` the
+ * control answers on its own. That is exactly the shape of his report, and a tap-vs-drag difference
+ * cannot be seen from a test that only taps.
+ *
+ * So the bar drives itself now. `pointerdown` on it captures the pointer and takes the value from
+ * the finger's own x over the bar's own box (`msAtX`), one write per `pointermove`, committing
+ * through the same throttle as before; `dragging` silences the `input` listener for the length of
+ * the gesture, so the platform's slider — if it also runs — cannot write a second, relative answer
+ * under us. Nothing that used to work is lost: with no pointer events at all, `dragging` never goes
+ * true and the `input`/`change` path below is still the whole implementation.
  */
 const SEEK_INTERVAL_MS = 120;
 
@@ -918,6 +935,9 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
   let lastSeekAt = 0;
   let pendingMs: number | null = null;
   let trailing: ReturnType<typeof setTimeout> | null = null;
+  /** True from the moment a finger lands on the bar until the gesture ends: we are the writer. */
+  let dragging = false;
+  let pointerId: number | null = null;
 
   const durationOf = (): number => queueDurationMs(getQueue());
   const valueMs = (): number => (Number(input.value) / 1000) * durationOf();
@@ -926,6 +946,22 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
     const queue = getQueue();
     if (!queue || ms < 0) return;
     void queue.seek(ms);
+  };
+
+  /**
+   * Where a finger at this x is, in ms: the bar's own box, measured where the finger is.
+   *
+   * Absolute, not relative to the grab point, because the thumb on a seek bar is a position and not
+   * a knob to push — the same reading a tap has always had, which is the one thing on this control
+   * that was already working.
+   */
+  const msAtX = (clientX: number): number => {
+    const duration = durationOf();
+    if (duration <= 0) return 0;
+    const rect = input.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    return fraction * duration;
   };
 
   /** The label, written from the finger: both bars show the same destination, wherever it was dragged. */
@@ -973,12 +1009,8 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
     refreshSeekLabels();
   };
 
-  input.addEventListener('pointerdown', begin);
-  input.addEventListener('touchstart', begin, { passive: true });
-  input.addEventListener('input', () => {
-    const duration = durationOf();
-    if (duration <= 0) return;
-    const ms = valueMs();
+  /** The label and the seek, from one number — whichever of the two paths produced it. */
+  const applyMs = (ms: number): void => {
     input.setAttribute('aria-valuetext', formatTime(ms / 1000));
     // The number under the thumb moves on every frame of the drag, whether or not a seek is sent.
     showDestination(ms);
@@ -1000,12 +1032,92 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
       pendingMs = null;
       if (queued !== null) commit(queued);
     }, SEEK_INTERVAL_MS);
+  };
+
+  /** The finger's own reading of the bar: write the position, then show it and commit it. */
+  const write = (clientX: number): void => {
+    const duration = durationOf();
+    if (duration <= 0) return;
+    const ms = msAtX(clientX);
+    input.value = String(Math.round((ms / duration) * 1000));
+    applyMs(ms);
+  };
+
+  const release = (id: number | null): void => {
+    if (id !== null && typeof input.releasePointerCapture === 'function') {
+      try {
+        input.releasePointerCapture(id);
+      } catch {
+        // The capture is already gone (the platform took the gesture back). Nothing to release.
+      }
+    }
+    dragging = false;
+    pointerId = null;
+  };
+
+  const onPointerDown = (event: PointerEvent): void => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    /*
+     * The gesture is the bar's from here, and it is the bar that will write the value.
+     *
+     * Capture, so every move of this finger reaches the bar even after it travels off the bar's own
+     * box (a drag that leaves the control must keep seeking, not silently stop), and `preventDefault`
+     * so the platform's own slider does not begin a second, relative drag underneath ours. Both
+     * writers running is precisely the "nothing happens" this is fixing.
+     */
+    dragging = true;
+    pointerId = event.pointerId;
+    begin();
+    if (typeof input.setPointerCapture === 'function') {
+      try {
+        input.setPointerCapture(event.pointerId);
+      } catch {
+        // No capture available: moves inside the box still arrive, and the `input` path below is
+        // still armed for the ones that do not.
+      }
+    }
+    if (event.cancelable) event.preventDefault();
+    write(event.clientX);
+  };
+
+  const onPointerMove = (event: PointerEvent): void => {
+    if (!dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
+    if (event.cancelable) event.preventDefault();
+    write(event.clientX);
+  };
+
+  const onPointerUp = (event: PointerEvent): void => {
+    if (!dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
+    release(pointerId);
+    finish();
+  };
+
+  const onPointerCancel = (): void => {
+    if (!dragging) return;
+    release(pointerId);
+    cancel();
+  };
+
+  input.addEventListener('pointerdown', onPointerDown);
+  input.addEventListener('pointermove', onPointerMove);
+  input.addEventListener('pointerup', onPointerUp);
+  input.addEventListener('pointercancel', onPointerCancel);
+  input.addEventListener('touchstart', begin, { passive: true });
+  input.addEventListener('input', () => {
+    // Our own drag is the writer for the length of the gesture; a second writer is the bug.
+    if (dragging) return;
+    if (durationOf() <= 0) return;
+    applyMs(valueMs());
   });
-  input.addEventListener('change', finish);
-  input.addEventListener('pointerup', finish);
-  input.addEventListener('pointercancel', cancel);
-  input.addEventListener('touchend', finish, { passive: true });
-  input.addEventListener('touchcancel', cancel, { passive: true });
+  input.addEventListener('change', () => {
+    if (!dragging) finish();
+  });
+  input.addEventListener('touchend', () => {
+    if (!dragging) finish();
+  }, { passive: true });
+  input.addEventListener('touchcancel', () => {
+    if (!dragging) cancel();
+  }, { passive: true });
 }
 
 function queueDurationMs(queue: PlaybackQueue | null): number {
@@ -1021,7 +1133,27 @@ function applyPaletteVars(shell: Shell, palette: Palette): void {
   document.documentElement.style.setProperty('--accent-primary', palette.primary);
   document.documentElement.style.setProperty('--accent-secondary', palette.secondary);
   document.documentElement.style.setProperty('--accent-tertiary', palette.accent);
+  /*
+   * v1.7.4 — the canvas is a consumer of the palette, right here, in the same call.
+   *
+   * The owner: *"the colors are also not matching the album art theme it seems to just be one blue
+   * color no matter what"*. There was one palette function (`syncPalette`) and it reached the
+   * visualiser through a path of its own (`applyPalette` in `boot`), while the palette the rest of
+   * the UI wears is written *here* — and this function is called from the cold start, from a fresh
+   * sign-in and from the settings screen, which is one path too many for the two to stay in step.
+   * Painting the bars from the same function that paints the variables makes the two the same
+   * palette by construction: there is no longer a route that can colour the UI and not the
+   * spectrum. `setPalette` rebuilds the bar colours once (never per frame), so a track change
+   * recolours the spectrum with nothing in the frame loop to recompute.
+   */
+  visualizerRef?.setPalette(palette);
 }
+
+/**
+ * The one visualiser this app has, so the palette above can reach it without threading a handle
+ * through every sign-in path.
+ */
+let visualizerRef: ReturnType<typeof attachVisualizer> | null = null;
 
 /* ------------------------------------------------------------------- state */
 

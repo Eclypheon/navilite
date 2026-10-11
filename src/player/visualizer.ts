@@ -7,9 +7,9 @@
  *   spectrum — real frames from the engine that is playing, drawn as log-spaced bands:
  *              `getByteFrequencyData()` frames on the web path, the 64 bands of the native
  *              audio tap (`NaviliteSpectrum.swift`) in the installed app.
- *   theme    — a slow, smooth album-art-coloured animation, used when there are no
- *              samples to show (tainted stream, suspended audio context, a build with
- *              no tap on its native player). It moves to its own clock, not to the
+ *   theme    — a slow, smooth album-art-coloured animation, used when there is **no track
+ *              loaded at all**: a build with no tap on its native player, a suspended audio
+ *              context, a stream that cannot be read. It moves to its own clock, not to the
  *              music, because there is no music data to move to.
  *
  * The band edges are logarithmic over the lower ~60% of the analyser's bins, which is
@@ -20,25 +20,37 @@
  * the engine's 10 Hz meter buffer, no per-frame allocations, a ResizeObserver instead of a
  * per-frame `clientWidth` read).
  *
- * v1.2 makes each bar *only the current frame* — that is the whole rule, and everything that
- * carried a memory of an earlier frame is gone:
+ * v1.2 made each bar *only the current frame*, and everything that carried a memory of an
+ * earlier frame is still gone: no peak caps, no fixed release ballistics, no vertical
+ * gradient whose accent stop read as a second colour at the top of every bar, no reflection
+ * under the baseline. What is drawn is one flat rectangle per band.
  *
- *   - the peak caps (`peaks`, drawing a 2 px segment above the bar at 0.9 alpha while the bar
- *     itself was drawn anywhere from 0.55 to 1.0) — that floating, differently-bright segment
- *     is exactly the "after image … separation of the colors at the top of each bar" the owner
- *     reported;
- *   - the release ballistics (`BAR_FALLOFF`, a fixed fraction per frame) — a bar was still
- *     showing the previous frame's level for ~115 ms after the music had moved on;
- *   - the vertical gradient (`secondary → primary → accent`), whose accent stop read as a
- *     second colour at the top of every bar;
- *   - the reflection under the baseline, a second deliberate copy of the bar.
+ * v1.7.4 — the owner, having installed v1.7.3: *"the spectrum now is rather jittery and seems
+ * laggy and the colors are also not matching the album art theme it seems to just be one blue
+ * color no matter what. Pausing should cause the spectrum to gracefully all drop to zero but
+ * the spectrum disappears and it shows the placeholder spectrum instead."* Three changes, and
+ * each one is a rule rather than a tweak:
  *
- * What is left is a flat, single-colour rectangle per band whose height is a pure function of
- * the analyser frame just read. `test/visualizer.test.ts` pins that down: a loud frame then a
- * silent frame collapses to the baseline on the *next* frame, and two identical frames draw
- * byte-identical rectangles. The analyser's own smoothing is off too
- * (`smoothingTimeConstant = 0` in `engine.ts`) — the one memory left in the graph would be the
- * analyser averaging the previous frame into this one.
+ *   1. **The values are smoothed; the bars are not remembered.** A per-band attack/release
+ *      envelope (`attack` fast, `release` to nothing inside half a second) is applied to *this
+ *      frame's* magnitudes. The v1.2 rule stands where it matters — nothing on the canvas is a
+ *      drawing of an earlier frame; the only thing carried across a frame is one number per band,
+ *      and it is a filter on the input, not a copy of the output. A jittery frame now moves the bar
+ *      by a fraction of the jitter, which is what removes the shimmer the owner saw; a silent one
+ *      falls to the baseline over a third of a second instead of snapping, and settles at exactly
+ *      zero.
+ *   2. **The window is drawn at most once per display frame** (`FRAME_MS`), from a timestamp the
+ *      frame callback carries, so a device that fires more often than it can paint does not pay
+ *      for the extra paint — the frame budget is fixed, not the poll rate.
+ *   3. **The bars wear the app's own palette.** `bandFills` is built from the palette once per
+ *      palette (never per frame) as a low→high primary → secondary → accent ramp, so the spectrum
+ *      is the album's colours rather than one flat tone, and `setPalette` — which the app calls
+ *      whenever the track changes — is what re-arms it.
+ *
+ * And the placeholder is for **nothing loaded**, not for paused. When the engine has a track but
+ * hands over no frame (paused, interrupted, ended, or a gap between measurements), the bars fall
+ * to zero on the release envelope and stay on screen; the theme animation only appears when no
+ * track is loaded at all.
  */
 import type { AudioEngine } from './engine.ts';
 import type { Palette } from './palette.ts';
@@ -59,16 +71,40 @@ const CEILING = 0.9;
  * The frame's shape, applied to the band's mean magnitude.
  *
  * A touch above 1 leans on the loud end, which is what makes quiet bands read as quiet instead
- * of as half-height noise. It is a pure function of the current frame — it carries nothing
- * forward, which is the point.
+ * of as half-height noise. It is applied to the *input*, before the envelope.
  */
 const RESPONSE_CURVE = 1.35;
+/**
+ * The frame budget: at most one paint per display frame, whatever rate the callbacks arrive at.
+ */
+const FRAME_MS = 1000 / 60;
+/** A hidden tab hands back a timestamp seconds later; a filter must not be integrated over that. */
+const MAX_STEP_MS = 50;
+/**
+ * The envelope, as time constants rather than per-frame fractions so the motion is the same at
+ * 60 Hz and at 120: a rise reaches ~90 % in `ATTACK_S`, and a drop falls to the `FLOOR` — i.e. to
+ * nothing — in about 460 ms, inside the 250–500 ms the owner asked for on a pause. Slower would
+ * read as a smear; faster would read as the snap he was already complaining about.
+ */
+const ATTACK_S = 0.045;
+const RELEASE_S = 0.1;
+/** Below this the bar is nothing, so the envelope settles at exactly zero rather than at 1 %. */
+const FLOOR = 0.01;
+/**
+ * How close to its destination the envelope has to be for the destination to be its value.
+ *
+ * An exponential only approaches. Without this the same analyser frame would draw a *900th of a
+ * pixel* differently forever, and "two identical frames draw identical rectangles" — the property
+ * that says nothing on the canvas is an after image — would be unprovable rather than true.
+ */
+const SNAP = 1e-3;
 
 export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine, initialPalette: Palette): VisualizerHandle {
   let palette = initialPalette;
   let frame = 0;
   let running = false;
   let startTime = performance.now();
+  let lastDrawnAt = -Infinity;
 
   // Everything below is created once per size/palette, never per frame.
   const ctx = canvas.getContext('2d', { alpha: true });
@@ -76,6 +112,10 @@ export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine,
   let edgesForBins = -1;
   let backdrop: CanvasGradient | null = null;
   let backdropKey = '';
+  /** One colour per bar, low frequency → high, rebuilt only when the palette changes. */
+  let bandFills: string[] = fillsFor(initialPalette);
+  /** The envelope's state: one number per band, and the only thing a frame leaves behind. */
+  const levels = new Float32Array(BAND_COUNT);
 
   const measure = (): void => {
     if (!ctx) return;
@@ -106,9 +146,24 @@ export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine,
     return backdrop;
   };
 
-  const draw = () => {
+  /**
+   * A track is loaded whenever the engine is holding one — paused, interrupted and ended included.
+   *
+   * That is the whole difference between "settle to zero" and "show the placeholder", so it is asked
+   * of the engine rather than inferred from the frames: a paused player hands over no frame, and
+   * reading that as "nothing is loaded" is exactly the bug the owner reported.
+   */
+  const trackLoaded = (): boolean => engine.currentTrack !== null;
+
+  const draw = (timestamp?: number): void => {
     frame = requestAnimationFrame(draw);
     if (!ctx) return;
+    const now = typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : performance.now();
+    const elapsed = now - lastDrawnAt;
+    // The frame budget: a callback that arrives early is not a paint.
+    if (elapsed < FRAME_MS - 0.5) return;
+    lastDrawnAt = now;
+    const step = Math.min(MAX_STEP_MS, Math.max(0, elapsed === Infinity ? FRAME_MS : elapsed)) / 1000;
     const { width, height } = canvas;
     const spectrum = engine.readSpectrum();
 
@@ -119,18 +174,30 @@ export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine,
       ctx.fillRect(0, 0, width, height);
     }
 
-    if (spectrum) drawSpectrum(ctx, width, height, spectrum);
-    else drawTheme(ctx, width, height, palette, (performance.now() - startTime) / 1000);
+    if (spectrum) {
+      drawSpectrum(ctx, width, height, spectrum, step);
+      return;
+    }
+    if (trackLoaded()) {
+      // No frame this time, but a track is loaded: the bars fall to zero and stay put.
+      drawSpectrum(ctx, width, height, null, step);
+      return;
+    }
+    // Nothing loaded: the theme, and the envelope starts from nothing when a track arrives.
+    levels.fill(0);
+    drawTheme(ctx, width, height, palette, (now - startTime) / 1000);
   };
 
   return {
     setPalette(next) {
       palette = next;
+      bandFills = fillsFor(next);
     },
     start() {
       if (running) return;
       running = true;
       startTime = performance.now();
+      lastDrawnAt = -Infinity;
       measure();
       frame = requestAnimationFrame(draw);
     },
@@ -155,41 +222,68 @@ export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine,
     return bandEdges;
   }
 
-  function drawSpectrum(c: CanvasRenderingContext2D, width: number, height: number, spectrum: Uint8Array): void {
-    /*
-     * Two shapes, one drawing: the analyser hands over the FFT's own bins (1024 of them), and the
-     * native tap hands over the 64 bands it already folded them into (`NaviliteSpectrum.swift`
-     * computes the same log spacing this file does, with vDSP). A frame that is already the width of
-     * the canvas is used as-is rather than re-binned — re-binning 64 bands through the log curve
-     * would throw away everything above ~38 and draw a spectrum of a spectrum.
-     */
-    const banded = spectrum.length === BAND_COUNT;
-    const edgesForFrame = banded ? null : edges(spectrum.length);
+  /**
+   * One band's *own* magnitude for this frame, 0..1, before the envelope.
+   *
+   * Two shapes, one reading: the analyser hands over the FFT's own bins (1024 of them), and the
+   * native tap hands over the 64 bands it already folded them into (`NaviliteSpectrum.swift`
+   * computes the same log spacing this file does, with vDSP). A frame that is already the width of
+   * the canvas is used as-is rather than re-binned — re-binning 64 bands through the log curve
+   * would throw away everything above ~38 and draw a spectrum of a spectrum.
+   */
+  function magnitude(spectrum: Uint8Array | null, band: number, banded: boolean, edgesForFrame: number[] | null): number {
+    if (!spectrum) return 0;
+    if (banded) return Math.pow(spectrum[band] / 255, RESPONSE_CURVE);
+    const from = edgesForFrame![band];
+    const to = Math.max(from + 1, edgesForFrame![band + 1]);
+    let sum = 0;
+    for (let bin = from; bin < to && bin < spectrum.length; bin += 1) sum += spectrum[bin];
+    return Math.pow(sum / (to - from) / 255, RESPONSE_CURVE);
+  }
+
+  function drawSpectrum(c: CanvasRenderingContext2D, width: number, height: number, spectrum: Uint8Array | null, step: number): void {
+    const banded = spectrum !== null && spectrum.length === BAND_COUNT;
+    const edgesForFrame = spectrum !== null && !banded ? edges(spectrum.length) : null;
     const gap = Math.max(1, width / BAND_COUNT / 6);
     const bandWidth = width / BAND_COUNT - gap;
     const baseline = height * BASELINE;
     const ceiling = height * CEILING;
-    // One colour and one alpha for the whole frame, set once. Nothing per bar can differ from
-    // its neighbours except its height, so nothing can read as a second segment or a ghost of
-    // where the bar used to be.
-    c.fillStyle = palette.primary;
+    const rise = 1 - Math.exp(-step / ATTACK_S);
+    const fall = 1 - Math.exp(-step / RELEASE_S);
     c.globalAlpha = 1;
 
     for (let band = 0; band < BAND_COUNT; band += 1) {
-      let magnitude: number;
-      if (banded) {
-        magnitude = Math.pow(spectrum[band] / 255, RESPONSE_CURVE);
-      } else {
-        const from = edgesForFrame![band];
-        const to = Math.max(from + 1, edgesForFrame![band + 1]);
-        let sum = 0;
-        for (let bin = from; bin < to && bin < spectrum.length; bin += 1) sum += spectrum[bin];
-        magnitude = Math.pow(sum / (to - from) / 255, RESPONSE_CURVE);
-      }
-      const barHeight = Math.max(1, magnitude * ceiling);
+      const target = magnitude(spectrum, band, banded, edgesForFrame);
+      const level = levels[band];
+      // Attack is fast, release is slow, and neither is a drawing of the frame before: the
+      // envelope is a filter on this frame's own number.
+      let next = target > level ? level + (target - level) * rise : level + (target - level) * fall;
+      if (Math.abs(target - next) < SNAP) next = target;
+      levels[band] = next < FLOOR ? 0 : next;
+      const barHeight = Math.max(1, levels[band] * ceiling);
+      // One flat colour per band, taken from the palette the rest of the UI is wearing. Set once
+      // per bar and never composited with anything: a bar has no second segment.
+      c.fillStyle = bandFills[band] ?? palette.primary;
       c.fillRect(band * (bandWidth + gap), baseline - barHeight, bandWidth, barHeight);
     }
   }
+}
+
+/**
+ * The bars' colours: a low→high ramp through the palette the app has applied, in three even
+ * stretches — the bass wears `primary`, the mids `secondary`, the top `accent`.
+ *
+ * Built once per palette (never per frame, and never with a canvas call), so every colour on the
+ * spectrum is one of the three the UI itself is using and there is nothing to recompute between
+ * frames.
+ */
+function fillsFor(palette: Palette): string[] {
+  const stops = [palette.primary, palette.secondary, palette.accent];
+  const result: string[] = [];
+  for (let band = 0; band < BAND_COUNT; band += 1) {
+    result.push(stops[Math.min(stops.length - 1, Math.floor((band / BAND_COUNT) * stops.length))]);
+  }
+  return result;
 }
 
 /**

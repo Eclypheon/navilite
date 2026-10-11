@@ -100,3 +100,9 @@ Plain language, user-visible changes only. The app shows this same list under
 - The time follows your finger. Drag the seek bar and the clock under it counts up or down with your thumb, so you can see where you are about to drop the needle before you let go; if the drag is cancelled, the clock goes back to where the music really is.
 - The clock starts when the song does. Picking a track used to sit at 0:00 until the player answered; the time now runs from the moment you tap.
 
+## 1.7.4 — 2026-10-11
+
+- Drag the bar to seek. It took a press and a drag before but only a tap ever moved the track: the bar was leaving the drag to the phone's own slider, and the phone's slider was not doing it. The bar now follows your finger itself, from where you press to where you let go, and the screen stays on the spectrum while you scrub.
+- The visualiser is smoother, and it wears the album's colours. It was reading each frame raw — which is what made it shimmer and lag — so each bar now rises quickly and settles, and the bars take their colour from the album art the rest of the app is already themed with, the bass to the treble, instead of one blue for every song.
+- Pausing lets the spectrum settle. The bars used to disappear and be replaced by the placeholder animation the moment you paused; now they drop to nothing over about a third of a second and stay where they are, and the placeholder is only for when there is nothing loaded at all. The same when a song ends.
+

@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.7.3, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3']);
+test('the changelog is the owner-visible list: v1.0 through v1.7.4, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -63,6 +63,26 @@ test('every v1.7.3 report the owner made is described in his own terms', () => {
   for (const item of v173?.items ?? []) {
     // Invisible plumbing does not belong in his list: no engine names, no state machines.
     assert.doesNotMatch(item, /FFT|vDSP|AVFoundation|ExoPlayer|plugin|analyser|Web Audio|bridge|state machine|WebKit|media element/i);
+  }
+});
+
+test('every v1.7.4 report the owner made is described in his own terms', () => {
+  const v174 = CHANGELOG.find((release) => release.version === '1.7.4');
+  const text = v174?.items.join('\n') ?? '';
+  /*
+   * His four reports off v1.7.3, in the order he made them: a seek bar that only answered a tap, a
+   * spectrum that was jittery and laggy, colours that were "one blue color no matter what" and not
+   * the album art's, and a pause that replaced the spectrum with the placeholder.
+   */
+  assert.match(text, /Drag the bar to seek/, 'his report: dragging the seek bar did nothing');
+  assert.match(text, /smoother/, 'his report: jittery and laggy');
+  assert.match(text, /album's colours/, 'his report: the colours do not match the album art');
+  assert.match(text, /Pausing lets the spectrum settle/, 'his report: the placeholder appearing on pause');
+  // The numbers this release is proved on have to be in the text he reads.
+  assert.match(text, /where you press to where you let go/, 'the dragged proportion, in his terms');
+  assert.match(text, /a third of a second/, 'the release he asked for, in his terms');
+  for (const item of v174?.items ?? []) {
+    assert.doesNotMatch(item, /envelope|pointer|palette|requestAnimationFrame|canvas|filter|hook|state/i);
   }
 });
 
