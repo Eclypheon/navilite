@@ -197,4 +197,14 @@ export const CHANGELOG: ChangelogRelease[] = [
     'Your two red circles and the green one. The pills now sit right under the status bar and the controls right above the home bar — that space was empty, and the spectrum has 35 px of it now (the room taken by everything around it went from 208 px to 173 px on your phone). And the seek bar senses your finger on the bar itself instead of a few pixels above it: the strip you drag is a 44 pt target centred on the line, so 40 px either side of it seeks, where before only the 14 px around the thumb answered. The drag and the tap both work exactly as they did.',
     ],
   },
+  {
+    version: '1.9.0',
+    date: '2026-10-12',
+    items: [
+      'A song that finishes plays the next one again. It had stopped doing that on both the phone and the web page: a track reaching its end only reached the queue through one notification, and when that notification was late or lost the music simply stopped at the end of the song. The player\'s own position at the very end of an item now counts as its end as well, and whichever of the two arrives first moves the list on — exactly once, so nothing is skipped.',
+      'Tapping a song answers immediately. The row you touch, its name, its artist, its cover and a small turning marker are all drawn on the spot, before the app has asked your server for anything at all. It used to sit there showing the previous song for as long as the request took, so on a slow connection the screen looked dead for seconds.',
+      'The next song is brought over while the current one is playing. The opening of the track after the one you are hearing is already on its way before you get to it, so moving on does not start from nothing. If you change your mind quickly, the track you left behind stops downloading straight away and only the one you chose has anything in flight.',
+      'Mobile data gets a smaller stream, and it tells you so. Over a connection that is not your home wifi the app asks your server to send a smaller version of the song instead of the full-size original — the bar shows the number while it is doing that — because asking for the original over a relay makes it wait. It starts modest on a connection it has not measured yet, raises the number when it has measured the connection doing better, and asks for nothing smaller at all once the link is fast.',
+    ],
+  },
 ];

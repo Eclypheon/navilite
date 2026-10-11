@@ -1181,6 +1181,46 @@ img {
   font-weight: 600;
 }
 
+/*
+ * ------------------------------------------------ v1.9.0: the tap's loading state
+ *
+ * The tap paints before any request resolves, and this is the part of that paint that says *"on
+ * it"*: while the engine has not answered, the mark on the row he touched — and the transport on
+ * the bar and the now screen — turns. A screen that is waiting on a link through the relay has to
+ * read as busy; a screen that shows nothing for two seconds reads as dead, which is the report
+ * this release came from.
+ *
+ * The glyph turns rather than the button, because the buttons are pills: a spinning pill looks
+ * exactly like a still one.
+ */
+@keyframes navilite-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.row.song.loading .row-play svg,
+.playerbar.loading .transport svg,
+.now.loading .now-bar .transport svg {
+  animation: navilite-spin 900ms linear infinite;
+}
+
+.row.song.loading .row-play,
+.playerbar.loading .transport,
+.now.loading .now-bar .transport {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* A ring that spins is a ring that hurts some people. The border says the same thing, still. */
+  .row.song.loading .row-play svg,
+  .playerbar.loading .transport svg,
+  .now.loading .now-bar .transport svg {
+    animation: none;
+  }
+}
+
 /* For text that has no spaces to break at — a server URL, a long title in one word. */
 .wrap-anywhere {
   overflow-wrap: anywhere;

@@ -18,6 +18,7 @@ import type { Song, QueueContext, QueueItem } from '../api/types.ts';
 import type { AudioEngine, TrackRequest } from '../player/engine.ts';
 import { updateNowPlaying, updatePlaybackState, updatePositionState, mediaSessionAvailable } from '../player/mediasession.ts';
 import { clearSnapshot, saveSnapshot } from '../storage/session.ts';
+import { ByteRate } from './bitrate.ts';
 import type { Library } from './library.ts';
 
 const SAVE_QUEUE_DEBOUNCE_MS = 5000;
@@ -116,6 +117,12 @@ export class PlaybackQueue {
   private lastSnapshotAt = 0;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private playToken = 0;
+  /** v1.9.0: the tap has painted and the engine has not answered yet. See `select` and `isLoading`. */
+  private loading = false;
+  /** v1.9.0: the one prefetch in flight, and the URL it is pulling (queue-ahead). */
+  private prefetch: { url: string; controller: AbortController } | null = null;
+  /** v1.9.0: what the link has been measured doing. Read by the stream URL and by the player bar. */
+  private readonly rate = new ByteRate();
 
   /** Fired whenever the queue or the current track changes, so the UI can redraw. */
   onChanged: (() => void) | null = null;
@@ -174,14 +181,55 @@ export class PlaybackQueue {
 
   /** Replace the queue and start playing at `startIndex`. */
   async play(items: QueueItem[], startIndex = 0, context: QueueContext | null = null): Promise<void> {
+    this.select(items, startIndex, context);
+    await this.start();
+  }
+
+  /**
+   * Choose the track, and let the screen answer the finger — **synchronously, with no await, no
+   * fetch and no I/O ahead of it** (v1.9.0).
+   *
+   * This is item 2 of the release, and it is a split rather than an optimisation. Until now the
+   * tap went straight into `play()`, which reaches the network on its very first turn: on a slow
+   * link the row, the title, the artist, the artwork and the transport all sat there showing the
+   * *previous* track for as long as the player took to resolve a stream through the relay — the UI
+   * looked dead for seconds. There is no work in here at all: it is a few assignments and one
+   * redraw, so the paint cannot be behind anything.
+   *
+   * `loading` is part of that paint: it is true from this instant until the engine answers, which
+   * is what the row's and the player bar's loading state (and `isLoading`) are drawn from. It is
+   * never true for a tap that has already been superseded — the play token sees to that.
+   */
+  select(items: QueueItem[], startIndex = 0, context: QueueContext | null = null): void {
     this.items = items;
     this.order = identityOrder(items.length);
     this.cursor = Math.min(Math.max(0, startIndex), Math.max(0, items.length - 1));
     this.context = context ?? this.current?.context ?? null;
     if (this.shuffled) this.applyShuffle(this.shuffled);
     this.pendingStartMs = 0;
+    this.loading = true;
+    // Whatever was being buffered for where the listener *was* is not where he is now.
+    this.cancelPrefetch();
     this.onChanged?.();
-    await this.startCurrent();
+  }
+
+  /** True between the tap and the engine answering it. The UI's loading state. */
+  get isLoading(): boolean {
+    return this.loading;
+  }
+
+  /** The measured link, when it has been measured — `null` means "nothing honest to show yet". */
+  get measuredKbps(): number | null {
+    return this.rate.effectiveKbps;
+  }
+
+  /**
+   * The bitrate the next stream will ask for: `null` = the original file, a number = Navidrome
+   * transcodes to it. The player bar shows the number while a cap is in force, so a cap is never
+   * silent (v1.9.0).
+   */
+  get streamKbps(): number | null {
+    return this.rate.maxBitRate;
   }
 
   /**
@@ -235,7 +283,11 @@ export class PlaybackQueue {
 
   /** Start the track the queue is sitting on, at its pending position. The resume path. */
   async start(): Promise<void> {
-    if (!this.current) return;
+    if (!this.current) {
+      this.loading = false;
+      return;
+    }
+    this.loading = true;
     await this.startCurrent();
   }
 
@@ -310,6 +362,8 @@ export class PlaybackQueue {
     this.cursor = -1;
     this.context = null;
     this.pendingStartMs = 0;
+    this.loading = false;
+    this.cancelPrefetch();
     clearSnapshot();
     await this.engine.stop();
     this.onChanged?.();
@@ -357,7 +411,8 @@ export class PlaybackQueue {
     const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
     const request: TrackRequest = {
       id: song.id,
-      url: this.library.streamUrl(song),
+      // The bitrate the link has earned: a measured slow link gets a smaller stream (v1.9.0).
+      url: this.library.streamUrl(song, this.rate.maxBitRate),
       crossOrigin: this.library.crossOrigin,
       title: song.title,
       artist: song.artist ?? 'Unknown artist',
@@ -368,12 +423,59 @@ export class PlaybackQueue {
     this.onChanged?.();
     await this.engine.play(request, startMs);
     if (token !== this.playToken) return;
+    /*
+     * The engine has the stream. The tap is answered, so the loading state comes off with this
+     * same redraw — and the queue-ahead starts here rather than anywhere else, because "the next
+     * track" only means something once the current one is actually the current one.
+     */
+    this.loading = false;
     this.reportNowPlaying(song);
     this.setupMediaSession(song, artworkUrl);
     this.scheduleSaveQueue();
     // A new track, at a known position: the snapshot is written now rather than on the next tick.
     this.persistSnapshot(true);
     this.onChanged?.();
+    this.prefetchNext();
+  }
+
+  /**
+   * Pull the next track's head while this one plays (v1.9.0, queue-ahead).
+   *
+   * Exactly one of these is in flight at any moment, and it is always for the item that follows
+   * the one the listener actually chose — `select` cancels the one that belonged to where he was,
+   * which is what a rapid double tap has to leave behind: no stale fetch, and a single live one.
+   * Nothing here reads or writes the queue's order; the prefetch cannot move what is playing.
+   */
+  private prefetchNext(): void {
+    const next = this.items[this.order[this.cursor + 1]];
+    if (!next) {
+      this.cancelPrefetch();
+      return;
+    }
+    const url = this.library.streamUrl(next.song, this.rate.maxBitRate);
+    // Already buffering exactly this: a second request would be the same bytes twice.
+    if (this.prefetch?.url === url) return;
+    this.cancelPrefetch();
+    const controller = new AbortController();
+    this.prefetch = { url, controller };
+    /*
+     * A prefetch is an optimisation and nothing more: if the library cannot do it (or anything at
+     * all goes wrong on the way to asking), playback must not notice. This is why the call is
+     * guarded rather than assumed — `test/engine-native.test.ts` is a real example of a library
+     * that has no prefetch in it, and the queue has to keep working there.
+     */
+    try {
+      void this.library.prefetch(url, controller.signal, (sample) => {
+        this.rate.add(sample);
+      });
+    } catch {
+      this.prefetch = null;
+    }
+  }
+
+  private cancelPrefetch(): void {
+    this.prefetch?.controller.abort();
+    this.prefetch = null;
   }
 
   private reportNowPlaying(song: Song): void {

@@ -125,6 +125,8 @@ interface Shell {
   lyrics: LyricsView;
   /** Song id currently marked as playing in a list, so the toggle only runs when it changes. */
   highlighted: string | null;
+  /** v1.9.0: whether that row was also drawn in its loading state, so the toggle has both facts. */
+  highlightedLoading: boolean;
   /** The last non-now route, so closing the now screen returns where you were. */
   lastBrowseRoute: string;
   /** v1.6: the screen a stacked one (settings, the changelog) was opened from. */
@@ -531,6 +533,7 @@ function buildShell(root: HTMLElement): Shell {
     pager,
     lyrics: null as unknown as LyricsView,
     highlighted: null,
+    highlightedLoading: false,
     lastBrowseRoute: DEFAULT_ROUTE,
     stackedFrom: '',
     scrubbing: false,
@@ -1355,6 +1358,16 @@ async function syncPalette(ctx: AppContext, applyPalette: ApplyPalette): Promise
   if (!song || song.id === currentPaletteSong) return;
   currentPaletteSong = song.id;
   const url = ctx.library?.coverUrl(song.coverArt ?? song.albumId, 256) ?? null;
+  /*
+   * v1.9.0 — the reset is deferred past the task that asked for it, and the *reason* is measured
+   * rather than assumed: the first tap of a session paints in ~55 ms, and every tap after it in
+   * under a millisecond (Chrome at 393 x 852, against the mock — `test/slow-link-browser.test.ts`
+   * quotes both). A deferred write cannot be more than a small part of a burst that size, but a
+   * full-document style recalculation has no business inside the task that owes the finger a
+   * highlight: the reset only exists so the previous track's colours do not sit under the new one
+   * for the length of the artwork read, and nothing is lost by paying for it one macrotask later.
+   */
+  await new Promise((resolve) => setTimeout(resolve, 0));
   applyPalette(DEFAULT_PALETTE);
   const palette = await paletteFromArtwork(url);
   if (ctx.queue?.currentSong?.id === song.id) applyPalette(palette);
@@ -2065,8 +2078,18 @@ function songRow(
       ],
     ),
     () => {
-      void ctx.queue!.play(items, index, context);
+      /*
+       * v1.9.0 — the tap paints first, and the network comes second.
+       *
+       * The order here is the whole fix: `select` is synchronous (no await, no fetch, no I/O) and
+       * it is what draws the row highlight, the title, the artist, the artwork and the loading
+       * state; only then does `start` reach for the stream. The old line went straight into
+       * `queue.play`, so on a slow link every one of those things sat on the *previous* track while
+       * the player resolved a URL through the relay, and the screen looked dead.
+       */
+      ctx.queue!.select(items, index, context);
       openNow();
+      void ctx.queue!.start();
     },
   );
   let rows = ctx.rows.get(song.id);
@@ -2092,12 +2115,25 @@ function songRow(
  */
 function updateRowHighlight(ctx: AppContext, shell: Shell): void {
   const current = ctx.queue?.currentSong?.id ?? null;
-  if (current === shell.highlighted) {
+  /*
+   * v1.9.0: while a tap is being answered, the row it landed on says so. The loading state has to
+   * be visible *in the paint the tap produces* — a tap that shows nothing for seconds reads as a
+   * dead screen — and `queue.isLoading` is true from that same synchronous paint until the engine
+   * has the stream.
+   */
+  const loading = (ctx.queue?.isLoading ?? false) || ctx.engine.status().state === 'loading';
+  if (current === shell.highlighted && loading === shell.highlightedLoading) {
     if (current !== null) markRows(ctx, current);
     return;
   }
-  for (const [id, rows] of ctx.rows) for (const row of rows) row.classList.toggle('playing', id === current);
+  for (const [id, rows] of ctx.rows) {
+    for (const row of rows) {
+      row.classList.toggle('playing', id === current);
+      row.classList.toggle('loading', id === current && loading);
+    }
+  }
   shell.highlighted = current;
+  shell.highlightedLoading = loading;
 }
 
 function markRows(ctx: AppContext, id: string): void {
@@ -2109,6 +2145,23 @@ function markRows(ctx: AppContext, id: string): void {
 function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): void {
   const song = ctx.queue?.currentSong ?? null;
   const visible = song != null;
+  /*
+   * v1.9.0: the loading state is a thing the screen shows, not a thing that is inferred from a
+   * stalled transport. `queue.isLoading` is set by the tap's own synchronous paint, so the row,
+   * the bar and the now screen carry it from the instant of the tap until the engine has the
+   * stream. Nothing here waits on the network: this function reads state and writes classes.
+   */
+  const loading = (ctx.queue?.isLoading ?? false) || status.state === 'loading';
+  /**
+   * v1.9.0 — the cap, where the owner can see it.
+   *
+   * *"never silently cap quality"*: when the app is asking Navidrome for a smaller stream (because
+   * the link measured slow) the bar says so, next to the mode. On a fast link this is `null` and
+   * nothing is shown because nothing is capped — the original file plays.
+   */
+  const cap = ctx.queue?.streamKbps ?? null;
+  shell.playerBar.classList.toggle('loading', loading);
+  shell.nowOverlay.classList.toggle('loading', loading);
   shell.playerBar.classList.toggle('hidden', !visible);
   updateRowHighlight(ctx, shell);
   if (!visible) return;
@@ -2166,8 +2219,8 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   shell.barDuration.textContent = formatTime((durationMs || 0) / 1000);
   shell.nowDuration.textContent = formatTime((durationMs || 0) / 1000);
 
-  shell.barChip.textContent = status.spectrum ? 'spectrum' : status.backend === 'native' ? 'native audio' : 'theme';
-  shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : 'fallback'}`;
+  shell.barChip.textContent = loading ? 'loading…' : `${status.spectrum ? 'spectrum' : status.backend === 'native' ? 'native audio' : 'theme'}${cap === null ? '' : ` · ${cap} kbps`}`;
+  shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : 'fallback'}${cap === null ? '' : ' capped'}`;
 
   shell.lyrics.position(positionMs);
 }
