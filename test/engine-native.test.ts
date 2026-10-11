@@ -47,6 +47,8 @@ const OTHER_TRACK: TrackRequest = { ...TRACK, id: 'song-2', url: 'http://127.0.0
 
 interface Recording {
   calls: string[];
+  /** Every URL the bridge was asked to load, in order — which track the one asset holds. */
+  loads: string[];
   /** The bridge's own event sink, so a test can make the player report a position or a state. */
   events: NativeBridgeEvents | null;
   /** What the player reports from `sync()`, i.e the truth after a foreground return. */
@@ -91,8 +93,9 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
     };
     record.calls.push('configure');
     return {
-      async load(_info: NativeTrackInfo) {
+      async load(info: NativeTrackInfo) {
         record.calls.push('load');
+        record.loads.push(info.url);
         await wait(ROUND_TRIP_MS);
       },
       async play(seconds: number) {
@@ -289,6 +292,7 @@ function installFakes(): { connections: Connections; restore: () => void; setFra
 function recording(overrides: Partial<Recording> = {}): Recording {
   return {
     calls: [],
+    loads: [],
     events: null,
     truth: { playing: true, positionMs: 1000, durationMs: 180_000 },
     refuseResume: false,
@@ -805,6 +809,132 @@ test('moving to another track is one load, one play, and the spectrum follows th
     await settle(120);
     assert.equal(engine.status().state, 'playing');
     assert.equal(engine.status().spectrum, true, 'the visualiser came back with the new track');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+
+/* -------------------------------------------------------------- the v1.7.5 gaps */
+
+test('two different tracks pressed in quick succession leave the second one playing and the first one silent', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    /*
+     * Press A, then press B *inside* A's load — the fake's load is {@link ROUND_TRIP_MS} of round
+     * trips, which is a network fetch on a phone. Both loads are on the one shared assetId, and
+     * before v1.7.5 the slower one's `play` landed after the faster one's: the older track audible
+     * with the newer one on screen. Pressing the *same* track twice could never show this, which is
+     * why the idempotency checks above did not catch it.
+     */
+    const first = engine.play(TRACK);
+    await settle(20);
+    const second = engine.play(OTHER_TRACK);
+    await Promise.all([first, second]);
+    await settle(60);
+
+    const plays = record.calls.filter((call) => call.startsWith('play@'));
+    say(
+      `the rapid switch: loads ${record.loads.map((url) => url.slice(-8)).join(' → ')}, ` +
+        `plays ${plays.length} (${plays.join(', ') || 'none'})`,
+    );
+    assert.deepEqual(plays, ['play@0'], `the superseded load never sends its play — calls: ${record.calls.join(', ')}`);
+    assert.equal(record.loads[record.loads.length - 1], OTHER_TRACK.url, 'and the asset ends up holding the track the UI shows');
+    assert.equal(engine.currentTrack?.id, OTHER_TRACK.id);
+    assert.equal(engine.status().state, 'playing');
+    assert.equal(record.spectrum.startedUrl, OTHER_TRACK.url, 'the spectrum is reading the track that is audible');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+test('a not-playing report while a seek is in flight is read as ours, not as an interruption', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(60);
+    record.events?.onPosition(20);
+    assert.equal(engine.status().state, 'playing');
+
+    /*
+     * `setCurrentTime` repositions the player, and the player reports a not-playing state while it
+     * does. That report is the seek, not an interruption: reading it as one flipped the app to
+     * `interrupted` — clock stopped, spectrum dropped, one tap needed to get the sound back.
+     */
+    const seeking = engine.seek(40_000);
+    record.events?.onState('paused', false);
+    await seeking;
+    await settle(80);
+    say(`the seek: ${record.calls.filter((call) => call.startsWith('seek@')).join(', ')}, state after the report: ${engine.status().state}`);
+    assert.equal(engine.status().state, 'playing', 'a transient report during a seek must not stop the sound');
+    assert.ok(record.calls.includes('seek@40'), `and the seek was really sent — calls: ${record.calls.join(', ')}`);
+    assert.equal(engine.status().spectrum, true, 'and the visualiser is not dropped for it');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+test('the displayed position does not run from the press to the first sound', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    record.truth = { playing: true, positionMs: 0, durationMs: 180_000 };
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(300);
+    const beforeReport = engine.status().positionMs;
+    say(`the clock between the press and the player's first report: ${Math.round(beforeReport)} ms after 300 ms of real time`);
+    assert.equal(beforeReport, 0, `nothing is audible yet, so nothing has elapsed (${Math.round(beforeReport)} ms)`);
+
+    // The player's own report is what starts it, and it counts from that position.
+    record.events?.onPosition(0.4);
+    await settle(240);
+    const afterReport = engine.status().positionMs;
+    say(`and from the player's own report of 400 ms: ${Math.round(afterReport)} ms after 240 ms more`);
+    assert.ok(afterReport - 400 >= 200, `the clock moves once the player says where it is (${Math.round(afterReport)} ms)`);
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+test('the spectrum holds through the last seconds of a track instead of emptying to the theme', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(120);
+    assert.equal(engine.status().spectrum, true, 'live in the middle of the track');
+
+    // The silent copy finishes a beat before the audible one: the tap reports not-playing at
+    // 177 s of 180 s while the sound is still coming out. That is not a dead tap.
+    record.spectrum.playing = false;
+    record.truth = { playing: true, positionMs: 177_000, durationMs: 180_000 };
+    record.events?.onPosition(177);
+    await settle(500);
+    say(
+      `near the end of a track: ${record.spectrum.startCalls} tap start(s) and the canvas ` +
+        `${engine.status().spectrum ? 'still fed' : 'emptied to the theme'}`,
+    );
+    assert.equal(engine.status().state, 'playing');
+    assert.equal(engine.status().spectrum, true, 'the last seconds of a song are not a dead tap');
+    assert.equal(record.spectrum.startCalls, 1, 'so the tap is not torn down and rebuilt for it');
   } finally {
     fakes.restore();
     await stopAll(engines);

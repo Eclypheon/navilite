@@ -106,3 +106,7 @@ Plain language, user-visible changes only. The app shows this same list under
 - The visualiser is smoother, and it wears the album's colours. It was reading each frame raw — which is what made it shimmer and lag — so each bar now rises quickly and settles, and the bars take their colour from the album art the rest of the app is already themed with, the bass to the treble, instead of one blue for every song.
 - Pausing lets the spectrum settle. The bars used to disappear and be replaced by the placeholder animation the moment you paused; now they drop to nothing over about a third of a second and stay where they are, and the placeholder is only for when there is nothing loaded at all. The same when a song ends.
 
+
+## 1.7.5 — 2026-10-11
+
+- More exact, everywhere your finger goes: picking a second song right after a first never plays the wrong one, dragging the bar no longer risks stopping the sound while it moves, the time no longer counts up before the music has actually started, and the bars keep moving right to the end of a song instead of disappearing in its last seconds.

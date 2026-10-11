@@ -34,7 +34,7 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
 });
 
 test('the changelog is the owner-visible list: v1.0 through v1.7.4, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4']);
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4', '1.7.5']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -63,6 +63,23 @@ test('every v1.7.3 report the owner made is described in his own terms', () => {
   for (const item of v173?.items ?? []) {
     // Invisible plumbing does not belong in his list: no engine names, no state machines.
     assert.doesNotMatch(item, /FFT|vDSP|AVFoundation|ExoPlayer|plugin|analyser|Web Audio|bridge|state machine|WebKit|media element/i);
+  }
+});
+
+test('the v1.7.5 entry names the four things that were wrong, in his terms', () => {
+  const v175 = CHANGELOG.find((release) => release.version === '1.7.5');
+  const text = v175?.items.join('\n') ?? '';
+  /*
+   * The four gaps the review found, each named as the thing he can see rather than the mechanism:
+   * the wrong track after a quick switch, the sound stopping for a moment on a scrub, the time
+   * running before the music did, and the bars vanishing at the end of a song.
+   */
+  assert.match(text, /never plays the wrong one/, 'the two-rapid-presses race, as a symptom');
+  assert.match(text, /no longer risks stopping the sound/, 'the seek that flipped the app to interrupted');
+  assert.match(text, /before the music has actually started/, 'the clock that ran during the load');
+  assert.match(text, /to the end of a song/, 'the bars emptying in the last seconds');
+  for (const item of v175?.items ?? []) {
+    assert.doesNotMatch(item, /generation|transition|asset|state machine|clock|tap|interruption/i);
   }
 });
 

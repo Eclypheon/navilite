@@ -62,8 +62,16 @@ export type PlayerEvent =
   | { type: 'engine-state'; playing: boolean; stopped?: boolean }
   /** The user, or the lock screen, asked for a transport. The machine decides what that means. */
   | { type: 'transport'; action: 'play' | 'pause' | 'toggle' }
-  /** The session was taken away — a call, Siri, another app — or given back. */
-  | { type: 'interruption'; phase: 'began' | 'ended' }
+  /**
+   * The session was taken away — a call, Siri, another app.
+   *
+   * There is one phase and it is the arrival. v1.7.3 also carried a `phase: 'ended'` for "given
+   * back", and nothing ever sent it: recovery has always arrived as the player's own `engine-state`
+   * report of `playing`, which is the door every other resume comes through. A branch for a signal
+   * that is never dispatched is a mechanism the file claims and does not have, so it is deleted
+   * rather than left to be trusted by the next reader.
+   */
+  | { type: 'interruption' }
   /** The app went out of sight, or came back. */
   | { type: 'lifecycle'; phase: 'hidden' | 'foreground' }
   | { type: 'track-ended'; trackId: string }
@@ -98,8 +106,13 @@ export function reduce(state: EngineState, event: PlayerEvent): EngineState {
       if (state === 'playing' || state === 'loading') return 'paused';
       return state === 'idle' ? 'idle' : 'playing';
     case 'interruption':
-      if (event.phase === 'began') return state === 'playing' ? 'interrupted' : state;
-      return state === 'interrupted' ? 'paused' : state;
+      /*
+       * The audio stopped and nobody asked. Only a playing engine is interrupted by it — a report
+       * that arrives while we are already still is a non-event, exactly like a stale `engine-state`
+       * — and the player's own report of `playing` is the way back out, which is the only route
+       * that has ever existed.
+       */
+      return state === 'playing' ? 'interrupted' : state;
     case 'lifecycle':
       // Deliberately nothing: leaving the screen does not change what the audio is doing, and
       // saying otherwise is what made the app believe a pause nobody had made.
@@ -183,6 +196,17 @@ const SPECTRUM_RESYNC_MS = 5000;
  */
 const SPECTRUM_RESTART_MS = 5000;
 /**
+ * How close to the end of a track the tap may report "not playing" without being rebuilt.
+ *
+ * The silent copy the tap reads from finishes a beat before the audible player does, so at the end
+ * of every track the tap reports `playing: false` while sound is still coming out. That is not a
+ * dead tap, and treating it as one tore the tap down, rebuilt it (up to
+ * {@link MAX_SPECTRUM_RESTARTS} times) and emptied the bars to the theme for the last seconds of
+ * every song. Four seconds is far longer than the offset between the two decodes and far shorter
+ * than anything anyone would call the end of a track.
+ */
+const SPECTRUM_NEAR_END_MS = 4000;
+/**
  * How many times a dead tap is rebuilt before the app gives up and says so.
  *
  * A tap that will not stay up is not worth a retry every five seconds for the length of a track:
@@ -254,6 +278,16 @@ export class AudioEngine {
    * contradicting it.
    */
   private inTransition = 0;
+  /**
+   * Whether the player has actually reported a position for the load in flight.
+   *
+   * False from the moment a load starts until the player's first `currentTime` report (or a
+   * `sync()` read) arrives. Between those two instants nothing is audible — the asset is still
+   * being fetched — so the clock shows the offset the load was asked for and stays on it. Without
+   * this the displayed position ran from the tap to the first sound, which is the one thing "the
+   * clock follows the sound and only the sound" does not allow.
+   */
+  private positionReported = true;
   private backend: PlaybackBackend = 'web';
   private track: TrackRequest | null = null;
   private error: string | null = null;
@@ -415,10 +449,17 @@ export class AudioEngine {
     return typeof performance !== 'undefined' ? performance.now() : Date.now();
   }
 
-  /** Re-base the clock on a position the player actually reported. */
-  private setNativePosition(ms: number): void {
+  /**
+   * Re-base the clock on a position the player actually reported.
+   *
+   * `reported` is false when the position is one *we* asked for — a load's start offset, or a seek
+   * — rather than one the player told us about. Only a real report clears {@link positionReported},
+   * so the clock cannot start counting before there is a sound for it to be counting.
+   */
+  private setNativePosition(ms: number, reported = true): void {
     this.nativePositionMs = Number.isFinite(ms) ? Math.max(0, ms) : 0;
     this.nativePositionAt = this.clockNow();
+    if (reported) this.positionReported = true;
   }
 
   /**
@@ -437,7 +478,13 @@ export class AudioEngine {
    */
   private nativeClock(): number {
     if (this.backend !== 'native') return this.el.currentTime * 1000;
-    if (this.state !== 'playing' || !this.foreground) return this.nativePositionMs;
+    /*
+     * Rule 3, added in v1.7.5: it advances only once the player has said where it is. Between the
+     * press and that first report the asset is still loading and nothing is audible, so a clock
+     * counting from the press counts to no sound — the phantom seconds this invariant exists to
+     * forbid. It shows the offset the load was asked for and starts moving on the first report.
+     */
+    if (this.state !== 'playing' || !this.foreground || !this.positionReported) return this.nativePositionMs;
     const elapsed = Math.max(0, this.clockNow() - this.nativePositionAt);
     const position = this.nativePositionMs + elapsed;
     const duration = this.durationMs();
@@ -562,7 +609,7 @@ export class AudioEngine {
             return;
           }
           // Not playing and we did not ask it to stop: that is an interruption, not a pause.
-          this.dispatch({ type: 'interruption', phase: 'began' });
+          this.dispatch({ type: 'interruption' });
           if (state === 'stopped') this.nativePositionMs = Math.min(this.nativePositionMs, this.durationMs());
         },
         onComplete: () => {
@@ -725,11 +772,29 @@ export class AudioEngine {
     await this.startNative(track, from);
   }
 
+  /**
+   * Seek — and the one transport that was outside the `inTransition` bracket.
+   *
+   * `setCurrentTime` repositions the player, and while it does the player reports a not-playing
+   * state. That report is *ours* — we asked for the reposition — but nothing said so, so the state
+   * listener read it as an interruption: `playing` became `interrupted`, the clock stopped, the
+   * spectrum dropped, and the sound needed a tap to come back. A transient report during a seek is
+   * the shape of a symptom the owner has reported, and `inTransition` is the bracket load, play,
+   * pause and resume are already wrapped in.
+   *
+   * The position it lands on is one we asked for, not one the player reported, so it does not count
+   * as the report that starts the clock (`setNativePosition(…, false)`).
+   */
   async seek(positionMs: number): Promise<void> {
     this.generation += 1;
     if (this.backend === 'native') {
-      await this.native?.seek(positionMs / 1000);
-      this.setNativePosition(positionMs);
+      this.inTransition += 1;
+      try {
+        await this.native?.seek(positionMs / 1000);
+      } finally {
+        this.inTransition -= 1;
+      }
+      this.setNativePosition(positionMs, false);
       if (this.native?.hasNativeSpectrum) void this.native?.resyncSpectrum?.(positionMs);
       this.emit();
       return;
@@ -803,14 +868,14 @@ export class AudioEngine {
       if (truth.durationMs > 0) this.nativeDurationMs = truth.durationMs;
       if (truth.playing) this.dispatch({ type: 'engine-state', playing: true });
       else if (this.state === 'playing') {
-        this.dispatch({ type: 'interruption', phase: 'began' });
+        this.dispatch({ type: 'interruption' });
         this.modeReason = this.wasPlayingBeforeHide
           ? 'the track was playing when the app left the screen and the player is not playing now — one tap on play starts it again from here, and nothing was written to the player to get there'
           : 'the player is not playing';
       } else this.dispatch({ type: 'engine-state', playing: false });
     } else if (this.state === 'playing') {
       // The player would not answer. Never leave a "playing" on screen that no tap can act on.
-      this.dispatch({ type: 'interruption', phase: 'began' });
+      this.dispatch({ type: 'interruption' });
     }
     if (this.state === 'playing') {
       // The state did not change (the player was playing all along) but the ticker and the tap
@@ -882,9 +947,27 @@ export class AudioEngine {
     // A load is an unload + preload: the outgoing asset's stop must not be read as a track ending.
     this.inTransition += 1;
     const generation = this.generation;
+    // Nothing is audible yet: the clock holds the offset until the player reports a position.
+    this.positionReported = false;
     this.dispatch({ type: 'transport', action: 'play' });
     try {
       await bridge.load(track);
+      /*
+       * **The guard the review found missing: two rapid plays of two different tracks race here.**
+       *
+       * Every track is loaded under one shared `assetId` (`native.ts`), so two loads in flight are
+       * two unload/preload/play cycles on the same slot — and the slower one used to send its
+       * `play` *after* the faster one's, leaving the older track audible while the UI showed the
+       * newer one. A load is tens of milliseconds of round trips in the fake bridge and a network
+       * fetch on a phone: long enough to tap a second row inside it.
+       *
+       * The check is `this.track`, not the raw generation. `generation` is bumped by a seek and by
+       * a pause as well, and neither of those means "this load is stale" — a seek during a load
+       * must not cancel the play that is coming. What makes a load stale is that the *selection*
+       * has moved on, and then the play is dropped, so the player is left playing exactly the track
+       * the app says is playing.
+       */
+      if (this.track !== track) return;
       await bridge.play(startMs / 1000);
     } catch (cause) {
       this.fail(cause);
@@ -1002,6 +1085,15 @@ export class AudioEngine {
     this.spectrumPolls += 1;
     const playing = this.state === 'playing' && frame.playing;
     if (!playing) {
+      /*
+       * The last seconds of a track are not a dead tap: the silent copy ends slightly before the
+       * audible one, and rebuilding on that report is what dropped the bars exactly when the song
+       * was finishing. Near the end the last real frame is held — no rebuild, no theme, no flicker.
+       */
+      if (this.nearTrackEnd()) {
+        this.spectrumDeadPolls = 0;
+        return;
+      }
       this.spectrumLive = false;
       /*
        * The tap has gone quiet while the engine is playing — iOS tore the silent player down (it
@@ -1054,6 +1146,18 @@ export class AudioEngine {
       this.lastSpectrumResyncAt = this.clockNow();
       await this.resyncSpectrum();
     }
+  }
+
+  /**
+   * True when the audible player is within {@link SPECTRUM_NEAR_END_MS} of the end of its track.
+   *
+   * Judged on the displayed position, which is the player's own position: the question is whether
+   * the *listener* is at the end of the song, not whether some other clock has run out.
+   */
+  private nearTrackEnd(): boolean {
+    const duration = this.durationMs();
+    if (duration <= 0) return false;
+    return this.nativeClock() >= duration - SPECTRUM_NEAR_END_MS;
   }
 
   /** Tear the tap down and build it again — for a consumer that has gone quiet while playing. */

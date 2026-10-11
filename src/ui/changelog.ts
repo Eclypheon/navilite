@@ -161,4 +161,11 @@ export const CHANGELOG: ChangelogRelease[] = [
       'Pausing lets the spectrum settle. The bars used to disappear and be replaced by the placeholder animation the moment you paused; now they drop to nothing over about a third of a second and stay where they are, and the placeholder is only for when there is nothing loaded at all. The same when a song ends.',
     ],
   },
+  {
+    version: '1.7.5',
+    date: '2026-10-11',
+    items: [
+    'More exact, everywhere your finger goes: picking a second song right after a first never plays the wrong one, dragging the bar no longer risks stopping the sound while it moves, the time no longer counts up before the music has actually started, and the bars keep moving right to the end of a song instead of disappearing in its last seconds.',
+    ],
+  },
 ];

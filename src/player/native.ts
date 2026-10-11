@@ -160,6 +160,25 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     const assetId = 'navilite-current';
     let lastPositionMs = 0;
 
+    /*
+     * One lane for the asset, so two loads can never be in flight at once.
+     *
+     * Every track is loaded under this single `assetId`, which makes an unfinished `preload` and the
+     * next track's `unload`+`preload` two writers on one slot: the older one can finish last and
+     * leave the plugin holding the wrong stream. The engine already refuses to *play* a superseded
+     * load (`startNative`); this is the other half — the loads themselves run in the order the taps
+     * were made, so the last preload to complete is the last one asked for.
+     */
+    let assetLane: Promise<unknown> = Promise.resolve();
+    const inAssetLane = <T>(work: () => Promise<T>): Promise<T> => {
+      const next = assetLane.then(work, work);
+      assetLane = next.then(
+        () => undefined,
+        () => undefined,
+      );
+      return next;
+    };
+
     const startService = async () => {
       if (!service) return;
       try {
@@ -179,26 +198,30 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
 
     return {
       async load(info) {
-        try {
-          await NativeAudio.unload({ assetId });
-        } catch {
-          // Nothing loaded yet — unload is best-effort.
-        }
-        await NativeAudio.preload({
-          assetId,
-          assetPath: info.url,
-          isUrl: true,
-          notificationMetadata: {
-            title: info.title,
-            artist: info.artist,
-            album: info.album,
-            artworkUrl: info.artworkUrl ?? undefined,
-          },
+        await inAssetLane(async () => {
+          try {
+            await NativeAudio.unload({ assetId });
+          } catch {
+            // Nothing loaded yet — unload is best-effort.
+          }
+          await NativeAudio.preload({
+            assetId,
+            assetPath: info.url,
+            isUrl: true,
+            notificationMetadata: {
+              title: info.title,
+              artist: info.artist,
+              album: info.album,
+              artworkUrl: info.artworkUrl ?? undefined,
+            },
+          });
         });
       },
       async play(startSeconds) {
         await startService();
-        await NativeAudio.play({ assetId, time: Math.max(0, startSeconds) });
+        // Behind the same lane: the play for a track whose preload is still running must not
+        // overtake it, and it must not start the previous track's asset either.
+        await inAssetLane(() => NativeAudio.play({ assetId, time: Math.max(0, startSeconds) }));
       },
       async pause() {
         await NativeAudio.pause({ assetId });
