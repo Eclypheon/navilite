@@ -59,6 +59,30 @@ import Capacitor
  * exactly as it does and the visualiser falls back to its album-art theme — every one of those paths
  * is a *reported* failure, never a silent one.
  *
+ * ## What v1.7.7 changed: the tap's lifetime
+ *
+ * v1.7.6 moved the tap onto the audible item but left its *lifecycle* where the old design had it —
+ * armed when the engine entered `playing`, torn down when it left. So every pause, every seek, every
+ * return from the background took the mix off the item and put a new one back on a player that was
+ * already rendering. That is two defects at once, and the owner reported both: the spectrum that
+ * would not come back until a whole new track was loaded (the detach won, and nothing re-armed it),
+ * and *"a short pause"* in the middle of a song right before the bars returned (reconfiguring a
+ * playing item's audio pipeline is audible).
+ *
+ * The rule is now a lifetime rule:
+ *
+ *   - **the tap is installed once per item, and never removed by a transport or lifecycle event.**
+ *     Pause, resume, seek, background, foreground, interruption, the last second of a track: the tap
+ *     is already there, so the plugin only *verifies* it (`attach` returns without writing anything);
+ *   - **a paused tap is not a stopped tap.** While nothing is rendering the tap is simply not called;
+ *     the bars settle to zero because the engine has no frame to hand the canvas, and they come back
+ *     with the first samples after the resume, one hop (~23 ms) behind the sound;
+ *   - **`detach` is for exactly two things** — a genuinely different item, and an explicit teardown.
+ *     Nothing in the transport or the app lifecycle is allowed to reach it.
+ *
+ * The install count and the verify count are both in `bands()`'s snapshot, so "installed once" is a
+ * number a harness can read rather than a claim in a comment.
+ *
  * The engine half of this file deliberately imports nothing but AVFoundation, Accelerate and
  * Foundation, which is what lets the tap itself be exercised on the host (`swiftc` on macOS) as well
  * as in the app.
@@ -107,6 +131,14 @@ final class AudibleSpectrumTap {
     /// The mix this class put on the item — the only one it will ever remove.
     private var installedMix: AVMutableAudioMix?
     private var url: URL?
+    /// Evidence of the lifecycle rule v1.7.7 exists for: how many times a tap was *installed* on an
+    /// item, and how many times a healthy one was only *verified*. The second grows with every pause,
+    /// resume, seek and return to the foreground; the first may only grow for a new item.
+    private var installCount = 0
+    private var verifyCount = 0
+
+    /// What the lifecycle rule has done so far — the numbers the card is judged on.
+    var lifecycleCounts: (installs: Int, verifies: Int) { (installCount, verifyCount) }
 
     // The analysis state, written on the tap's thread and read on the main thread.
     private var bands = [UInt8](repeating: 0, count: AudibleSpectrumTap.bandCount)
@@ -164,6 +196,24 @@ final class AudibleSpectrumTap {
      * to measure.
      */
     func attach(to item: AVPlayerItem, player: AVPlayer, requestedUrl: URL?) -> Result<Double, NativeSpectrumError> {
+        /*
+         * **Verify; do not reinstall.** This is the rule v1.7.7 exists for.
+         *
+         * Installing an audio mix on an item that is being rendered reconfigures that item's audio
+         * pipeline, and that reconfiguration is *audible* — the owner heard it as "a short pause"
+         * in the middle of a song, right before the bars came back. So an item that already carries
+         * this tap is only *checked* here: no mix is written, no tap is created, no buffer touched,
+         * and the call reports success. Every pause, resume, seek, return from the background and
+         * last second of a track arrives on this path. Only a genuinely *different* item — a new
+         * load — falls through to the install below, which is the one moment in an item's life when
+         * a tap can be installed without reconfiguring anything the listener is hearing.
+         */
+        if carriesOurTap(item) {
+            verifyCount += 1
+            self.player = player
+            self.url = requestedUrl
+            return .success(sampleRate)
+        }
         detach()
         guard let track = Self.audioTrack(of: item) else {
             return .failure(.failure("the audible player has no loaded audio track yet"))
@@ -171,9 +221,10 @@ final class AudibleSpectrumTap {
         /*
          * The item belongs to the plugin that is making the sound. If something else has already put
          * an audio mix on it, taking it over would change how the user's audio is rendered — that is
-         * not this file's business, so it reports instead.
+         * not this file's business, so it reports instead. Reaching this line with a mix still on the
+         * item therefore means the mix is *not* ours: `detach` above removed ours, if it was there.
          */
-        if let existing = item.audioMix, existing !== installedMix {
+        if item.audioMix != nil {
             return .failure(.failure("the audible player's item already carries an audio mix, and the spectrum will not take it over"))
         }
         #if DEBUG
@@ -222,8 +273,30 @@ final class AudibleSpectrumTap {
         self.item = item
         self.player = player
         self.url = requestedUrl
+        installCount += 1
 
         return .success(sampleRate)
+    }
+
+    /**
+     * Whether this tap is installed on `item` *right now*.
+     *
+     * The question is asked of the **tap**, not of the mix object, and the difference is not pedantry:
+     * `AVPlayerItem.audioMix` hands back a *copy* of the mix it holds, so `item.audioMix === installedMix`
+     * is false even in the instant after we installed it. v1.7.6 asked that question twice and both
+     * answers were wrong in the same direction — `detach` never actually took its own mix off the item
+     * (it only forgot it), and the next `attach` then saw a mix it did not recognise and refused with
+     * *"the audible player's item already carries an audio mix"*. That refusal is precisely the owner's
+     * *"to make it show again i have to select another song"*: only a genuinely new item could ever be
+     * tapped, and the trip through the refusal is what the plugin reported as a failed start.
+     *
+     * So the test is on the processing tap, which is a CF object and is handed back by the item as the
+     * very same instance we put there.
+     */
+    private func carriesOurTap(_ item: AVPlayerItem) -> Bool {
+        guard self.item === item, let tap else { return false }
+        guard let processor = item.audioMix?.inputParameters.first?.audioTapProcessor else { return false }
+        return processor === tap
     }
 
     /**
@@ -232,9 +305,20 @@ final class AudibleSpectrumTap {
      * Pausing, seeking or unloading anything is not this class's to do: the item and the player are
      * the plugin's, and they carry on exactly as they were. Dropping the mix is what finalizes the
      * tap and releases our retain.
+     *
+     * v1.7.7 — **this is reached from exactly two places**, and neither is a transport or lifecycle
+     * event: a *different* item being attached (where the item it leaves behind is one the plugin has
+     * already replaced), and an explicit teardown request (`NaviliteSpectrum.stop`, which the engine
+     * only sends when there is nothing left to measure). A pause, a resume, a seek, a return from the
+     * background and the last second of a track must never arrive here: taking the mix off an item
+     * that is being rendered reconfigures its audio pipeline, and that is the audible gap the owner
+     * reported. Persisting the tap across all of them is the whole of this release.
+     *
+     * The mix is only cleared when the item still carries *ours* — someone else's mix is left alone,
+     * because the audio being rendered is not this file's to change.
      */
     func detach() {
-        if let item, let mix = installedMix, item.audioMix === mix {
+        if let item, carriesOurTap(item) {
             item.audioMix = nil
         }
         tap = nil
@@ -278,6 +362,10 @@ final class AudibleSpectrumTap {
             // Whether the tap is currently on an item at all — the difference between "no frames
             // because it is quiet" and "no frames because nothing is tapped".
             "attached": item != nil,
+            // The lifecycle rule, as numbers: installs may only grow for a new item, verifies grow
+            // with every pause, resume, seek and return to the foreground.
+            "installs": installCount,
+            "verifies": verifyCount,
             "readable": readable,
             "sampleRate": sampleRate
         ]
@@ -560,6 +648,11 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     }
 
     /// Stop analysing. The audio that is heard is untouched — this has never owned it.
+    ///
+    /// v1.7.7: the engine no longer sends this on a pause, a resume, a seek, a return from the
+    /// background or an interruption — every one of those used to arrive here as a detach followed by
+    /// a re-install on a playing item, which is the audible gap. It is kept for a genuine teardown
+    /// (nothing left to measure) and for a caller that explicitly wants the tap gone.
     @objc func stop(_ call: CAPPluginCall) {
         DispatchQueue.main.async { [weak self] in
             self?.generation += 1

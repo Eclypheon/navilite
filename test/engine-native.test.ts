@@ -940,3 +940,109 @@ test('the spectrum holds through the last seconds of a track instead of emptying
     await stopAll(engines);
   }
 });
+
+/**
+ * v1.7.7 — the tap's *lifetime*.
+ *
+ * The owner, on v1.7.6: *"there's something wrong with the spectrum it is not showing sometimes especially
+ * after pausing and playing again or backgrounding then going back to the app. to make it show again i have to
+ * select another song from the playlist to play then the song will play for awhile, there would be a short pause
+ * and then the song continues playing with the spectrum showing."*
+ *
+ * Both halves of that are lifecycle, and both are asserted here:
+ *
+ *   - the spectrum is installed **once** per item and never comes off it — no pause, no return from the
+ *     background and no dead-tap check reaches `stopSpectrum` again, which is why the bars no longer need
+ *     a new track to come back;
+ *   - the return is a **verify**, not a rebuild, which is what removes the reconfiguration of a rendering
+ *     item — the gap he heard.
+ */
+test('the tap is installed once and outlives a pause and a trip to the background', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  /** How long it took `predicate` to hold, in ms, or null if it never did inside the budget. */
+  const until = async (predicate: () => boolean, budgetMs: number): Promise<number | null> => {
+    const started = Date.now();
+    for (;;) {
+      if (predicate()) return Date.now() - started;
+      if (Date.now() - started > budgetMs) return null;
+      await settle(5);
+    }
+  };
+  try {
+    const record = recording();
+    record.truth = { playing: true, positionMs: 60_000, durationMs: 180_000 };
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(150);
+    assert.equal(record.spectrum.startCalls, 1, 'the tap is installed once, when the track is loaded');
+    assert.equal(engine.status().spectrum, true, 'and it is live from the start');
+
+    /* ---- 1. a pause ---- */
+    record.calls = [];
+    record.spectrum.playing = false;
+    await engine.pause();
+    await settle(150);
+    assert.equal(engine.status().state, 'paused');
+    assert.equal(
+      record.spectrum.stopCalls,
+      0,
+      `a pause never takes the tap off the item — calls: ${record.calls.join(', ')}`,
+    );
+    assert.equal(record.spectrum.started, true, 'the tap is still installed while the track is paused');
+    assert.equal(engine.readSpectrum(), null, 'the bars settle to zero: there is no frame to hand the canvas');
+
+    /* ---- 2. the resume: the same item, the same tap, one verify ---- */
+    record.calls = [];
+    record.spectrum.playing = true;
+    await engine.toggle();
+    const backAfterPause = await until(() => engine.status().spectrum === true, 200);
+    assert.equal(engine.status().state, 'playing');
+    assert.equal(record.spectrum.stopCalls, 0, `the resume detaches nothing — calls: ${record.calls.join(', ')}`);
+    assert.equal(record.spectrum.startCalls, 2, 'the resume confirms the tap rather than building a second one');
+    assert.ok(
+      record.calls.some((call) => call.startsWith('startSpectrum@')),
+      `and the confirmation is what it sends — calls: ${record.calls.join(', ')}`,
+    );
+    assert.ok(backAfterPause !== null, 'the spectrum is live again inside 200 ms of the press');
+    const afterPauseFrame = engine.readSpectrum();
+    assert.ok(
+      afterPauseFrame !== null && afterPauseFrame.some((value) => value > 0),
+      'and the bands it hands back are non-zero, not a cleared frame',
+    );
+    say(
+      `v1.7.7 — after a pause: live bands ${backAfterPause} ms after the press, ${record.spectrum.startCalls} ` +
+        `install/verify call(s), ${record.spectrum.stopCalls} detach(es)`,
+    );
+
+    /* ---- 3. away and back, with the player playing the whole time ---- */
+    await engine.handleVisibility(true);
+    record.truth = { playing: true, positionMs: 61_200, durationMs: 180_000 };
+    record.calls = [];
+    await engine.handleVisibility(false);
+    const backAfterBackground = await until(() => engine.status().spectrum === true, 200);
+    assert.equal(record.spectrum.stopCalls, 0, `returning detaches nothing — calls: ${record.calls.join(', ')}`);
+    assert.equal(
+      record.spectrum.startCalls,
+      3,
+      `returning verifies the tap it already has, once — calls: ${record.calls.join(', ')}`,
+    );
+    assert.ok(backAfterBackground !== null, 'the spectrum is live again inside 200 ms of the return');
+    const afterBackgroundFrame = engine.readSpectrum();
+    assert.ok(
+      afterBackgroundFrame !== null && afterBackgroundFrame.some((value) => value > 0),
+      'and the bands are non-zero on the way back in',
+    );
+    say(
+      `v1.7.7 — after background → foreground: ${backAfterBackground} ms to live bands, ` +
+        `${record.spectrum.stopCalls} detach(es) across both events`,
+    );
+
+    /* ---- 4. the invariant underneath all of it ---- */
+    assert.equal(record.spectrum.started, true, 'one tap, installed once, still on the item at the end');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});

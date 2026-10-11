@@ -185,16 +185,21 @@ const CLOCK_TICK_MS = 200;
 /** A seek is corrected on the analysis tap once the drift is a real one. */
 const SPECTRUM_RESYNC_MS = 5000;
 /**
- * How often a tap that has stopped answering is allowed to be rebuilt.
+ * How often a tap that has stopped answering is allowed to be *checked* against the player.
  *
  * v1.7.2 armed the tap on the way in and then never looked at it again: if iOS tore the silent
- * `AVPlayer` down while the app was suspended, the tap stayed dead for the rest of the track and
- * the visualiser never came back on its own. That is the owner's *"it somehow automatically
- * switches off the spectrum like it's in native only mode"*. A consumer that goes quiet while the
- * engine is playing is now rebuilt, no more than once every five seconds, and it is never simply
- * left off.
+ * `AVPlayer` down while the app was suspended, the tap stayed dead for the rest of the track and the
+ * visualiser never came back on its own. That is the owner's *"it somehow automatically switches off
+ * the spectrum like it's in native only mode"*. A consumer that goes quiet while the engine is
+ * playing is now looked at again, no more than once every five seconds, and it is never simply left
+ * off.
+ *
+ * v1.7.7 — what that look *is* matters, and it is why this is no longer a "restart". It is a verify:
+ * one read of the plugin, which finds the audible item and, if that item already carries this tap,
+ * writes nothing at all. It only installs when the item is genuinely a different one (the plugin
+ * replaced it), which is not a mid-song reconfiguration of audio the listener is hearing.
  */
-const SPECTRUM_RESTART_MS = 5000;
+const SPECTRUM_RECHECK_MS = 5000;
 /**
  * How close to the end of a track the tap may report "not playing" without being rebuilt.
  *
@@ -206,12 +211,14 @@ const SPECTRUM_RESTART_MS = 5000;
  */
 const SPECTRUM_NEAR_END_MS = 4000;
 /**
- * How many times a dead tap is rebuilt before the app gives up and says so.
+ * How many times a dead tap is checked against the player before the app gives up and says so.
  *
- * A tap that will not stay up is not worth a retry every five seconds for the length of a track:
+ * A tap that will not stay up is not worth a check every five seconds for the length of a track:
  * the third failure is reported, the bars go to the album-art theme, and nothing polls any more.
+ * Note that giving up is now *only* a statement about the bars — v1.7.7 leaves the tap installed
+ * either way, so the next track starts from a working tap rather than from a rebuilt one.
  */
-const MAX_SPECTRUM_RESTARTS = 3;
+const MAX_SPECTRUM_RECHECKS = 3;
 /**
  * The same non-zero frame for ~1 s is a frozen buffer, not a measurement.
  *
@@ -251,10 +258,10 @@ export class AudioEngine {
   private spectrumZeroPolls = 0;
   private spectrumPolls = 0;
   private lastSpectrumResyncAt = 0;
-  private lastSpectrumRestartAt = 0;
-  /** Polls in a row where the tap said it was not playing, and how many rebuilds that has cost. */
+  private lastSpectrumRecheckAt = 0;
+  /** Polls in a row where the tap said it was not playing, and how many re-checks that has cost. */
   private spectrumDeadPolls = 0;
-  private spectrumRestarts = 0;
+  private spectrumRechecks = 0;
 
   /* ------------------------------------------------------------- the machine */
   private state: EngineState = 'idle';
@@ -427,7 +434,7 @@ export class AudioEngine {
               ? 'loading'
               : 'nothing playing';
     this.stopClockTick();
-    this.stopConsumers(reason);
+    this.disarmConsumers(reason);
   }
 
   private startClockTick(): void {
@@ -877,11 +884,16 @@ export class AudioEngine {
       this.dispatch({ type: 'interruption' });
     }
     if (this.state === 'playing') {
-      // The state did not change (the player was playing all along) but the ticker and the tap
-      // died with the suspended web view: both are re-armed, unconditionally, whenever the app is
-      // playing on the way back in.
+      /*
+       * The state did not change (the player was playing all along), but the web view was suspended
+       * and its timers went with it: the clock ticker is re-armed unconditionally. The spectrum is
+       * *verified*, not rebuilt — v1.7.6 detached and re-installed here, on a player that had been
+       * rendering the whole time the app was away, and that reconfiguration is audible. The tap
+       * outlived the suspension just as it outlives a pause, so all this needs is one read that
+       * confirms it is still on the item (see {@link verifySpectrum}).
+       */
       this.startClockTick();
-      if (truth?.playing && stateBefore === 'playing' && this.backend === 'native') this.restartSpectrum();
+      if (truth?.playing && stateBefore === 'playing' && this.backend === 'native') this.verifySpectrum();
     }
     this.emit();
     this.onProgress?.(this.nativePositionMs, this.durationMs());
@@ -939,8 +951,9 @@ export class AudioEngine {
     this.setNativePosition(startMs);
     this.nativeDurationMs = track.durationMs;
     this.spectrumLive = false;
-    // A new track is a fresh budget for a dead tap.
-    this.spectrumRestarts = 0;
+    // A new track is a fresh budget for a tap that will not answer. (v1.7.7: a *budget*, not a
+    // rebuild — the tap on the previous item is left where it is and the new item gets its own.)
+    this.spectrumRechecks = 0;
     this.modeReason =
       'native playback (AVFoundation / ExoPlayer) — this is the engine that keeps going when you leave the app and the one the lock screen drives; the spectrum is an FFT of the same stream, read from the native audio tap';
     // A load is an unload + preload: the outgoing asset's stop must not be read as a track ending.
@@ -1032,7 +1045,7 @@ export class AudioEngine {
      * zero-poll counter is for, and it costs nothing to start reading first.
      */
     this.spectrumPoll = setInterval(() => void this.pollSpectrum(), SPECTRUM_POLL_MS);
-    this.lastSpectrumRestartAt = this.clockNow();
+    this.lastSpectrumRecheckAt = this.clockNow();
     void bridge
       .startSpectrum(track.url, positionMs)
       .then((started) => {
@@ -1056,10 +1069,17 @@ export class AudioEngine {
    * Disarm the visualiser, because the engine is not playing any more.
    *
    * `paused`, `ended`, `interrupted`, `error`, `idle`: the spectrum is a picture of what is being
-   * heard, and nothing is. Note what is *not* here — leaving the app, or handing playback between
-   * engines, neither of which exists any more.
+   * heard, and nothing is. Note what is *not* here — there is no call to the native tap at all, and
+   * that absence is v1.7.7's whole point.
+   *
+   * v1.7.6 called `stopSpectrum` from here, so leaving `playing` took the audio mix off the player's
+   * item; the resume then put a new mix back on a player that was already rendering, which is an
+   * audible reconfiguration of the audio pipeline — the owner's *"a short pause"* in the middle of a
+   * song, immediately before the bars came back. The tap is now installed for the life of the item and
+   * outlives every one of these states. The bars settle to zero because the engine has no frame to
+   * hand the canvas (the visualiser's own release envelope), not because anything was taken apart.
    */
-  private stopConsumers(reason: string): void {
+  private disarmConsumers(reason: string): void {
     if (this.spectrumPoll !== null) {
       clearInterval(this.spectrumPoll);
       this.spectrumPoll = null;
@@ -1067,7 +1087,6 @@ export class AudioEngine {
     this.stopMeter();
     this.nativeBands = null;
     this.spectrumZeroPolls = 0;
-    void this.native?.stopSpectrum?.();
     if (this.spectrumLive) {
       this.spectrumLive = false;
       this.modeReason = reason;
@@ -1094,10 +1113,13 @@ export class AudioEngine {
       }
       this.spectrumLive = false;
       /*
-       * The tap has gone quiet while the engine is playing — iOS tore the silent player down (it
-       * happens across a suspension, and it happens quietly). Rebuild it rather than leave the
-       * visualiser dark for the rest of the track. A tap that will not stay up is not retried for
-       * ever: {@link MAX_SPECTRUM_RESTARTS} rebuilds, then the theme and one honest sentence.
+       * The tap has gone quiet while the engine is playing. There is no silent copy to be torn down
+       * any more; the honest causes are a tap that was never installed on *this* item (the plugin
+       * replaced its item and the mix went with the old one) and a stream that is genuinely silent.
+       * So the tap is *verified* — one read of the plugin, which writes nothing when the item already
+       * carries this tap — rather than detached and rebuilt, which is what put an audible gap in the
+       * middle of a song. A tap that will not stay up is not re-checked for ever:
+       * {@link MAX_SPECTRUM_RECHECKS} checks, then the theme and one honest sentence.
        */
       if (this.state !== 'playing') {
         this.spectrumDeadPolls = 0;
@@ -1105,23 +1127,23 @@ export class AudioEngine {
       }
       this.spectrumDeadPolls += 1;
       if (this.spectrumDeadPolls < ZERO_POLLS_BEFORE_THEME) return;
-      if (this.clockNow() - this.lastSpectrumRestartAt < SPECTRUM_RESTART_MS) return;
-      if (this.spectrumRestarts >= MAX_SPECTRUM_RESTARTS) {
+      if (this.clockNow() - this.lastSpectrumRecheckAt < SPECTRUM_RECHECK_MS) return;
+      if (this.spectrumRechecks >= MAX_SPECTRUM_RECHECKS) {
         this.spectrumDeadPolls = 0;
-        this.stopConsumers('the spectrum tap would not stay up on this stream — the bars are on the album-art theme, and the audio is untouched');
+        this.disarmConsumers('the spectrum tap would not stay up on this stream — the bars are on the album-art theme, and the audio is untouched');
         this.emit();
         return;
       }
-      this.spectrumRestarts += 1;
-      this.restartSpectrum();
+      this.spectrumRechecks += 1;
+      this.verifySpectrum();
       return;
     }
     this.spectrumDeadPolls = 0;
     this.nativeBands = Uint8Array.from(frame.bands);
     if (frame.live) {
       this.spectrumZeroPolls = 0;
-      // A tap that has produced real frames has proved itself: the rebuild budget starts again.
-      this.spectrumRestarts = 0;
+      // A tap that has produced real frames has proved itself: the re-check budget starts again.
+      this.spectrumRechecks = 0;
       if (!this.spectrumLive) {
         this.spectrumLive = true;
         this.modeReason = 'real spectrum — an FFT of the stream this player is playing, read from the native audio tap';
@@ -1158,12 +1180,41 @@ export class AudioEngine {
     return this.nativeClock() >= duration - SPECTRUM_NEAR_END_MS;
   }
 
-  /** Tear the tap down and build it again — for a consumer that has gone quiet while playing. */
-  private restartSpectrum(): void {
+  /**
+   * Confirm the tap is still on the player, and re-arm the poll if the web view let it die.
+   *
+   * v1.7.7 — this replaces v1.7.6's `restartSpectrum`, which disarmed and then re-armed, i.e. called
+   * `stopSpectrum` (mix off the item) and then `startSpectrum` (a new mix on a playing item). That
+   * detach-then-install pair is the family of path the card names as the bug: it is what made the
+   * bars vanish until a whole new track was loaded, and the reconfiguration it performed on a
+   * rendering item is what the owner heard as *"a short pause"*.
+   *
+   * Nothing here detaches. `startSpectrum` reaches the plugin's `start`, which finds the audible
+   * player and calls `attach`, which **verifies** an item that already carries this tap — no mix
+   * written, no tap created — and only installs when the item is genuinely a different one, i.e. a
+   * new load, which is the one moment a tap can be installed without touching audio being rendered.
+   * So a resume, a return from the background and a dead-poll retry are all cheap reads that cannot
+   * make a sound. Idempotent, and safe while the tap is already healthy.
+   */
+  private verifySpectrum(): void {
     if (this.backend !== 'native' || this.state !== 'playing') return;
-    // Through the one stop, so the poll's interval is cleared rather than orphaned.
-    this.stopConsumers('re-arming the spectrum tap on the stream the player is playing');
-    this.startConsumers();
+    const bridge = this.native;
+    const track = this.track;
+    if (!bridge?.startSpectrum || !track) return;
+    this.lastSpectrumRecheckAt = this.clockNow();
+    if (this.spectrumPoll === null) {
+      /*
+       * The poll itself died — the web view was suspended long enough that its timers went with it.
+       * Arming it again is the recovery, and it reaches the plugin's verify on its own.
+       */
+      this.startConsumers();
+      return;
+    }
+    /*
+     * The poll is alive, so what needs confirming is the *tap*: exactly one call, which is a read
+     * unless the item has been replaced under us.
+     */
+    void bridge.startSpectrum(track.url, this.nativePositionMs).catch(() => undefined);
   }
 
   /** Line the tap up with the position the audible player reports. */

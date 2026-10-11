@@ -114,3 +114,7 @@ Plain language, user-visible changes only. The app shows this same list under
 ## 1.7.6 — 2026-10-11
 
 - The bars are drawn from the song you are hearing, and nothing else plays underneath it. Up to now a second, silent copy of the same song was fetched and decoded alongside it — two copies of one stream, which is extra work for the phone and for your library in the one place that can make the sound stutter. That copy is gone: one player, the one you can hear.
+
+## 1.7.7 — 2026-10-11
+
+- The bars no longer need a new song before they come back. Pausing, or leaving the app and returning, used to take the spectrum apart and put it back together while the song was already playing — which is why it sometimes stayed dark until you picked another track, and why you heard a small gap in the music just before it returned. It is now fitted once and left alone, so it is there the moment the sound is.

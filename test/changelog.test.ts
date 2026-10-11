@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.7.6, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4', '1.7.5', '1.7.6']);
+test('the changelog is the owner-visible list: v1.0 through v1.7.7, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4', '1.7.5', '1.7.6', '1.7.7']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -256,5 +256,22 @@ test('the v1.7.6 entry names the second copy of the song, in his terms', () => {
   assert.match(text, /stutter/, 'the symptom it could cause');
   for (const item of v176?.items ?? []) {
     assert.doesNotMatch(item, /AVPlayer|MTAudioProcessingTap|tap|plugin|FFT|vDSP|AVFoundation|engine/i);
+  }
+});
+
+test('the v1.7.7 entry names the two things he saw — the bars that would not come back, and the gap', () => {
+  const v177 = CHANGELOG.find((release) => release.version === '1.7.7');
+  const text = v177?.items.join('\n') ?? '';
+  /*
+   * His report, said as the thing that happened to him: the spectrum that stayed dark until he picked
+   * another song, and the small gap in the music just before the bars returned. The entry names both,
+   * and neither is described as a mechanism — no tap, no plugin, no player object, no lifecycle.
+   */
+  assert.match(text, /no longer need a new song before they come back/, 'the workaround he had to use');
+  assert.match(text, /stayed dark until you picked another track/, 'the symptom, in his terms');
+  assert.match(text, /leaving the app and returning/, 'and the second way he saw it');
+  assert.match(text, /small gap in the music/, 'the gap he heard on the phone');
+  for (const item of v177?.items ?? []) {
+    assert.doesNotMatch(item, /AVPlayer|MTAudioProcessingTap|tap|plugin|FFT|vDSP|AVFoundation|engine|lifecycle|mix/i);
   }
 });
