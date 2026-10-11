@@ -877,6 +877,309 @@
     return 'the row itself';
   }
 
+  /**
+   * The native spectrum and the clock, in the shipping engine, on the device (v1.7.2).
+   *
+   * Everything else in this file runs in a browser, where the audio engine is the `<audio>` element
+   * and the analyser. The paths that matter for the owner's report — the native player, the tap on
+   * it, and the return from the background — only exist in the wrapped build, so this scenario is
+   * run from the *app* in the simulator (`tools/device-probe.mjs --app … --native-audio …`).
+   *
+   * What it reads, in the order the owner described it:
+   *
+   *   (a) select a song, then read the position 250 ms later — the clock must have moved (his
+   *       complaint was *"when initially selecting the song, it is stuck at 0:00"*);
+   *   (b) the bands while that track plays — how many of the 64 are non-zero, how they move from
+   *       frame to frame, whether any is pinned at maximum (his *"the spectrum seems to go crazy"*)
+   *       and whether quiet frames read quieter;
+   *   (c) a foreground round trip: the readings are taken before the app leaves the screen, the
+   *       harness backgrounds and relaunches it, and the readings are taken again afterwards —
+   *       from the *player's own* state, not from the UI. If no real event arrives (a run without a
+   *       harness behind it) the same round trip is driven in-page, and the report says which one
+   *       it was rather than implying the stronger reading.
+   */
+  function nativeSpectrumProbe(options) {
+    var opts = options || {};
+    var roundTripTimeoutMs = opts.roundTripTimeoutMs || 30000;
+    var result = { startedAt: new Date().toISOString(), selection: {}, frames: [], roundTrip: {} };
+    /*
+     * Published as soon as it exists, and mutated in place: a probe that hangs on the platform still
+     * has everything it read up to that point, and the caller can post it rather than losing the run
+     * (see the watchdog in tools/device-probe.mjs's bootstrap).
+     */
+    nativeSpectrumProbe.lastResult = result;
+
+    function api() {
+      return window.__navilite || null;
+    }
+
+    function status() {
+      var seam = api();
+      return seam ? seam.status() : null;
+    }
+
+    function sleep(ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    }
+
+    function frameStats(frame) {
+      if (!frame || typeof frame.length !== 'number') return null;
+      var nonZero = 0;
+      var pinned = 0;
+      var min = Infinity;
+      var max = -Infinity;
+      var total = 0;
+      for (var i = 0; i < frame.length; i += 1) {
+        var value = frame[i];
+        if (value > 0) nonZero += 1;
+        if (value >= 255) pinned += 1;
+        if (value < min) min = value;
+        if (value > max) max = value;
+        total += value;
+      }
+      return {
+        length: frame.length,
+        nonZero: nonZero,
+        pinned: pinned,
+        min: min === Infinity ? 0 : min,
+        max: max === -Infinity ? 0 : max,
+        mean: Math.round(total / frame.length),
+        checksum: Math.round(total * 1000 + nonZero * 7 + max * 31),
+      };
+    }
+
+    /** Never let a native call hold the report hostage: a call that never settles reads as null. */
+    function withTimeout(promise, ms, fallback) {
+      return new Promise(function (resolve) {
+        var settled = false;
+        var timer = setTimeout(function () {
+          if (settled) return;
+          settled = true;
+          resolve(fallback);
+        }, ms);
+        Promise.resolve(promise).then(function (value) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }).catch(function () {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        });
+      });
+    }
+
+    /** One reading: the app's own view, the canvas's own bands, and the tap's own counters. */
+    function reading(label) {
+      var state = status();
+      var bands = api() && api().spectrumBands ? api().spectrumBands() : null;
+      var tapCall = api() && api().nativeSpectrum ? api().nativeSpectrum() : null;
+      /*
+       * And the bars as drawn, off the canvas itself — the pixels, not the numbers the app says it
+       * is feeding them. If the two ever disagree, the canvas is the one the owner is looking at.
+       * The PNG is dropped: 10 frames of it would be megabytes of base64 through a measurement
+       * channel, and the lit-pixel count plus the checksum is what compares frame to frame.
+       */
+      var drawn = typeof spectrumSnapshot === 'function' ? spectrumSnapshot() : null;
+      return withTimeout(tapCall, 4000, null).then(function (tap) {
+        return {
+          label: label,
+          at: Date.now(),
+          state: state ? state.state : null,
+          backend: state ? state.backend : null,
+          reportedSpectrum: state ? state.spectrum : null,
+          modeReason: state ? state.modeReason : null,
+          positionMs: state ? Math.round(state.positionMs) : null,
+          durationMs: state ? Math.round(state.durationMs) : null,
+          bands: frameStats(bands),
+          canvas: drawn ? { lit: drawn.lit, checksum: drawn.checksum, size: drawn.canvas } : null,
+          tap: tap
+            ? {
+                live: tap.live,
+                frames: tap.frames,
+                silentFrames: tap.silentFrames,
+                positionMs: Math.round(tap.positionMs),
+                playing: tap.playing,
+                readable: tap.readable,
+                sampleRate: tap.sampleRate,
+              }
+            : null,
+          tapBands: tap && tap.bands ? frameStats(tap.bands) : null,
+        };
+      });
+    }
+
+    var realEvents = [];
+    function onVisibility() {
+      realEvents.push({ hidden: document.hidden, at: Date.now() });
+    }
+    document.addEventListener('visibilitychange', onVisibility);
+
+    function waitForRoundTrip() {
+      var started = Date.now();
+      return new Promise(function (resolve) {
+        var timer = setInterval(function () {
+          var hidden = realEvents.some(function (event) {
+            return event.hidden;
+          });
+          var shownAgain = hidden && realEvents[realEvents.length - 1].hidden === false;
+          if (shownAgain) {
+            clearInterval(timer);
+            resolve({ real: true, events: realEvents.slice(), waitedMs: Date.now() - started });
+            return;
+          }
+          if (Date.now() - started > roundTripTimeoutMs) {
+            clearInterval(timer);
+            resolve({ real: false, events: realEvents.slice(), waitedMs: Date.now() - started });
+          }
+        }, 250);
+      });
+    }
+
+    /** The in-page stand-in, for a run with no harness behind it. Reported as such. */
+    function syntheticRoundTrip() {
+      var descriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+      function setHidden(value) {
+        Object.defineProperty(document, 'hidden', { configurable: true, get: function () { return value; } });
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+      setHidden(true);
+      return sleep(2000).then(function () {
+        setHidden(false);
+        return sleep(600);
+      }).then(function () {
+        if (descriptor) Object.defineProperty(Document.prototype, 'hidden', descriptor);
+        return { real: false, events: realEvents.slice(), waitedMs: 2600 };
+      });
+    }
+
+    return waitFor("Boolean(window.__navilite && window.__navilite.libraryReady())", 'the library to be connected', 20000)
+      .then(function () {
+        // Play a stress track the way a person does: open a list, tap a row.
+        location.hash = '#/album/album-ja-1';
+        return waitFor("document.querySelectorAll('.row.song').length > 0", 'the stress album', 20000);
+      })
+      .then(function () {
+        result.selection.tappedAt = Date.now();
+        result.selection.target = playRow(0);
+        return sleep(250);
+      })
+      .then(function () {
+        /*
+         * (a) The clock 250 ms after the selection — and the bands from the moment the engine is
+         * asked, which is *before* the plugin's `start` promise can have come back. The first frame
+         * that is live is the moment the bars stop being the theme, and the offset from the tap is
+         * the honest number for "how long are they flat at the start of a track".
+         */
+        var early = [];
+        return (function nextEarly(index) {
+          if (index >= 5) return Promise.resolve(early);
+          return reading('early-' + index).then(function (one) {
+            early.push(one);
+            return sleep(80).then(function () {
+              return nextEarly(index + 1);
+            });
+          });
+        })(0).then(function (taken) {
+          result.early = taken;
+        });
+      })
+      .then(function () {
+        var state = status();
+        result.selection.positionAfter250ms = state ? Math.round(state.positionMs) : null;
+        result.selection.stateAfter250ms = state ? state.state : null;
+        result.selection.backendAfter250ms = state ? state.backend : null;
+        return sleep(900);
+      })
+      .then(function () {
+        // (b) The bands, frame by frame, as the visualiser reads them.
+        var reads = [];
+        function next(index) {
+          if (index >= 10) return Promise.resolve(reads);
+          return reading('frame-' + index).then(function (one) {
+            reads.push(one);
+            return sleep(45).then(function () {
+              return next(index + 1);
+            });
+          });
+        }
+        return next(0).then(function (frames) {
+          result.frames = frames;
+        });
+      })
+      .then(function () {
+        // (c) The foreground round trip.
+        return reading('before-hide').then(function (before) {
+          result.roundTrip.before = before;
+          result.roundTrip.readyForHarnessAt = new Date().toISOString();
+          /*
+           * Tell the harness on the host, through the same channel as everything else, that the
+           * "before" reading is held and the gap should start now. Without this the two ends would
+           * be racing: tools/spectrum-roundtrip.mjs backgrounds the app, and it has to do it *after*
+           * this reading and not before it.
+           */
+          try {
+            fetch('/__report', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ progress: 'ready for the foreground round trip', at: new Date().toISOString() }),
+            });
+          } catch (error) {
+            void error;
+          }
+          return waitForRoundTrip();
+        });
+      })
+      .then(function (events) {
+        if (!events.real) return syntheticRoundTrip().then(function (synthetic) {
+          result.roundTrip.driver = 'the probe itself (no harness behind this run)';
+          result.roundTrip.events = synthetic.events;
+          return true;
+        });
+        result.roundTrip.driver = 'the harness, with the app really backgrounded and relaunched';
+        result.roundTrip.events = events.events;
+        return true;
+      })
+      .then(function () {
+        return sleep(1200);
+      })
+      .then(function () {
+        return reading('after-show').then(function (after) {
+          result.roundTrip.after = after;
+          result.roundTrip.gapMs = after.at - result.roundTrip.before.at;
+          result.roundTrip.positionAdvancedMs = after.positionMs - result.roundTrip.before.positionMs;
+          document.removeEventListener('visibilitychange', onVisibility);
+          return result;
+        });
+      })
+      .then(function () {
+        /*
+         * (d) No audio, no bars.
+         *
+         * A pause is the one silence this library can produce on the device: every fixture in the
+         * stress library is a continuous tone (tools/audio.mjs), so there is no quiet passage to seek
+         * into and no silent track to play. What this does prove is the other half of the owner's
+         * complaint — that the bars are a reading and not a decoration, and that the app stops
+         * claiming it is drawing one when nothing is playing: the engine must drop the live frame,
+         * say why, and the canvas must stop showing bars it is not measuring.
+         */
+        var play = document.querySelector('.now-bar .transport.big');
+        if (!play) return null;
+        play.click();
+        return sleep(700).then(function () {
+          return reading('paused');
+        });
+      })
+      .then(function (paused) {
+        if (paused) result.paused = paused;
+        return result;
+      });
+  }
+
   /** A gesture in progress: finger down, moved sideways, not yet lifted. */
   function beginSwipe(selector) {
     var target = document.querySelector(selector);
@@ -1006,16 +1309,15 @@
     queue('Playlist (#/playlist/pl-stress-ja) — long Japanese playlist name', function () {
       return setHash('#/playlist/pl-stress-ja', "document.querySelectorAll('.row.song').length > 0", 'the stress playlist');
     });
-    queue('Settings (#/settings) — the long playback-preference select', function () {
-      return setHash('#/settings', "document.querySelector('select') !== null", 'settings');
+    queue('Settings (#/settings)', function () {
+      return setHash('#/settings', "document.querySelector('.settings') !== null", 'settings');
     });
-    // The owner's own screen, in the state he reported it in: the playback dropdown, focused —
-    // which is the moment iOS decides whether to zoom.
-    queue('Settings — the playback dropdown focused (the screen the owner reported)', function () {
-      return setHash('#/settings', "document.querySelector('select') !== null", 'settings');
-    }, function () {
-      return focusProbe('select.field');
-    });
+    /*
+     * The two entries that used to sit here both keyed off the playback preference dropdown — the
+     * one whose own text was wider than its box (v1.5.1) and the one that took focus at 15 px and
+     * zoomed the screen in (v1.5). v1.7.3 deleted that dropdown along with the second audio engine
+     * it selected, so neither state can recur and there is nothing left on this route to walk.
+     */
     queue('Changelog (#/changelog)', function () {
       return setHash('#/changelog', "document.querySelector('.release') !== null", 'the changelog');
     });
@@ -2043,6 +2345,7 @@
     lyricsDensity: lyricsDensity,
     spectrumSnapshot: spectrumSnapshot,
     silenceAudio: silenceAudio,
+    nativeSpectrumProbe: nativeSpectrumProbe,
     waitFor: waitFor,
     walk: walk,
     // v1.4: the scroll-containment readings and the self-driven scenario.

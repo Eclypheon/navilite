@@ -936,6 +936,14 @@ const server = createServer((request, response) => {
     state.requests = [];
     state.scrobbles = [];
     state.lyrics = [];
+    /*
+     * The header promises "clear that state", and `/__state` lists the saved play queue and the
+     * starred ids among it. Both live for the life of this process, so without these two lines a
+     * harness run inherits the *previous* run's queue: the app restores it on boot (v1.6's
+     * exact-resume, see src/ui/app.ts `restorePlayQueue`) and comes up already playing a track.
+     */
+    state.starred.clear();
+    state.playQueue = null;
     send(response, 200, { reset: true }, { 'content-type': 'application/json; charset=utf-8' });
     return;
   }

@@ -23,7 +23,7 @@ import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
-import { loadSettings, saveSettings, type PlaybackPreference, type Settings } from '../storage/settings.ts';
+import { loadSettings, saveSettings, type Settings } from '../storage/settings.ts';
 import { loadSnapshot } from '../storage/session.ts';
 import { CHANGELOG } from './changelog.ts';
 import { ICONS, cover, formatDuration, formatTime, h, icon, playIcon, replace, starIcon } from './dom.ts';
@@ -130,6 +130,16 @@ interface Shell {
   /** v1.6: the screen a stacked one (settings, the changelog) was opened from. */
   stackedFrom: string;
   scrubbing: boolean;
+  /**
+   * Where the finger is, in ms, while a seek bar is being dragged (v1.7.2).
+   *
+   * The label used to be written only from the engine's own position, and only when no finger was
+   * down — so while dragging, the clock sat still and he had no way to know where he was seeking
+   * to. *"can you make it so the timing changes dynamically as i drag the seek bar so i know to what
+   * time im seeking to if i release it?"* This is that number: the destination, shown from the
+   * finger rather than from the player, and cleared the moment the gesture ends — however it ends.
+   */
+  scrubMs: number | null;
   /** The route whose content is in `view` right now — the key the scroll restore is filed under. */
   viewRoute: string | null;
   /** True while the now-playing screen covers `view` and its scroll container is frozen. */
@@ -160,7 +170,14 @@ export async function boot(root: HTMLElement): Promise<void> {
   const settings = loadSettings();
   const secrets = await createSecretStore(platform.os);
   const engine = new AudioEngine();
-  engine.setPreference(settings.playback);
+  /*
+   * The one engine, and the one place a build chooses it: inside the Capacitor shell the native
+   * player, in a browser the media element. There is no preference that selects between them any
+   * more (v1.7.3 deleted "web audio only"), and nothing to hand over at hide time. `prewarm()`
+   * builds the native bridge before the first press so the press does not pay for it — it produces
+   * no sound.
+   */
+  engine.prewarm();
 
   const shell = buildShell(root);
   const visualizer = attachVisualizer(shell.canvas, engine, DEFAULT_PALETTE);
@@ -203,13 +220,28 @@ export async function boot(root: HTMLElement): Promise<void> {
 
   window.addEventListener('hashchange', () => renderRoute(ctx, shell));
   engine.subscribe((status) => updatePlayerBar(ctx, shell, status));
-  document.addEventListener('visibilitychange', () => {
-    void ctx.engine.handleVisibility(document.hidden);
-    // Going out of sight is the last moment the app is guaranteed to be running: write the exact
-    // resume snapshot here rather than hope the OS gives us another tick.
-    if (document.hidden) ctx.queue?.flushSnapshot();
-  });
-  window.addEventListener('pagehide', () => ctx.queue?.flushSnapshot());
+  refreshSeekLabels = () => updatePlayerBar(ctx, shell, engine.status());
+  /*
+   * Going out of sight is the last moment the app is guaranteed to be running: write the exact
+   * resume snapshot here rather than hope the OS gives us another tick.
+   */
+  const onLifecycle = (hidden: boolean): void => {
+    void ctx.engine.handleVisibility(hidden);
+    if (hidden) ctx.queue?.flushSnapshot();
+  };
+  /*
+   * Every lifecycle input, into the one machine.
+   *
+   * `visibilitychange` is the one that fires on iOS when the app is backgrounded; `pageshow` /
+   * `pagehide` and `focus` cover the web page and the cases where visibility alone does not move
+   * (a bfcache restore, a tab that was never hidden). Capacitor's own `appStateChange` is not
+   * wired because `@capacitor/app` is not a dependency of this app, and adding one for an event
+   * `visibilitychange` already delivers on both platforms would be a new moving part, not a fix.
+   */
+  document.addEventListener('visibilitychange', () => onLifecycle(document.hidden));
+  window.addEventListener('pagehide', () => onLifecycle(true));
+  window.addEventListener('pageshow', () => onLifecycle(document.hidden));
+  window.addEventListener('focus', () => onLifecycle(false));
   window.addEventListener('keydown', (event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
     if (event.key === ' ') {
@@ -248,6 +280,18 @@ export async function boot(root: HTMLElement): Promise<void> {
     lyrics: () => Array.from(document.querySelectorAll('.lyric-line')).map((node) => node.textContent),
     activeLyric: () => document.querySelector('.lyric-line.active')?.textContent ?? null,
     lyricsMessage: () => document.querySelector('.lyrics-empty')?.textContent ?? null,
+    /**
+     * v1.7.2: the spectrum the canvas is drawing from, band by band — the native tap's own frame
+     * when the native player is the engine, and the analyser's bins otherwise. Read-only, and the
+     * only way an end-to-end check (or a person with devtools) can quote what the bars are showing.
+     */
+    spectrumBands: () => {
+      const data = engine.spectrumData();
+      return data ? Array.from(data) : null;
+    },
+    /** The last native tap frame, straight from the plugin: bands plus the tap's own counters. */
+    nativeSpectrum: () => engine.readNativeFrame(),
+
     /** The track the player is on, and the track the lyrics panel loaded for. */
     tracks: () => ({
       playing: ctx.queue?.currentSong?.id ?? null,
@@ -489,6 +533,7 @@ function buildShell(root: HTMLElement): Shell {
     lastBrowseRoute: DEFAULT_ROUTE,
     stackedFrom: '',
     scrubbing: false,
+    scrubMs: null,
     viewRoute: null,
     scrollLocked: false,
     pendingScroll: null,
@@ -514,6 +559,16 @@ function buildShell(root: HTMLElement): Shell {
 
 /** The queue is created after the shell, so the shell's buttons read it lazily. */
 let queueRef: PlaybackQueue | null = null;
+
+/**
+ * How a settled (or cancelled) seek puts the label back where it belongs.
+ *
+ * `updatePlayerBar` is the one writer of the transport's own position, and it is created with the
+ * app context — after the shell, and therefore after the seek bars are bound. This is the seam
+ * between them: a hook the bars call when the finger has gone, so the number stops being the
+ * finger's and becomes the player's again on the same frame rather than on the next status event.
+ */
+let refreshSeekLabels: () => void = () => undefined;
 
 function togglePlayback(): void {
   void queueRef?.toggle();
@@ -848,6 +903,14 @@ function setNowMode(mode: NowMode): void {
  *      `pointerdown` and on `touchstart`, because audio controls are reached by touch) and cleared
  *      when the gesture ends however it ends, so the engine's own position updates stop writing the
  *      input's value while a finger is on it.
+ *
+ * v1.7.2 — *"can you make it so the timing changes dynamically as i drag the seek bar so i know to
+ * what time im seeking to if i release it?"*: the **label** follows the thumb now, not just the
+ * thumb's position. v1.7.1 sought continuously, but the clock beside the bar was still written from
+ * the player's own position and only when no finger was down, so the number under his thumb never
+ * moved — the seek was happening, and the screen said nothing about it. `shell.scrubMs` is the
+ * destination: written on every move, by whichever of the two bars is being dragged, and cleared on
+ * release (which commits it) or on cancel (which does not, and puts the real position back).
  */
 const SEEK_INTERVAL_MS = 120;
 
@@ -865,17 +928,49 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
     void queue.seek(ms);
   };
 
+  /** The label, written from the finger: both bars show the same destination, wherever it was dragged. */
+  const showDestination = (ms: number): void => {
+    shell.scrubMs = ms;
+    const text = formatTime(ms / 1000);
+    shell.barPosition.textContent = text;
+    shell.nowPosition.textContent = text;
+    shell.barProgress.value = input.value;
+    shell.nowProgress.value = input.value;
+  };
+
   const begin = (): void => {
     shell.scrubbing = true;
   };
 
   /** Whatever ends the gesture: stop hiding the thumb, and seek to where the finger left it. */
   const finish = (): void => {
+    const wasScrubbing = shell.scrubbing;
     shell.scrubbing = false;
+    shell.scrubMs = null;
     if (trailing !== null) clearTimeout(trailing);
     trailing = null;
     pendingMs = null;
+    if (!wasScrubbing) return;
     if (durationOf() > 0) commit(valueMs());
+    // The bar goes back to the player's own clock — which is now the position that was just asked
+    // for, so the label stays where the finger left it rather than snapping back.
+    refreshSeekLabels();
+  };
+
+  /**
+   * A cancelled gesture commits nothing and puts the real position back.
+   *
+   * The thumb was dragged away by the platform (a call, a system gesture, the screen locking), so
+   * the track never went anywhere and the label must not keep claiming it did.
+   */
+  const cancel = (): void => {
+    if (!shell.scrubbing) return;
+    shell.scrubbing = false;
+    shell.scrubMs = null;
+    pendingMs = null;
+    if (trailing !== null) clearTimeout(trailing);
+    trailing = null;
+    refreshSeekLabels();
   };
 
   input.addEventListener('pointerdown', begin);
@@ -885,6 +980,8 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
     if (duration <= 0) return;
     const ms = valueMs();
     input.setAttribute('aria-valuetext', formatTime(ms / 1000));
+    // The number under the thumb moves on every frame of the drag, whether or not a seek is sent.
+    showDestination(ms);
     const now = performance.now();
     if (now - lastSeekAt >= SEEK_INTERVAL_MS) {
       lastSeekAt = now;
@@ -906,9 +1003,9 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
   });
   input.addEventListener('change', finish);
   input.addEventListener('pointerup', finish);
-  input.addEventListener('pointercancel', finish);
+  input.addEventListener('pointercancel', cancel);
   input.addEventListener('touchend', finish, { passive: true });
-  input.addEventListener('touchcancel', finish, { passive: true });
+  input.addEventListener('touchcancel', cancel, { passive: true });
 }
 
 function queueDurationMs(queue: PlaybackQueue | null): number {
@@ -1660,27 +1757,6 @@ async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promis
 }
 
 function renderSettings(ctx: AppContext, shell: Shell): void {
-  const preferenceSelect = h('select', { class: 'field inline' }, [
-    ...(
-      [
-        ['auto', 'Automatic — native playback, with the real spectrum while the app is open (recommended)'],
-        ['web', 'Web Audio only — the real spectrum, at the cost of stopping when the platform suspends the page'],
-        ['native', 'Native only — no second stream for the analyser, so the spectrum stays the album-art theme'],
-      ] as Array<[PlaybackPreference, string]>
-    ).map(([value, label]) => {
-      const option = h('option', { value, text: label });
-      if (ctx.settings.playback === value) option.selected = true;
-      return option;
-    }),
-  ]);
-  preferenceSelect.addEventListener('change', () => {
-    const preference = preferenceSelect.value as PlaybackPreference;
-    ctx.settings = { ...ctx.settings, playback: preference };
-    saveSettings(ctx.settings);
-    ctx.engine.setPreference(preference);
-    ctx.toast('Playback preference saved');
-  });
-
   const whatsNew = h('button', { class: 'button', text: "What's new" }, [icon(ICONS.changelog, 16)]);
   whatsNew.addEventListener('click', () => (location.hash = '#/changelog'));
 
@@ -1720,8 +1796,7 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
         ? 'Stored by the operating system (Keychain / Android Keystore), not in web storage.'
         : 'Plain web storage. That is the honest limit of an installable PWA on iOS and Android — the wrapped builds avoid it.' }),
       h('h2', { class: 'section', text: 'Playback and visualiser' }),
-      preferenceSelect,
-      h('p', { class: 'muted small', text: 'Automatic plays through the phone\'s own audio engine, which is the one that keeps going when you leave the app, and reads the spectrum from a silent second copy of the same stream — only while the app is open. Web Audio only means the page does the playing, which some platforms stop as soon as you leave; it is here for the web page and for debugging.' }),
+      h('p', { class: 'muted small', text: 'One audio engine, chosen by the app rather than by a setting: the phone\'s own player in the installed app, the page itself in a browser. The spectrum reads the same player the sound comes from, so the bars are always in step with what you hear.' }),
       h('h2', { class: 'section', text: 'Lyrics' }),
       h('p', { class: 'muted small', text: `Lyrics come from your own library — the lyrics file that sits next to the song — and are cached on this device only (${ctx.lyrics.cachedTracks} track${ctx.lyrics.cachedTracks === 1 ? '' : 's'} right now). Nothing is bundled with the app and nothing is fetched from anyone else.` }),
       h('div', { class: 'row' }, [clearLyrics]),
@@ -1865,7 +1940,16 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
     replace(shell.nowRepeat, icon(repeat === 'one' ? ICONS.repeatOne : ICONS.repeat, 20));
   }
 
-  if (!shell.scrubbing) {
+  if (shell.scrubbing && shell.scrubMs !== null) {
+    /*
+     * A finger is on a seek bar: the label is the *destination*, not the position (v1.7.2). Written
+     * here as well as on every move, so a status event that lands mid-drag cannot pull the number
+     * back out from under the thumb.
+     */
+    const text = formatTime(shell.scrubMs / 1000);
+    shell.barPosition.textContent = text;
+    shell.nowPosition.textContent = text;
+  } else if (!shell.scrubbing) {
     const ratio = durationMs > 0 ? Math.min(1, positionMs / durationMs) : 0;
     shell.barProgress.value = String(Math.round(ratio * 1000));
     shell.nowProgress.value = String(Math.round(ratio * 1000));

@@ -4,12 +4,13 @@
  * Two modes, and they are deliberately *different* rather than one mode pretending
  * to be the other:
  *
- *   spectrum — real `getByteFrequencyData()` frames from the playing stream, drawn
- *              as log-spaced bands.
+ *   spectrum — real frames from the engine that is playing, drawn as log-spaced bands:
+ *              `getByteFrequencyData()` frames on the web path, the 64 bands of the native
+ *              audio tap (`NaviliteSpectrum.swift`) in the installed app.
  *   theme    — a slow, smooth album-art-coloured animation, used when there are no
- *              samples to show (tainted stream, suspended audio context, native
- *              playback). It moves to its own clock, not to the music, because there
- *              is no music data to move to.
+ *              samples to show (tainted stream, suspended audio context, a build with
+ *              no tap on its native player). It moves to its own clock, not to the
+ *              music, because there is no music data to move to.
  *
  * The band edges are logarithmic over the lower ~60% of the analyser's bins, which is
  * where music lives; the top bins of a 2048-point FFT are above the content of most
@@ -155,7 +156,15 @@ export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine,
   }
 
   function drawSpectrum(c: CanvasRenderingContext2D, width: number, height: number, spectrum: Uint8Array): void {
-    const edgesForFrame = edges(spectrum.length);
+    /*
+     * Two shapes, one drawing: the analyser hands over the FFT's own bins (1024 of them), and the
+     * native tap hands over the 64 bands it already folded them into (`NaviliteSpectrum.swift`
+     * computes the same log spacing this file does, with vDSP). A frame that is already the width of
+     * the canvas is used as-is rather than re-binned — re-binning 64 bands through the log curve
+     * would throw away everything above ~38 and draw a spectrum of a spectrum.
+     */
+    const banded = spectrum.length === BAND_COUNT;
+    const edgesForFrame = banded ? null : edges(spectrum.length);
     const gap = Math.max(1, width / BAND_COUNT / 6);
     const bandWidth = width / BAND_COUNT - gap;
     const baseline = height * BASELINE;
@@ -167,11 +176,16 @@ export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine,
     c.globalAlpha = 1;
 
     for (let band = 0; band < BAND_COUNT; band += 1) {
-      const from = edgesForFrame[band];
-      const to = Math.max(from + 1, edgesForFrame[band + 1]);
-      let sum = 0;
-      for (let bin = from; bin < to && bin < spectrum.length; bin += 1) sum += spectrum[bin];
-      const magnitude = Math.pow(sum / (to - from) / 255, RESPONSE_CURVE);
+      let magnitude: number;
+      if (banded) {
+        magnitude = Math.pow(spectrum[band] / 255, RESPONSE_CURVE);
+      } else {
+        const from = edgesForFrame![band];
+        const to = Math.max(from + 1, edgesForFrame![band + 1]);
+        let sum = 0;
+        for (let bin = from; bin < to && bin < spectrum.length; bin += 1) sum += spectrum[bin];
+        magnitude = Math.pow(sum / (to - from) / 255, RESPONSE_CURVE);
+      }
       const barHeight = Math.max(1, magnitude * ceiling);
       c.fillRect(band * (bandWidth + gap), baseline - barHeight, bandWidth, barHeight);
     }

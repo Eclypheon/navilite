@@ -140,4 +140,16 @@ export const CHANGELOG: ChangelogRelease[] = [
       'Dragging the seek bar seeks. A swipe that starts on the bar belongs to the bar: the screens no longer turn while you are scrubbing, and the track follows your thumb as you drag it instead of jumping when you let go.',
     ],
   },
+  {
+    version: '1.7.3',
+    date: '2026-10-11',
+    items: [
+      'One audio engine now. The app had two ways of playing a song and could end up using either of them, and switching between the two was behind every one of these problems. There is one engine now, the phone\'s own, and the setting that let you choose is gone with it — the app decides, always the same way.',
+      'Coming back to the app always keeps playing. Leaving and returning no longer pauses the track, restarts it, or plays any part of it twice: the app asks the phone\'s player what it is doing and follows that answer. If you paused from the lock screen while you were away, that is what it shows — one tap on play starts it again from the same second.',
+      'The visualiser is always in step. It reads the player the sound is actually coming out of, and it stays on for as long as a track is playing — it no longer goes dark while the music carries on.',
+      'The clock follows the sound, and only the sound. Backgrounded, paused or interrupted, the time stands still: it never counts on while nothing is playing.',
+      'The time follows your finger. Drag the seek bar and the clock under it counts up or down with your thumb, so you can see where you are about to drop the needle before you let go; if the drag is cancelled, the clock goes back to where the music really is.',
+      'The clock starts when the song does. Picking a track used to sit at 0:00 until the player answered; the time now runs from the moment you tap.',
+    ],
+  },
 ];

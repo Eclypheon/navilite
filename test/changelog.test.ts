@@ -33,14 +33,36 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.7, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1']);
+test('the changelog is the owner-visible list: v1.0 through v1.7.3, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
       // Things that are invisible to him do not belong in this list.
       assert.doesNotMatch(item, /service worker|CORS|vite|webpack|refactor|bundle|esbuild|TypeScript/i);
     }
+  }
+});
+
+test('every v1.7.3 report the owner made is described in his own terms', () => {
+  const v173 = CHANGELOG.find((release) => release.version === '1.7.3');
+  const text = v173?.items.join('\n') ?? '';
+  /*
+   * His report, in the order he made it: two engines he could end up on, coming back to the app
+   * being "very buggy", pausing that kept repeating, a visualiser that switched itself off, and a
+   * clock that counted on with no sound. Plus the one carried over from the reclaimed v1.7.2 card:
+   * the time under the seek bar following his finger.
+   */
+  assert.match(text, /One audio engine now/, 'his report: it is buggy, and it is buggy in one mode or the other');
+  assert.match(text, /Coming back to the app always keeps playing/, 'his report: backgrounding and coming back');
+  assert.match(text, /paused from the lock screen/, 'his report: driving the player from outside the app while it was away');
+  assert.match(text, /The visualiser is always in step/, 'his report: the spectrum switching itself off');
+  assert.match(text, /The clock follows the sound/, 'his report: the clock incrementing with no sound');
+  assert.match(text, /time follows your finger/, 'the seek-bar time he asked to see while dragging');
+  assert.match(text, /drag is cancelled/, 'and the cancelled drag, which must put the real time back');
+  for (const item of v173?.items ?? []) {
+    // Invisible plumbing does not belong in his list: no engine names, no state machines.
+    assert.doesNotMatch(item, /FFT|vDSP|AVFoundation|ExoPlayer|plugin|analyser|Web Audio|bridge|state machine|WebKit|media element/i);
   }
 });
 

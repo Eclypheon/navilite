@@ -69,6 +69,17 @@ const WAIT_SECONDS = Number(argv.get('wait') ?? 180);
  * (§14.2). All three are short for the same reason `scroll` is.
  */
 const SCENARIO = argv.get('scenario') ?? 'walk-and-scroll';
+/**
+ * `--native-audio` runs the app with its **native** player, which is the only way the v1.7.2
+ * spectrum (an FFT tap inside the app) and the foreground round trip can be exercised at all.
+ *
+ * It flips two things about the probe, and both of them are the point: the native bridge is left
+ * visible (the layout runs hide it, because an unsigned simulator build has no Keychain and the
+ * app's credential store is the one thing that needs it), and the app is seeded with
+ * `playback: 'auto'` rather than `'web'`, so a tapped row goes to AVFoundation instead of to the
+ * `<audio>` element. Everything the layout scenarios measure is untouched by this flag.
+ */
+const NATIVE_AUDIO = argv.has('native-audio');
 // Default: the workspace build. `--dist` points the probe at some other payload — an older
 // release's assets, say, so the same scenario can be run before and after a change without
 // swapping anything in and out of the tree.
@@ -170,7 +181,7 @@ function buildProbeBundle() {
     // is one more thing that can go wrong on a device.
     localStorage.setItem(
       'navilite.settings',
-      JSON.stringify({ serverUrl: location.origin, username: cfg.username || 'navidrome', playback: 'web' }),
+      JSON.stringify({ serverUrl: location.origin, username: cfg.username || 'navidrome', playback: cfg.playback || 'web' }),
     );
     localStorage.setItem('navilite.subsonic-password', cfg.password || 'navidrome');
   } catch (error) {
@@ -226,6 +237,34 @@ function buildProbeBundle() {
       return audit.waitFor('Boolean(window.__navilite && window.__navilite.libraryReady())', 'the library to connect', 45000);
     })
     .then(function () {
+      if (cfg.scenario === 'spectrum') {
+        /*
+         * v1.7.2: the spectrum, the clock and the foreground return, inside the app with its native
+         * player — the paths no browser and no hidden-bridge probe can reach. The probe measures all
+         * three and posts them; the harness behind it (tools/spectrum-sim.sh) is what actually
+         * backgrounds and relaunches the app in the middle, and the report says which driver ran.
+         */
+        partial = { device: audit.DEVICE, environment: audit.environment(), states: {}, spectrumOnly: true };
+        beat('connected; measuring the native spectrum, the clock and the round trip');
+        /*
+         * A watchdog, because the measurement can hang: a Capacitor call that never settles, a
+         * platform that freezes a timer. Whatever was read before the hang is still the evidence, so
+         * it gets posted rather than lost.
+         */
+        setTimeout(function () {
+          var partial = audit.nativeSpectrumProbe.lastResult;
+          if (!partial || partial.posted) return;
+          partial.posted = true;
+          partial.watchdog = 'the run did not finish; this is what had been read';
+          post({ device: audit.DEVICE, environment: audit.environment(), spectrum: partial, spectrumOnly: true });
+        }, Number(cfg.spectrumWatchdogMs || 90000));
+        return audit.nativeSpectrumProbe().then(function (probe) {
+          probe.posted = true;
+          partial.spectrum = probe;
+          beat('spectrum readings taken');
+          return partial;
+        });
+      }
       if (cfg.scenario === 'scroll') {
         // See the --scenario scroll option: the scroll readings on their own, for a browser that
         // freezes a tab it cannot see before a full walk would finish.
@@ -361,7 +400,7 @@ function buildProbeBundle() {
 
   const index = join(probeDir, 'index.html');
   const html = readFileSync(index, 'utf8');
-  const configLiteral = `{ username: 'navidrome', password: 'navidrome', hideNativeBridge: ${APP_PATH ? 'true' : 'false'}, scenario: '${SCENARIO}' }`;
+  const configLiteral = `{ username: 'navidrome', password: 'navidrome', hideNativeBridge: ${APP_PATH && !NATIVE_AUDIO ? 'true' : 'false'}, scenario: '${SCENARIO}', playback: '${NATIVE_AUDIO ? 'auto' : 'web'}' }`;
   // The two probe scripts carry a query: Safari caches them by URL, and a stale probe is a silent
   // failure — the page loads, the probe script parses an error into the console, and the run ends
   // with "the layout probe did not load" while the code on disk is perfectly good.

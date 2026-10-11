@@ -41,6 +41,10 @@
  *   node tools/mock-subsonic.mjs --port 4651 --stress --dist dist
  *   node tools/v16-check.mjs --url http://127.0.0.1:4651 [--json report.json]
  *
+ * One mock may serve any number of runs: `seed()` clears the play queue a run would otherwise
+ * inherit from the last one (`clearSavedQueue`), so this harness does not care how many times it
+ * has been run against this mock.
+ *
  * Exit code is non-zero when a check fails.
  */
 import { writeFileSync } from 'node:fs';
@@ -235,7 +239,38 @@ const pressPaint = (rows) => rows.filter((row) => !row.playing);
 
 /* ----------------------------------------------------------------- scenarios */
 
+/**
+ * Start every run from the same state — which the mock does not do on its own.
+ *
+ * The mock keeps playback state for the life of its **process**: the app's debounced
+ * `savePlayQueue` (5 s, `src/state/queue.ts`) writes `state.playQueue` server-side, and the next
+ * boot puts it back (`restorePlayQueue`, `src/ui/app.ts`) — v1.6's exact-resume, working as
+ * designed. So a run that follows one whose timer happened to fire comes up with a track already
+ * playing, and the three checks that assert a drag **starts nothing** fail on state this harness
+ * never set (measured: five runs against one mock, the fifth left `playQueue` at 35 entries with
+ * `current: album-1-1-track-4`, and the sixth run went red on exactly those three checks). Chrome
+ * is not the cause: `withChromePage` already uses a fresh profile per run. Nothing in the app needs
+ * changing — the harness simply has to control the state it asserts on.
+ *
+ * The reset goes through the mock's own door and is verified **by effect, not by status**: the queue
+ * has to be gone, not merely asked for.
+ */
+async function clearSavedQueue() {
+  const reset = await fetch(new URL('/__reset', url), { method: 'POST' });
+  if (!reset.ok) {
+    throw new Error(`POST /__reset answered ${reset.status} — this check reads playback state and needs tools/mock-subsonic.mjs`);
+  }
+  const mock = await (await fetch(new URL('/__state', url))).json();
+  if (mock.playQueue) {
+    throw new Error(
+      `the mock still holds a play queue (${mock.playQueue.entry?.length ?? '?'} entries) after /__reset — a run would start with a track already playing`,
+    );
+  }
+}
+
 async function seed(cdp) {
+  // The mock's queue first: it would otherwise be restored on boot, before any finger arrives.
+  await clearSavedQueue();
   await navigate(cdp, url);
   await evaluate(
     cdp,

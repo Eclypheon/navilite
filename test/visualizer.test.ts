@@ -206,6 +206,42 @@ test('two identical frames draw byte-identical rectangles — no after image is 
   }
 });
 
+test('a 64-band native frame is drawn as the bars themselves, not re-binned', () => {
+  const h = harness();
+  try {
+    h.handle.start();
+    /*
+     * The native tap hands over the 64 bands it has already computed (`NaviliteSpectrum.swift` does
+     * the log spacing with vDSP); the analyser hands over 1024 bins. Both must draw as 64 bars, and
+     * a banded frame must be a pure function of its own values: band 0 short, band 63 full.
+     */
+    const frame = new Uint8Array(new ArrayBuffer(64));
+    frame.fill(40);
+    frame[0] = 12;
+    frame[63] = 255;
+    h.setFrame(frame);
+    const drawn = bars(h.nextFrame(), h.canvas);
+    assert.equal(drawn.length, 64, 'one rectangle per band, from a 64-value frame too');
+
+    const heights = drawn.map((bar) => bar.args[3]);
+    assert.ok(heights.every((height) => height >= 1), 'every band is drawn, however quiet');
+    assert.ok(heights[63] > heights[0] * 3, `the loud band draws the tall bar (band 63: ${heights[63]} px, band 0: ${heights[0]} px)`);
+    assert.equal(Math.max(...heights), heights[63], 'and the loudest band is the tallest');
+    // The uniform 40s in between must all be the same height — a re-binning through the log curve
+    // would have made them fall away with frequency instead.
+    const middles = heights.slice(1, 63);
+    assert.equal(new Set(middles).size, 1, `equal bands draw equal bars (${[...new Set(middles)].join(', ')})`);
+
+    // A flat native frame is a flat line.
+    const silent = new Uint8Array(new ArrayBuffer(64));
+    h.setFrame(silent);
+    const quiet = bars(h.nextFrame(), h.canvas);
+    for (const bar of quiet) assert.ok(bar.args[3] <= 1, `digital silence draws no bar: got ${bar.args[3]} px`);
+  } finally {
+    h.restore();
+  }
+});
+
 test('every bar in a frame is one flat colour at full alpha, and each frame is fully cleared', () => {
   const h = harness();
   try {

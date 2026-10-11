@@ -41,5 +41,6 @@ class ViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         super.capacitorDidLoad()
         bridge?.registerPluginInstance(NaviliteRemote())
+        bridge?.registerPluginInstance(NaviliteSpectrum())
     }
 }
