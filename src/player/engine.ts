@@ -204,11 +204,17 @@ export class AudioEngine {
         },
         onState: (state, isPlaying) => {
           if (this.backend !== 'native') return;
+          // v1.6: a hand-off stops the native engine on purpose; that stop is not a pause the user
+          // asked for and it must not be read out as one (a `stopped` state would otherwise leave the
+          // transport showing "idle" behind a track that is about to be playing).
+          if (this.handoffInFlight) return;
           this.state = isPlaying ? 'playing' : state === 'stopped' ? 'idle' : 'paused';
           this.emit();
         },
         onComplete: () => {
           if (this.backend !== 'native') return;
+          // v1.6: never on the back of a hand-off — this is the one event that moves the queue.
+          if (this.handoffInFlight) return;
           this.state = 'paused';
           this.emit();
           this.onEnded?.();
@@ -293,30 +299,52 @@ export class AudioEngine {
    * Entering/leaving the background on a wrapped build: hand the stream to the native
    * engine (keeps playing when iOS suspends Web Audio) and back again for the real
    * spectrum. Deliberately a hand-off at the same position, not a second stream.
+   *
+   * v1.6 — what this must never do is move the queue.
+   *
+   * The owner: *"when i swipe up, the music stops and it seems to go to another track"*, and
+   * *"when going back into the app from the background i seem to have issues playing and pausing
+   * the song"*. A hand-off is a `stop()` of one backend and a `play()` of the other on the *same*
+   * track, so the one app-side path that can turn it into a track change is a plugin event arriving
+   * inside it: `NativeAudio.stop()` during the return trip, and the `unload`/`preload` of the
+   * outgoing asset on the way out, both run while `backend` is still `'native'`, so a `complete` (or
+   * a `stopped` state) that the plugin raises for *its own* stop is indistinguishable to the queue
+   * from the song ending — and `onEnded` advances to the next track. `handoffInFlight` therefore
+   * covers the whole hand-off and both native listeners ignore events while it is set; once the web
+   * element is back, `backend !== 'native'` ignores anything the native engine says afterwards.
+   *
+   * No device here can reproduce LiveContainer's container, and this file cannot be driven without
+   * one (the engine needs a real `<audio>` and a native bridge), so what is verified is the part that
+   * is ours: the hand-off is the only path that touches the queue on resume, and every native event
+   * that could reach it is now ignored while it runs.
    */
   async handleVisibility(hidden: boolean): Promise<void> {
-    if (!this.track || this.handoffInFlight) return;
-    if (this.preference === 'web') return;
+    if (!this.track || this.preference === 'web' || this.handoffInFlight) return;
     if (hidden && this.backend === 'web' && this.state === 'playing') {
-      const bridge = await this.ensureNative();
-      if (!bridge) return;
       this.handoffInFlight = true;
       try {
+        const bridge = await this.ensureNative();
+        if (!bridge) return;
         const positionMs = this.el.currentTime * 1000;
         this.el.pause();
         await this.startNative(this.track, positionMs);
       } finally {
         this.handoffInFlight = false;
       }
-    } else if (!hidden && this.backend === 'native' && this.track) {
+      return;
+    }
+    if (!hidden && this.backend === 'native' && this.track) {
+      const track = this.track;
+      // The position the native engine last reported — the same track, the same second.
+      const positionMs = this.nativePositionMs;
       this.handoffInFlight = true;
       try {
-        const positionMs = this.nativePositionMs;
         await this.native?.stop();
-        await this.startWeb(this.track, positionMs);
+        await this.startWeb(track, positionMs);
       } finally {
         this.handoffInFlight = false;
       }
+      this.emit();
     }
   }
 

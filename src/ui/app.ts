@@ -36,6 +36,18 @@ const DEFAULT_ROUTE = '#/artists';
 const NOW_ROUTE = '#/now';
 /** The now screen, on the lyrics pane — the mode is part of the route so back/forward walk it. */
 const LYRICS_ROUTE = '#/now/lyrics';
+/**
+ * v1.6: the *stacked* screens — settings, the changelog, the connect form.
+ *
+ * They are pushed on top of whatever you were looking at, not panes of the pager: there is nothing
+ * beside them to page to, so the pager's gesture surface is off while one is showing and the only
+ * horizontal gesture that means anything is a right swipe *back* to the screen they were opened from.
+ */
+const STACKED_ROUTES = new Set(['settings', 'changelog', 'connect']);
+/** Pixels of movement that still counts as a tap rather than a scroll. */
+const TAP_SLOP_PX = 10;
+/** A press longer than this is not a tap. */
+const TAP_MAX_MS = 700;
 /*
  * The three panes of the swipe pager, in the order the owner asked for: **playlist | spectrum |
  * lyrics**. Pane 0 is the browser screen the app already had; the other two are inside the now
@@ -89,6 +101,8 @@ interface Shell {
   highlighted: string | null;
   /** The last non-now route, so closing the now screen returns where you were. */
   lastBrowseRoute: string;
+  /** v1.6: the screen a stacked one (settings, the changelog) was opened from. */
+  stackedFrom: string;
   scrubbing: boolean;
   /** The route whose content is in `view` right now — the key the scroll restore is filed under. */
   viewRoute: string | null;
@@ -443,6 +457,7 @@ function buildShell(root: HTMLElement): Shell {
     lyrics: null as unknown as LyricsView,
     highlighted: null,
     lastBrowseRoute: DEFAULT_ROUTE,
+    stackedFrom: '',
     scrubbing: false,
     viewRoute: null,
     scrollLocked: false,
@@ -455,6 +470,21 @@ function buildShell(root: HTMLElement): Shell {
     if ((event.target as HTMLElement).closest('button, input')) return;
     openNow();
   });
+  /*
+   * v1.6, the other half of tap-vs-drag: a press in the list is cancelled the moment the list
+   * scrolls. One listener for the whole container rather than one per row — the row under the finger
+   * registers itself in `pressInFlight`, and this marks it as a scroll rather than a tap. The slop
+   * check in `bindTap` catches a fast drag; this catches the case it cannot, where the finger has
+   * barely moved but the list has (a momentum scroll under a resting finger).
+   */
+  viewScroll.addEventListener(
+    'scroll',
+    () => {
+      if (pressInFlight) pressInFlight.dragged = true;
+    },
+    { passive: true },
+  );
+  bindStackedBack(root);
 
   root.replaceChildren(header, viewScroll, playerBar, nowOverlay, toastNode);
   return shell;
@@ -479,6 +509,151 @@ function closeNow(): void {
 
 /** The shell needs to be reachable from the module-level routing helpers. */
 let queueRefRef: Shell = null as unknown as Shell;
+
+/* ------------------------------------------------------------ the gesture */
+
+/**
+ * A press that is in flight on a row, so a scroll can cancel it without a listener per row.
+ *
+ * v1.6. The owner's words: *"when in playlist, trying to swipe to scroll seems to highlight the song
+ * i don't want this, only if i tap the song without dragging or swiping should the song be selected"*.
+ * A row is a `<button>`, and a browser will happily synthesise a click at the end of a drag that
+ * started on one — which is exactly a song starting because he scrolled the list.
+ */
+interface Press {
+  armed: boolean;
+  dragged: boolean;
+  startX: number;
+  startY: number;
+  at: number;
+}
+let pressInFlight: Press | null = null;
+
+/**
+ * Activate an element on a *tap* and on nothing else.
+ *
+ * A tap is: one finger, movement under {@link TAP_SLOP_PX} the whole way, released inside
+ * {@link TAP_MAX_MS}, and no scroll of the list at any point during the press (the container's own
+ * listener sets `dragged` — see `buildShell`). Anything else is a drag, and the click the browser
+ * produces at the end of it is cancelled outright rather than being allowed to reach the element.
+ *
+ * The click is still what activates: a keyboard Enter on a row, or a mouse, has no touch phase at
+ * all, so `armed` is false and it goes straight through.
+ */
+function bindTap<T extends HTMLElement>(element: T, activate: () => void): T {
+  const press: Press = { armed: false, dragged: false, startX: 0, startY: 0, at: 0 };
+  element.addEventListener(
+    'touchstart',
+    (event) => {
+      const touch = event.touches[0];
+      if (!touch || event.touches.length !== 1) {
+        press.armed = false;
+        if (pressInFlight === press) pressInFlight = null;
+        return;
+      }
+      press.armed = true;
+      press.dragged = false;
+      press.startX = touch.clientX;
+      press.startY = touch.clientY;
+      press.at = performance.now();
+      pressInFlight = press;
+    },
+    { passive: true },
+  );
+  element.addEventListener(
+    'touchmove',
+    (event) => {
+      if (!press.armed) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      if (Math.abs(touch.clientX - press.startX) > TAP_SLOP_PX || Math.abs(touch.clientY - press.startY) > TAP_SLOP_PX) {
+        press.dragged = true;
+      }
+    },
+    { passive: true },
+  );
+  element.addEventListener(
+    'touchend',
+    () => {
+      if (pressInFlight === press) pressInFlight = null;
+    },
+    { passive: true },
+  );
+  element.addEventListener('click', (event) => {
+    /*
+     * Only a *touch* press can be refused. A click with no touch phase in front of it — a mouse, a
+     * keyboard Enter on the button, an assistive technology, or a script calling `click()` — was
+     * never a drag, and refusing those would take the row away from everything but a thumb.
+     */
+    const touched = press.armed;
+    const dragged = press.dragged;
+    const elapsed = performance.now() - press.at;
+    press.armed = false;
+    press.dragged = false;
+    if (pressInFlight === press) pressInFlight = null;
+    if (touched && (dragged || elapsed > TAP_MAX_MS)) {
+      // A drag that scrolled the list, a long press, or a press the list scrolled out from under.
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    activate();
+  });
+  return element;
+}
+
+/** The route the app is on right now, by its first segment. */
+function currentHead(): string {
+  return routeParts()[0] ?? 'artists';
+}
+
+/** True when the screen on top is a stacked one (settings, the changelog, the connect form). */
+function onStackedRoute(): boolean {
+  return STACKED_ROUTES.has(currentHead());
+}
+
+/**
+ * v1.6: from a stacked screen, a right swipe is *back* — and it is the only horizontal gesture that
+ * does anything there, because settings is not a pane of the pager (see `renderRoute`, which gates
+ * `pager.setEnabled`). The owner's words: *"when im in settings, swiping left or right seems to bring
+ * me to the spectrum or lyrics. this should not be the case, i should only be able to swipe right to
+ * return to the previous screen which i accessed settings from."*
+ *
+ * It reads the recorded opener rather than `history.back()`, so it still works on the first screen
+ * after a cold start (where back would leave the app).
+ */
+function bindStackedBack(host: HTMLElement): void {
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+  host.addEventListener(
+    'touchstart',
+    (event) => {
+      const touch = event.touches[0];
+      tracking = Boolean(touch) && event.touches.length === 1 && onStackedRoute();
+      if (!touch || !tracking) return;
+      startX = touch.clientX;
+      startY = touch.clientY;
+    },
+    { passive: true },
+  );
+  host.addEventListener(
+    'touchend',
+    (event) => {
+      if (!tracking) return;
+      tracking = false;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      // Right, mostly horizontal, and far enough to be meant.
+      if (dx < 60 || dx < Math.abs(dy) * 1.4) return;
+      const target = queueRefRef?.stackedFrom;
+      if (target) location.hash = target;
+    },
+    { passive: true },
+  );
+}
 
 /* -------------------------------------------------------------- the pager */
 
@@ -615,18 +790,28 @@ function applyPaletteVars(shell: Shell, palette: Palette): void {
 
 /* ------------------------------------------------------------------- state */
 
-interface PaletteHooks {
-  apply(palette: Palette): void;
-}
+/*
+ * The palette hook is a plain callback, not an object with an `apply` method.
+ *
+ * v1.4.1 fixed this on `main` and v1.5 branched away from it, so the bug came back with the pager:
+ * until v1.6 this file declared `interface PaletteHooks { apply(palette: Palette): void }`, and that
+ * shape is a trap — **a function satisfies it structurally**, because `(palette: Palette) => void`
+ * already has an `apply`: `Function.prototype.apply`. So `restoreSession(ctx, shell, applyPalette)` —
+ * the cold-start path, i.e. every normal launch — type-checked fine, `hooks.apply(DEFAULT_PALETTE)`
+ * then ran `applyPalette(undefined)`, and `applyPaletteVars` threw on `palette.primary` inside a
+ * floating promise: no theme, no error anyone could see. Passing the function itself removes the
+ * shape that made the mistake possible, in both directions.
+ */
+type ApplyPalette = (palette: Palette) => void;
 
 let currentPaletteSong: string | null = null;
 
-async function restoreSession(ctx: AppContext, shell: Shell, hooks: PaletteHooks): Promise<boolean> {
+async function restoreSession(ctx: AppContext, shell: Shell, applyPalette: ApplyPalette): Promise<boolean> {
   const { serverUrl, username } = ctx.settings;
   if (!username) return false;
   const password = await ctx.secrets.get(PASSWORD_KEY);
   if (password === null) return false;
-  connect(ctx, shell, { serverUrl, username, password }, hooks, { silent: true });
+  connect(ctx, shell, { serverUrl, username, password }, applyPalette, { silent: true });
   return true;
 }
 
@@ -662,7 +847,7 @@ interface Credentials {
   password: string;
 }
 
-function connect(ctx: AppContext, shell: Shell, credentials: Credentials, hooks: PaletteHooks, options: { silent?: boolean } = {}): void {
+function connect(ctx: AppContext, shell: Shell, credentials: Credentials, applyPalette: ApplyPalette, options: { silent?: boolean } = {}): void {
   const client = new SubsonicClient(credentials);
   const library = new Library(client);
   const queue = new PlaybackQueue(ctx.engine, library);
@@ -674,21 +859,21 @@ function connect(ctx: AppContext, shell: Shell, credentials: Credentials, hooks:
   queueRef = queue;
   queue.onChanged = () => {
     updatePlayerBar(ctx, shell, ctx.engine.status());
-    void syncPalette(ctx, hooks);
+    void syncPalette(ctx, applyPalette);
   };
   if (!options.silent) {
     queue.onChanged();
   }
 }
 
-async function syncPalette(ctx: AppContext, hooks: PaletteHooks): Promise<void> {
+async function syncPalette(ctx: AppContext, applyPalette: ApplyPalette): Promise<void> {
   const song = ctx.queue?.currentSong ?? null;
   if (!song || song.id === currentPaletteSong) return;
   currentPaletteSong = song.id;
   const url = ctx.library?.coverUrl(song.coverArt ?? song.albumId, 256) ?? null;
-  hooks.apply(DEFAULT_PALETTE);
+  applyPalette(DEFAULT_PALETTE);
   const palette = await paletteFromArtwork(url);
-  if (ctx.queue?.currentSong?.id === song.id) hooks.apply(palette);
+  if (ctx.queue?.currentSong?.id === song.id) applyPalette(palette);
 }
 
 /* ------------------------------------------------------------------ lock */
@@ -737,13 +922,35 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
   const [head = 'artists', id, extra] = routeParts();
   setActiveTab(shell, head);
   const nowOpen = head === 'now';
+  const stacked = STACKED_ROUTES.has(head);
+  /*
+   * v1.6: the pager's surface is the panes and the list behind them — never a stacked screen.
+   *
+   * Settings and the changelog are pushed on top of a screen, not beside one, so a horizontal drag
+   * there has nothing to page to and must be inert (the owner: *"when im in settings, swiping left
+   * or right seems to bring me to the spectrum or lyrics"*). The pager's own `setEnabled` also drops
+   * any drag that was in flight, so the gate cannot be crossed mid-gesture.
+   */
+  shell.pager.setEnabled(!stacked);
   // v1.5: the route *is* the pager's position — `#/now` is the spectrum pane and `#/now/lyrics` the
   // lyrics, so the router is what moves the pager (and the back button walks the panes).
   if (nowOpen) showNowScreen(shell, paneOfRoute(head, id));
   else hideNowScreen(shell);
   // v1.4: the overlay freezes what is under it, and closing it puts that view back where it was.
   setScrollLock(shell, nowOpen);
-  if (!nowOpen && head !== 'connect') shell.lastBrowseRoute = location.hash || DEFAULT_ROUTE;
+  if (stacked) {
+    /*
+     * Remember what was on screen when the stacked screen was pushed, for its right swipe back.
+     * `viewRoute` still holds the previous screen at this point (it is reassigned below), and a
+     * stacked screen opened *from* another stacked screen keeps the original opener.
+     */
+    const previousHead = (shell.viewRoute ?? '').replace(/^#\/?/, '').split('/')[0] ?? '';
+    if (!STACKED_ROUTES.has(previousHead)) {
+      shell.stackedFrom = shell.viewRoute || shell.lastBrowseRoute || DEFAULT_ROUTE;
+    }
+  } else if (!nowOpen) {
+    shell.lastBrowseRoute = location.hash || DEFAULT_ROUTE;
+  }
   // The view behind the now screen is only rendered when it is not covered: it saves a
   // network round trip on a cold start that lands straight on the spectrum.
   if (nowOpen && ctx.queue?.currentSong) {
@@ -910,7 +1117,7 @@ async function renderConnect(ctx: AppContext, shell: Shell): Promise<void> {
         ctx.settings = { ...ctx.settings, serverUrl: credentials.serverUrl, username: credentials.username };
         saveSettings(ctx.settings);
         await ctx.secrets.set(PASSWORD_KEY, credentials.password);
-        connect(ctx, shell, credentials, { apply: (palette) => applyPaletteGlobal(shell, palette) });
+        connect(ctx, shell, credentials, (palette) => applyPaletteGlobal(shell, palette));
         location.hash = DEFAULT_ROUTE;
         ctx.toast(`Connected as ${credentials.username}`);
       } catch (error) {
@@ -977,15 +1184,7 @@ async function renderArtists(ctx: AppContext, shell: Shell): Promise<void> {
   }
   replace(
     listHost,
-    ...artists.map((artist) =>
-      h('button', { class: 'row', onclick: () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`) }, [
-        cover(ctx.library!.coverUrl(artist.coverArt ?? artist.id, 128), 'thumb', artist.name),
-        h('div', { class: 'row-text' }, [
-          h('span', { class: 'row-title', text: artist.name }),
-          h('span', { class: 'row-sub', text: `${artist.albumCount ?? 0} album${artist.albumCount === 1 ? '' : 's'}` }),
-        ]),
-      ]),
-    ),
+    ...artists.map((artist) => artistRow(ctx, artist)),
   );
 }
 
@@ -1014,11 +1213,28 @@ async function renderAlbums(ctx: AppContext, shell: Shell): Promise<void> {
 }
 
 function albumCard(ctx: AppContext, album: Album): HTMLElement {
-  return h('button', { class: 'card', onclick: () => (location.hash = `#/album/${encodeURIComponent(album.id)}`) }, [
-    cover(ctx.library!.coverUrl(album.coverArt ?? album.id, 256), 'card-cover', album.name),
-    h('span', { class: 'card-title', text: album.name }),
-    h('span', { class: 'card-sub', text: album.artist ?? '' }),
-  ]);
+  return bindTap(
+    h('button', { class: 'card', 'aria-label': `Open ${album.name}` }, [
+      cover(ctx.library!.coverUrl(album.coverArt ?? album.id, 256), 'card-cover', album.name),
+      h('span', { class: 'card-title', text: album.name }),
+      h('span', { class: 'card-sub', text: album.artist ?? '' }),
+    ]),
+    () => (location.hash = `#/album/${encodeURIComponent(album.id)}`),
+  );
+}
+
+/** An artist in a list: a tap opens the artist, a drag that scrolls the list does not. */
+function artistRow(ctx: AppContext, artist: Artist): HTMLElement {
+  return bindTap(
+    h('button', { class: 'row', 'aria-label': `Open ${artist.name}` }, [
+      cover(ctx.library!.coverUrl(artist.coverArt ?? artist.id, 128), 'thumb', artist.name),
+      h('div', { class: 'row-text' }, [
+        h('span', { class: 'row-title', text: artist.name }),
+        h('span', { class: 'row-sub', text: `${artist.albumCount ?? 0} album${artist.albumCount === 1 ? '' : 's'}` }),
+      ]),
+    ]),
+    () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`),
+  );
 }
 
 async function renderArtist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
@@ -1115,13 +1331,17 @@ async function renderPlaylists(ctx: AppContext, shell: Shell): Promise<void> {
 }
 
 function playlistRow(ctx: AppContext, playlist: Playlist): HTMLElement {
-  return h('button', { class: 'row', onclick: () => (location.hash = `#/playlist/${encodeURIComponent(playlist.id)}`) }, [
-    cover(ctx.library!.coverUrl(playlist.coverArt ?? playlist.id, 128), 'thumb', playlist.name),
-    h('div', { class: 'row-text' }, [
-      h('span', { class: 'row-title', text: playlist.name }),
-      h('span', { class: 'row-sub', text: `${playlist.songCount ?? 0} tracks · ${formatDuration(playlist.duration)}` }),
+  const row = bindTap(
+    h('button', { class: 'row', 'aria-label': `Open ${playlist.name}` }, [
+      cover(ctx.library!.coverUrl(playlist.coverArt ?? playlist.id, 128), 'thumb', playlist.name),
+      h('div', { class: 'row-text' }, [
+        h('span', { class: 'row-title', text: playlist.name }),
+        h('span', { class: 'row-sub', text: `${playlist.songCount ?? 0} tracks · ${formatDuration(playlist.duration)}` }),
+      ]),
     ]),
-  ]);
+    () => (location.hash = `#/playlist/${encodeURIComponent(playlist.id)}`),
+  );
+  return row;
 }
 
 async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
@@ -1180,10 +1400,13 @@ async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {
         'div',
         { class: 'grid' },
         ...artists.map((artist: Artist) =>
-          h('button', { class: 'card', onclick: () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`) }, [
-            cover(ctx.library!.coverUrl(artist.coverArt ?? artist.id, 256), 'card-cover', artist.name),
-            h('span', { class: 'card-title', text: artist.name }),
-          ]),
+          bindTap(
+            h('button', { class: 'card', 'aria-label': `Open ${artist.name}` }, [
+              cover(ctx.library!.coverUrl(artist.coverArt ?? artist.id, 256), 'card-cover', artist.name),
+              h('span', { class: 'card-title', text: artist.name }),
+            ]),
+            () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`),
+          ),
         ),
       ),
     );
@@ -1229,9 +1452,12 @@ async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promis
           ...albums.map((album) => albumCard(ctx, album)),
           artists.length > 0 ? h('h2', { class: 'section', text: 'Artists' }) : null,
           ...artists.map((artist: Artist) =>
-            h('button', { class: 'row', onclick: () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`) }, [
-              h('div', { class: 'row-text' }, [h('span', { class: 'row-title', text: artist.name })]),
-            ]),
+            bindTap(
+              h('button', { class: 'row', 'aria-label': `Open ${artist.name}` }, [
+                h('div', { class: 'row-text' }, [h('span', { class: 'row-title', text: artist.name })]),
+              ]),
+              () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`),
+            ),
           ),
           songs.length + albums.length + artists.length === 0 ? h('p', { class: 'muted', text: 'Nothing found.' }) : null,
         );
@@ -1360,24 +1586,26 @@ function songRow(
    * a control, and the favourite star is gone from rows: the album screen still stars albums, the
    * Favourites screen still lists what is starred, and the row's own highlight is untouched.
    */
-  const row = h(
-    'button',
-    {
-      class: 'row song',
-      'aria-label': `Play ${song.title}`,
-      onclick: () => {
-        void ctx.queue!.play(items, index, context);
-        openNow();
+  const row = bindTap(
+    h(
+      'button',
+      {
+        class: 'row song',
+        'aria-label': `Play ${song.title}`,
       },
+      [
+        h('span', { class: 'row-play' }, [icon(ICONS.play, 18)]),
+        h('div', { class: 'row-text' }, [
+          h('span', { class: 'row-title', text: song.title }),
+          h('span', { class: 'row-sub', text: [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ') }),
+        ]),
+        h('span', { class: 'row-time', text: formatDuration(song.duration) }),
+      ],
+    ),
+    () => {
+      void ctx.queue!.play(items, index, context);
+      openNow();
     },
-    [
-      h('span', { class: 'row-play' }, [icon(ICONS.play, 18)]),
-      h('div', { class: 'row-text' }, [
-        h('span', { class: 'row-title', text: song.title }),
-        h('span', { class: 'row-sub', text: [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ') }),
-      ]),
-      h('span', { class: 'row-time', text: formatDuration(song.duration) }),
-    ],
   );
   let rows = ctx.rows.get(song.id);
   if (!rows) {

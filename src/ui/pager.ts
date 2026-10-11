@@ -88,6 +88,16 @@ export interface Pager {
   hide(): void;
   /** Re-read the width (a rotation, a resize, the keyboard closing). */
   measure(): void;
+  /**
+   * v1.6: is the gesture surface live at all?
+   *
+   * Not every screen is part of the pager. Settings and the changelog are *stacked* screens — you
+   * opened one from somewhere, and you go back to it — so a horizontal drag there must do nothing
+   * whatsoever: not move a pane, not claim the gesture, not `preventDefault`. Disabling also drops
+   * an interrupted drag and clears the transforms, so a gate that flips mid-gesture cannot leave the
+   * strip translated behind a screen that is not part of the pager.
+   */
+  setEnabled(enabled: boolean): void;
   state(): PagerState;
 }
 
@@ -137,6 +147,8 @@ export function createPager(options: PagerOptions): Pager {
   let dragging = false;
   let animating = false;
   let frame = 0;
+  /** v1.6: false on a stacked screen (settings, the changelog), where no pane is behind. */
+  let enabled = true;
   let width = widthOf(host) || window.innerWidth;
 
   interface Gesture {
@@ -290,7 +302,7 @@ export function createPager(options: PagerOptions): Pager {
   };
 
   const onTouchStart = (event: TouchEvent): void => {
-    if (event.touches.length !== 1 || ownsGesture(event.target)) {
+    if (!enabled || event.touches.length !== 1 || ownsGesture(event.target)) {
       gesture = null;
       return;
     }
@@ -422,6 +434,21 @@ export function createPager(options: PagerOptions): Pager {
     },
     measure() {
       onResize();
+    },
+    setEnabled(next) {
+      if (next === enabled) return;
+      enabled = next;
+      if (next) return;
+      // Off a pager surface: forget the gesture and any animation in flight, and put the panes back
+      // where pane 0 is with nothing transformed. A gesture that was mid-drag when the route
+      // changed must not leave the strip sitting a third of a screen off.
+      gesture = null;
+      dragging = false;
+      stop();
+      position = 0;
+      drag = 0;
+      render(0);
+      list.style.transform = '';
     },
     state() {
       return {
