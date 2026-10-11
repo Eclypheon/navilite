@@ -74,11 +74,16 @@ doesn't, not *never*).
   file name. Navidrome reads them (`LyricsPriority`:
   `.ttml,.yaml,.yml,.elrc,.lrc,.srt,.txt,embedded` — `.md` is not a supported extension) and serves
   them to clients.
-- **The app reads them through the library**, never from a third party: OpenSubsonic
-  `getLyricsBySongId` first (id-keyed, so it cannot pick the wrong song), legacy `getLyrics` only as
-  a fallback for a server that lacks the newer call — and the fallback's blob is discarded unless
-  the server's own artist/title match the track that is playing, because that call keys on
-  artist+title and would otherwise hand over the wrong song's words.
+- **The app reads them through the library**, never from a third party. Since v1.3 (owner's call on
+  the same day: *"i don't think you are forced to only pull what navidrome is capable of parsing …
+  if it can't go through navidrome's api, write something custom to serve it"*) the order is:
+  the library's **own lyric route** first (`GET /lyrics?path=<song.path>`, host-side card
+  `t_766e7aa5` — the sidecar file itself, read at request time, `.lrc` preferred over `.txt` for the
+  same track), then OpenSubsonic `getLyricsBySongId` (id-keyed, so it cannot pick the wrong song),
+  then legacy `getLyrics` as a fallback for a server that lacks the newer call — and that fallback's
+  blob is discarded unless the server's own artist/title match the track that is playing, because
+  that call keys on artist+title and would otherwise hand over the wrong song's words. Every refusal
+  or failure of the route means "ask Navidrome", never an error on screen.
 - **Nothing is committed, bundled or shipped.** No lyrics text in the repo, none in `dist/`, none in
   the APK/IPA. The only copy away from his server is a per-device cache
   (`src/storage/lyrics.ts`, `localStorage`, clearable from Settings).

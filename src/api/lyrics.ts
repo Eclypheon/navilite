@@ -2,12 +2,17 @@
  * Lyrics: they come from the owner's own library, and nowhere else.
  *
  * The design decision (his, 2026-10-11): a lyrics file sits **next to the audio** in his
- * music folder, and Navidrome reads it and serves it to clients. So the app asks its own
- * server for the playing track's lyrics and shows what comes back:
+ * music folder, and the app shows what is in it. Three ways to the same file, tried in this
+ * order (v1.3):
  *
+ *   0. **The library's own route** (`src/api/sidecar.ts`) — `/lyrics?path=<song.path>` on the
+ *      same door as the app. It serves the `.lrc`/`.txt` sidecar itself, at request time, so
+ *      what is on screen is the file rather than Navidrome's opinion of it. Timed or untimed
+ *      makes no difference here; untimed is the normal case either way.
  *   1. `getLyricsBySongId` (OpenSubsonic) — what Navidrome 0.64.2 answers from a sidecar.
  *      `.lrc` arrives with per-line timings (`synced: true`), `.txt` arrives as the same
  *      shape without them. Navidrome's own `LyricsPriority` decides which sidecar wins.
+ *      This is the fallback when the route has nothing, or is not reachable.
  *   2. `getLyrics` (legacy Subsonic, artist + title) — a plain blob, for a server or a
  *      configuration that only implements the old call. An LRC blob in here is parsed for
  *      timings rather than shown raw.
@@ -21,6 +26,7 @@
  * highlight follows playback for free.
  */
 import { hasKanji, romanizeLine } from '../lyrics/romanize.ts';
+import type { SidecarSource } from './sidecar.ts';
 import type { LegacyLyrics, Song, StructuredLyrics } from './types.ts';
 
 /** One lyric line. `timeMs` is null when the source has no timing for it. */
@@ -33,8 +39,11 @@ export interface LyricsDoc {
   lines: LyricsLine[];
   /** True only when at least one line carried a usable time. */
   synced: boolean;
-  /** `sidecar` = structured lyrics from the library; `blob` = a plain value it returned. */
-  source: 'sidecar' | 'blob';
+  /**
+   * `route` = the library's own lyric route served the sidecar file itself (v1.3);
+   * `sidecar` = structured lyrics from Navidrome; `blob` = a plain value it returned.
+   */
+  source: 'route' | 'sidecar' | 'blob';
   /** False when the text still holds kanji, i.e. only partly romaji. */
   fullRomaji: boolean;
 }
@@ -113,9 +122,23 @@ export function fromStructured(entries: StructuredLyrics[]): LyricsDoc | null {
 
 /** A plain blob from the legacy endpoint, which may still be an LRC file's contents. */
 export function fromBlob(body: string): LyricsDoc | null {
+  return fromText(body, 'blob');
+}
+
+/**
+ * The library's own route answers with the sidecar file's bytes: an `.lrc` with timings, or —
+ * the normal case for this library — a plain `.txt`. Which one it is, is decided by whether
+ * any line actually carries a tag; nothing is gated on timing.
+ */
+export function fromSidecar(body: string): LyricsDoc | null {
+  return fromText(body, 'route');
+}
+
+/** A body of text with no wrapper to tell us what it is: LRC if any line is timed, else plain. */
+function fromText(body: string, source: LyricsDoc['source']): LyricsDoc | null {
   const asLrc = parseLrc(body);
-  if (asLrc.some((line) => line.timeMs !== null)) return finalize(asLrc, 'blob');
-  return finalize(parsePlain(body), 'blob');
+  if (asLrc.some((line) => line.timeMs !== null)) return finalize(asLrc, source);
+  return finalize(parsePlain(body), source);
 }
 
 /**
@@ -136,12 +159,32 @@ function finalize(lines: LyricsLine[], source: LyricsDoc['source']): LyricsDoc |
 }
 
 /**
- * Ask the library for one track's lyrics. Never throws: "the server has nothing for this
- * track", a server that does not implement the call, and a network failure all mean the
- * same thing to the caller — no lyrics to show right now.
+ * Ask the library for one track's lyrics, in the order the sources are trusted (v1.3):
+ * the library's own lyric route first, then Navidrome's structured lyrics, then the legacy
+ * call. Never throws: "the server has nothing for this track", a route that is not there,
+ * a server that does not implement a call, and a network failure all mean the same thing to
+ * the caller — no lyrics to show right now.
  */
-export async function fetchLyrics(song: Song, library: LyricsSource | null): Promise<LyricsDoc | null> {
+export async function fetchLyrics(
+  song: Song,
+  library: LyricsSource | null,
+  sidecar: SidecarSource | null = null,
+): Promise<LyricsDoc | null> {
+  // 1. Our own delivery route: the sidecar file itself, served straight from the library.
+  if (sidecar) {
+    try {
+      const body = await sidecar.lyricsFor(song);
+      if (body !== null) {
+        const doc = fromSidecar(body);
+        if (doc) return doc;
+      }
+    } catch {
+      // `LyricsRoute` never throws; a stand-in that does is treated as "no answer from the
+      // route" and the Navidrome path below still runs.
+    }
+  }
   if (!library) return null;
+  // 2. Navidrome's structured answer (id-keyed, so it cannot pick the wrong song).
   try {
     const structured = await library.getLyricsBySongId(song.id);
     const doc = fromStructured(structured);
@@ -149,6 +192,7 @@ export async function fetchLyrics(song: Song, library: LyricsSource | null): Pro
   } catch {
     // Not implemented, not found, offline — try the older call below.
   }
+  // 3. The old call, with the artist/title guard below it.
   try {
     const blob = await library.getLyrics({ artist: song.artist, title: song.title });
     if (blob === null) return null;

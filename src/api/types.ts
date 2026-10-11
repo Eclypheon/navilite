@@ -31,6 +31,12 @@ export interface Song {
   artistId?: string;
   album?: string;
   albumId?: string;
+  /**
+   * The file's path **relative to the music root**, exactly as the server reports it. v1.3
+   * asks the library's own lyric route with this (`/lyrics?path=…`); a track that arrives
+   * without it simply falls back to the Subsonic lyrics calls.
+   */
+  path?: string;
   coverArt?: string;
   duration?: number;
   track?: number;

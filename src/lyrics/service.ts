@@ -5,24 +5,32 @@
  *   - the cache is consulted first, so flipping between Spectrum and Lyrics is instant and
  *     a track's text is fetched once per visit;
  *   - the answer is per **track**, and "the library has no lyrics for this track" is cached
- *     too (briefly — `LyricsCache` expires misses in hours), so a sidecar that lands later
+ *     too (briefly — `LyricsCache` expires misses in minutes), so a sidecar that lands later
  *     is picked up without re-asking on every visit.
  *
- * The library handle is a getter rather than a value: the lyrics service is created with the
- * shell, before anyone has connected.
+ * Both handles are getters rather than values: the lyrics service is created with the shell,
+ * before anyone has connected — and the route (`ctx.sidecar`) only exists once a library has
+ * been reached (`src/api/sidecar.ts`).
  */
 import { fetchLyrics, type LyricsDoc, type LyricsSource } from '../api/lyrics.ts';
+import type { SidecarSource } from '../api/sidecar.ts';
 import type { Song } from '../api/types.ts';
 import type { LyricsStore } from '../storage/lyrics.ts';
 
 export class LyricsService {
   private readonly cache: LyricsStore;
   private readonly library: () => LyricsSource | null;
+  private readonly sidecar: () => SidecarSource | null;
   private readonly inflight = new Map<string, Promise<LyricsDoc | null>>();
 
-  constructor(cache: LyricsStore, library: () => LyricsSource | null) {
+  constructor(
+    cache: LyricsStore,
+    library: () => LyricsSource | null,
+    sidecar: () => SidecarSource | null = () => null,
+  ) {
     this.cache = cache;
     this.library = library;
+    this.sidecar = sidecar;
   }
 
   /** Lyrics for a track, from the device cache when it has them. Null = none to show. */
@@ -51,7 +59,7 @@ export class LyricsService {
 
   private async load(song: Song): Promise<LyricsDoc | null> {
     try {
-      const doc = await fetchLyrics(song, this.library());
+      const doc = await fetchLyrics(song, this.library(), this.sidecar());
       this.cache.set(song.id, doc);
       return doc;
     } catch {

@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0, v1.1, v1.2, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2']);
+test('the changelog is the owner-visible list: v1.0 through v1.3, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -56,6 +56,19 @@ test('every v1.1 entry the owner asked for is actually in the list', () => {
   assert.match(text, /playing is highlighted/);
   assert.match(text, /Lyrics/);
   assert.match(text, /blank/);
+});
+
+test('every v1.3 change is described in the owner\'s own terms, from his own report', () => {
+  const v13 = CHANGELOG.find((release) => release.version === '1.3');
+  const text = v13?.items.join('\n') ?? '';
+  assert.match(text, /load directly from your library/, 'the card asks for this sentence');
+  assert.match(text, /came back empty|empty/, 'his report was tracks staying blank');
+  assert.match(text, /library/);
+  assert.match(text, /no romaji lyrics for this track yet/, 'the honest empty state has to be named');
+  for (const item of v13?.items ?? []) {
+    // Invisible plumbing does not belong in this list.
+    assert.doesNotMatch(item, /CORS|localhost|Capacitor|cache key|localStorage|endpoint|API|JSON/i);
+  }
 });
 
 test('every v1.2 defect the owner reported is described in his own terms', () => {

@@ -11,6 +11,7 @@
  * screen, and the Spectrum/Lyrics switch at the top swaps what fills the middle.
  */
 import { SubsonicClient, SubsonicError } from '../api/subsonic.ts';
+import { LyricsRoute, type SidecarSource } from '../api/sidecar.ts';
 import type { Album, Artist, Playlist, QueueContext, QueueItem, Song } from '../api/types.ts';
 import { DEFAULT_SERVER_URL, SERVER_URL_PLACEHOLDER } from '../config.ts';
 import { AudioEngine, type EngineStatus } from '../player/engine.ts';
@@ -81,6 +82,8 @@ interface AppContext {
   engine: AudioEngine;
   library: Library | null;
   queue: PlaybackQueue | null;
+  /** The library's own lyric route (`/lyrics`), once a library has been reached. */
+  sidecar: SidecarSource | null;
   lyrics: LyricsService;
   /** Rows showing a given song, so the playing one can be highlighted wherever it appears. */
   rows: Map<string, Set<HTMLElement>>;
@@ -99,7 +102,11 @@ export async function boot(root: HTMLElement): Promise<void> {
   const shell = buildShell(root);
   const visualizer = attachVisualizer(shell.canvas, engine, DEFAULT_PALETTE);
 
-  const lyrics = new LyricsService(new LyricsCache(), () => ctx.library?.client ?? null);
+  const lyrics = new LyricsService(
+    new LyricsCache(),
+    () => ctx.library?.client ?? null,
+    () => ctx.sidecar,
+  );
   const ctx: AppContext = {
     platform,
     settings,
@@ -107,6 +114,7 @@ export async function boot(root: HTMLElement): Promise<void> {
     engine,
     library: null,
     queue: null,
+    sidecar: null,
     lyrics,
     rows: new Map(),
     palette: DEFAULT_PALETTE,
@@ -552,6 +560,9 @@ function connect(ctx: AppContext, shell: Shell, credentials: Credentials, hooks:
   const queue = new PlaybackQueue(ctx.engine, library);
   ctx.library = library;
   ctx.queue = queue;
+  // The library's own lyric route lives on the same door as the API, so it is derived from the
+  // same base URL: `''` means "the origin this app was served from" (`src/api/sidecar.ts`).
+  ctx.sidecar = new LyricsRoute(client.baseUrl);
   queueRef = queue;
   queue.onChanged = () => {
     updatePlayerBar(ctx, shell, ctx.engine.status());
@@ -1118,6 +1129,7 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
       saveSettings(ctx.settings);
       ctx.library = null;
       ctx.queue = null;
+      ctx.sidecar = null;
       queueRef = null;
       await ctx.engine.stop();
       location.hash = '#/connect';

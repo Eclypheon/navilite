@@ -10,15 +10,29 @@
  * Do not fetch them from an outside service.
  *
  * "No lyrics for this track" is cached too, briefly: otherwise every track without lyrics
- * would re-ask the library on every visit. And Navi is still writing sidecars, so a miss
- * expires much sooner than a hit — a track that gains lyrics later gets picked up.
+ * would re-ask the library on every visit. But a miss is a **snapshot, not a fact** — Navi is
+ * still writing sidecars, and the owner hit exactly this: tracks he opened before the corpus
+ * existed stayed blank. So a miss lives for minutes, and a hit for a week: the route serves
+ * the file as it is *now*, and a `.txt` sidecar that is later upgraded to a timed `.lrc` has
+ * to be able to appear without anyone clearing anything.
  */
 import type { LyricsDoc } from '../api/lyrics.ts';
 
 const STORAGE_KEY = 'navilite.lyrics.v1';
 const MAX_ENTRIES = 200;
-const HIT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const MISS_TTL_MS = 6 * 60 * 60 * 1000;
+/**
+ * v1.3: a week, not a month. Sidecars are being written (202 → 355 in one session on
+ * 2026-10-11), and a timed `.lrc` landing next to a track whose `.txt` was already read has to
+ * show up as a highlight within a week rather than never.
+ */
+const HIT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * v1.3: five minutes, not six hours. This is the fix for "tracks I opened before the corpus
+ * existed stayed blank": the shortest honest window that still keeps a library full of
+ * sidecar-less tracks from re-asking on every scroll past. It also means a miss written by an
+ * older build is already expired when this one starts.
+ */
+const MISS_TTL_MS = 5 * 60 * 1000;
 
 interface Entry {
   key: string;

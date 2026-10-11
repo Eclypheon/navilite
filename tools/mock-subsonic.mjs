@@ -20,6 +20,10 @@
  * for a 393 px layout. `tools/layout-audit.mjs` runs against it.
  *
  * Debug endpoints (not part of Subsonic, used by the end-to-end check):
+ *   GET  /lyrics?path=<rel>  → the library's own lyric route, as it exists on the box (v1.3):
+ *                              the sidecar file itself, timed or untimed. Also /lyrics/health and
+ *                              /lyrics/index.json. Every request is recorded in `state.lyrics`
+ *                              with the endpoint that served it.
  *   GET  /__state   → requests seen, scrobbles, starred ids, saved play queue
  *   POST /__reset   → clear that state
  *   POST /__report  → a layout-probe report posted from inside the page (see
@@ -218,6 +222,20 @@ function wavFor(song) {
   if (!wavCache.has(song.audioIndex)) wavCache.set(song.audioIndex, renderWav(song.audioIndex));
   return wavCache.get(song.audioIndex);
 }
+
+/**
+ * What Navidrome reports as a song's `path`: the audio file's location **relative to the music
+ * root**. v1.3's lyrics route is asked with exactly this string (`/lyrics?path=…`), so the mock
+ * has to have one — and it has to be the real, awkward shape: a Japanese artist and album, and a
+ * track title with a `·` and a `/` in it (the `/` is not a directory here, which is why the
+ * client percent-encodes the whole path).
+ */
+function libraryPath(song) {
+  const title = String(song.title).replace(/[/\\]/g, '-');
+  return `${song.artist}/${song.album}/${String(song.track ?? 1).padStart(2, '0')} - ${title}.wav`;
+}
+
+for (const song of songs) song.path = libraryPath(song);
 
 const coverCache = new Map();
 function coverFor(seed, size) {
@@ -723,6 +741,145 @@ function serveLegacyLyrics(response, params) {
   ok(response, { lyrics: { artist: song.artist, title: song.title, value } });
 }
 
+/* --------------------------------------------------- our lyric route (mock) */
+
+/**
+ * The library's own lyric route, as it exists on the box (kanban t_766e7aa5) and as
+ * `src/api/sidecar.ts` asks for it: `GET /lyrics?path=<track path relative to the music root>`
+ * (audio extension optional), answering with **the sidecar file itself** — a timed `.lrc` by
+ * default, a `.txt` under `--lyrics-plain`, which is the normal case in the real corpus.
+ *
+ * Same refusal codes as the real service, because the app is expected to treat all of them the
+ * same way: 404 no sidecar, 400 a path that tries to leave the music root, 405 not GET/HEAD.
+ *
+ * Every request is recorded in `state.lyrics` as `endpoint: 'sidecar'`, so a run of
+ * `tools/lyrics-e2e.mjs` can show *which* source the app used for a track, not just what it
+ * rendered.
+ */
+const AUDIO_EXT = '.wav';
+const SIDECAR_EXTS = ['.lrc', '.txt'];
+
+/** `[mm:ss.xx]` — what a timed sidecar on disk looks like. */
+function lrcStamp(ms) {
+  const total = Math.max(0, Math.round(ms));
+  const minutes = Math.floor(total / 60000);
+  const seconds = Math.floor((total % 60000) / 1000);
+  const hundredths = Math.floor((total % 1000) / 10);
+  return `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(hundredths).padStart(2, '0')}]`;
+}
+
+/** The sidecar file's bytes for a track, or null when it has no lyrics file. */
+function sidecarFile(song) {
+  const line = lyricsFor(song);
+  if (!line) return null;
+  if (LYRICS_PLAIN) return { ext: '.txt', body: line.map((entry) => entry.value).join('\n') + '\n' };
+  return { ext: '.lrc', body: line.map((entry) => `${lrcStamp(entry.start)}${entry.value}`).join('\n') + '\n' };
+}
+
+/** The key the route resolves: the track's path with the audio extension taken off. */
+function sidecarKey(song) {
+  return libraryPath(song).replace(/\.wav$/, '');
+}
+
+function serveLyricsRoute(response, url, headOnly = false) {
+  const raw = url.pathname.replace(/^\/lyrics\/?/, '');
+  const query = url.searchParams.get('path');
+  const requested = (raw === '' ? query : decodeURIComponent(raw)) ?? '';
+  const decoded = requested.trim();
+  const json = (status, payload) =>
+    send(response, status, payload, { 'content-type': 'application/json; charset=utf-8' });
+
+  if (decoded === 'health') {
+    const withSidecars = songs.filter((song) => lyricsFor(song) !== null);
+    send(
+      response,
+      200,
+      {
+        status: 'ok',
+        version: '1.1-mock',
+        root: '/music',
+        sidecars: withSidecars.length,
+        timed: LYRICS_PLAIN ? 0 : withSidecars.length,
+        plain: LYRICS_PLAIN ? withSidecars.length : 0,
+        audio_files: songs.length,
+        index_age_s: 0,
+        now: Math.floor(Date.now() / 1000),
+      },
+      { 'content-type': 'application/json; charset=utf-8' },
+    );
+    return;
+  }
+  if (decoded === 'index.json' || decoded === 'index') {
+    const tracks = {};
+    for (const song of songs) {
+      const file = sidecarFile(song);
+      if (!file) continue;
+      const key = sidecarKey(song);
+      tracks[key] = {
+        key,
+        sidecar: key + file.ext,
+        ext: file.ext,
+        format: file.ext === '.lrc' ? 'timed' : 'plain',
+        timed: file.ext === '.lrc',
+        bytes: Buffer.byteLength(file.body),
+        url: `/lyrics?path=${encodeURIComponent(key)}`,
+      };
+    }
+    send(response, 200, { generated: Math.floor(Date.now() / 1000), root: '/music', count: Object.keys(tracks).length, tracks }, {
+      'content-type': 'application/json; charset=utf-8',
+    });
+    return;
+  }
+
+  const rejected =
+    decoded === ''
+      ? 'missing path'
+      : /\x00/.test(decoded)
+        ? 'nul byte in path'
+        : decoded.startsWith('/')
+          ? 'absolute paths are not served'
+          : decoded.split('/').some((part) => part === '' || part === '.' || part === '..')
+            ? 'path component is not allowed'
+            : null;
+  if (rejected) {
+    json(400, { error: rejected === 'missing path' ? 'missing path' : 'rejected path', detail: rejected, path: decoded });
+    return;
+  }
+
+  const bare = SIDECAR_EXTS.some((ext) => decoded.toLowerCase().endsWith(ext))
+    ? decoded.slice(0, -4)
+    : decoded.toLowerCase().endsWith(AUDIO_EXT)
+      ? decoded.slice(0, -AUDIO_EXT.length)
+      : decoded;
+  const song = songs.find((item) => sidecarKey(item) === bare);
+  const file = song ? sidecarFile(song) : null;
+  state.lyrics.push({
+    endpoint: 'sidecar',
+    path: decoded,
+    trackId: song?.id ?? null,
+    served: file !== null,
+    at: new Date().toISOString(),
+  });
+  if (!file) {
+    json(404, { error: 'no lyrics sidecar for this track', path: decoded, tried: [`${bare}.lrc`, `${bare}.txt`] });
+    return;
+  }
+  const body = Buffer.from(file.body, 'utf8');
+  send(
+    response,
+    200,
+    headOnly ? '' : body,
+    {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'private, max-age=300',
+      'x-lyrics-format': file.ext.slice(1),
+      'x-lyrics-track': encodeURIComponent(sidecarKey(song) + file.ext),
+      'x-lyrics-bytes': String(body.length),
+      'content-length': String(body.length),
+    },
+  );
+}
+
 /* ------------------------------------------------------------------- server */
 
 const server = createServer((request, response) => {
@@ -784,6 +941,18 @@ const server = createServer((request, response) => {
         send(response, 400, { error: String(error) }, { 'content-type': 'application/json; charset=utf-8' });
       }
     });
+    return;
+  }
+
+  if (path === '/lyrics' || path.startsWith('/lyrics/')) {
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      send(response, 405, { error: 'method not allowed', allowed: ['GET', 'HEAD'] }, {
+        'content-type': 'application/json; charset=utf-8',
+        allow: 'GET, HEAD',
+      });
+      return;
+    }
+    serveLyricsRoute(response, url, request.method === 'HEAD');
     return;
   }
 

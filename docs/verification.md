@@ -619,3 +619,168 @@ v1.3 with the lyrics source.
   was measured against the mock's stress corpus, which is one 12-line song (§10.3).
 - Native playback, lock-screen controls, Keystore/Keychain and the sideload install: unchanged from
   §9.7 — still no device, still unverified.
+
+## 11. v1.3 — lyrics from the library's own route first (2026-10-11)
+
+The change: `src/api/sidecar.ts` is new (the route client), `src/api/lyrics.ts` tries it **first**
+and falls back to `getLyricsBySongId` then legacy `getLyrics`, `src/storage/lyrics.ts` shortens the
+cache windows, and the mock now serves the same route so the whole path is exercised end to end.
+
+### 11.1 Unit tests
+
+```
+$ npm run typecheck && npm test
+ℹ tests 70   ℹ pass 70   ℹ fail 0   (v1.2: 62)
+```
+
+The new ones, all in `test/lyrics.test.ts` / `test/lyrics-cache.test.ts` / `test/changelog.test.ts`:
+
+- the route's answer is parsed as the file itself — timed `.lrc` gets times, plain `.txt` is a
+  first-class untimed answer, empty bodies are `null`;
+- the URL the route is asked with, asserted **literally** (the same shape as Nova's curl transcript):
+  `'/lyrics?path=%E3%83%A8%E3%83%AB%E3%82%B7%E3%82%AB%2F…%20…%E3%83%80%E3%83%B3%E3%82%B9.opus'`;
+- a route that is 404/400/503, empty, throwing, or answering `null` is always `null`, never a throw —
+  and a song with no `path` never produces a request at all;
+- the wrapped-build client: the options actually handed to `CapacitorHttp` (url, `GET`,
+  `responseType: 'text'`, both timeouts), a JSON body from a 404 treated as "none", and a client that
+  throws degrading to "none";
+- the order: with the route answering, **neither** Subsonic call is made (`seen` contains only
+  `route:<id>`), and with the route empty/throwing the Navidrome answer is used;
+- the cache: a miss expires after five minutes and then the words appear, a miss written by the
+  previous build (an hour old) is not inherited, a hit survives a day but is re-asked after a week.
+
+### 11.2 The source order, end to end, in a real browser
+
+`npm run build`, then the mock (`node tools/mock-subsonic.mjs --port 4631 --stress --dist dist`, which
+now serves `/lyrics` as well as the Subsonic API) driven in real Chrome — the app's own connect path,
+its own transport, its own Lyrics panel. The mock records **which endpoint each lyrics request went
+to**, which is the point: rendering the words would not have proved the source.
+
+Run twice: once while the change was being written, and again against the **final** `dist/` — the one
+whose `dist/assets/index-B6xoPdyW.js` (sha256 `d641a317…`) is inside both artifacts (§11.7). The
+numbers below are the second run; the page reported the asset it had loaded, not just the port.
+
+1. **A track with a sidecar** (pilot album, `album-1-1-track-1`):
+
+```
+__navilite: { panel: 'album-1-1-track-1', panelLoaded: true, panelLines: 6 }
+lyrics:     ['夜nonakao aruiteiku', 'kiminokoega kikoeru', 'hoshiga matataku soranoshita', …]
+active:     '夜nonakao aruiteiku'          (kana romanised on device; kanji left as it is)
+
+mock /__state:
+  lyricsCalls: [{ endpoint: 'sidecar', path: 'Alien Lab/Alien Lab — Transmission/01 - Track 1 · 110-330-1320 Hz.wav',
+                  trackId: 'album-1-1-track-1', served: true }]
+  subsonic lyrics calls: []                 ← Navidrome was never asked
+```
+
+2. **A track with no sidecar** (`album-2-1-track-1`) — the full chain, in order, and the honest empty
+   state:
+
+```
+route      → served: false     (404, no sidecar for that track)
+getLyricsBySongId → served: false   (code 70)
+getLyrics  → served: false     (code 70)
+panel:     0 lines, "no romaji lyrics for this track yet"
+```
+
+3. **A route that cannot be reached** — the request blocked in the browser before it left
+   (`Network.setBlockedURLs`), then a track whose sidecar *does* exist:
+
+```
+route hits for that track: 0            ← blocked, never arrived
+getLyricsBySongId → served: true
+panel:     6 lines, "…kiminokoega kikoeru…"    ← no error, no empty screen, no spinner
+```
+
+### 11.3 The real corpus, through the app's own URL builder
+
+The route on his box answers (§ the host card's transcript); the question this pass had to answer is
+whether **the URL this app builds** resolves against the real 355-sidecar corpus. `LyricsRoute` was
+imported directly and pointed at the door (`node --experimental-strip-types`):
+
+```
+health: {"status":"ok","version":"1.0","root":"/music","sidecars":355,"timed":292,"plain":63,
+         "audio_files":393,"index_age_s":25.3,"now":1791676735}
+index:  count=355 timed=292 plain=63 audio=393
+
+--- timed AKASAKI/Bunny Girl/01 - Bunny Girl ---
+  .../lyrics?path=AKASAKI%2FBunny%20Girl%2F01%20-%20Bunny%20Girl
+      http 200 format=lrc bytes=1470 matches_index=true
+      first line: "[00:00.22] yoru no hajimari sa baniigaaru yuuwaku sareru kodou ni"
+  .../lyrics?path=AKASAKI%2FBunny%20Girl%2F01%20-%20Bunny%20Girl.flac      (the audio-extension form)
+      http 200 format=lrc bytes=1470 matches_index=true
+
+--- plain Aimer/05. for ロンリー with 阿部真央 ---
+  .../lyrics?path=Aimer%2F05.%20for%20%E3%83%AD%E3%83%B3%E3%83%AA%E3%83%BC%20with%20%E9%98%BF%E9%83%A8%E7%9C%9F%E5%A4%AE
+      http 200 format=txt bytes=860 matches_index=true
+      first line: "Daisuki na hito kimi wa dou omou?"
+
+ヨルシカ/エルマ/01 - 車窓.opus   -> HTTP 404  no lyrics sidecar for this track
+../../etc/passwd              -> HTTP 400  rejected path
+/etc/passwd                   -> HTTP 400  rejected path
+urlFor({})                    -> null        (no `song.path`: no request is made)
+```
+
+Both real files matched the byte counts the route's own `index.json` reports, so the client is asking
+for exactly the file the route serves. A timed and an untimed track were both taken because `.txt` is
+the normal case in this corpus (63 of 355).
+
+### 11.4 The cache windows (his report: "tracks I opened before the corpus existed stayed blank")
+
+`MISS_TTL_MS` 6 h → **5 min**, `HIT_TTL_MS` 30 days → **7 days**. Two consequences, both asserted:
+
+- a track that had no lyrics when it was opened is asked again five minutes later, so the sidecars Navi
+  is still writing appear without the user clearing anything;
+- a miss written by the *previous* build is already expired when this one starts (an hour-old miss is
+  treated as stale) — the upgrade path is covered by its own test, which is the case the owner hit;
+- a hit still survives a day, and is re-asked after a week, so a `.txt` that is later upgraded to a
+  timed `.lrc` can replace what is on the device. (§10.5 said the refresh story belongs to v1.3; this
+  is it.)
+
+### 11.5 The one thing the wrapped builds do differently, and why
+
+The route sends **no** `Access-Control-Allow-Origin` — by design, it is meant to be fetched
+same-origin. Measured, in Chrome, with the real route:
+
+```
+page origin http://127.0.0.1:4631 → GET https://…:9443/lyrics?path=AKASAKI%2F…
+  → TypeError: Failed to fetch          (refused before any text arrived)
+curl -D- -H 'Origin: https://localhost' https://…:9443/rest/ping.view → access-control-allow-origin: *
+```
+
+So the API is fetchable cross-origin by Navidrome's own header, and this route is not. Inside the
+APK/IPA the page's origin is the webview's own (`https://localhost`), i.e. cross-origin, so there the
+route is fetched with **`CapacitorHttp`** — the platform's HTTP client, which is not a browser request
+and has no origin to check. Verified as far as this machine allows: `CapacitorHttp` is registered by
+default in both bridges (`capacitor-swift-pm` `CapacitorBridge.swift`: `pluginList = [CAPHttpPlugin…]`;
+Android `Bridge.java`: `registerPlugin(CapacitorHttp.class)`), and the call this app makes is pinned
+by unit test (url, method, `responseType`, timeouts, response handling, failure handling) — see §11.6
+for what that does *not* prove.
+
+### 11.6 Still unverified
+
+- **The native fetch on a real device.** The `CapacitorHttp` path is exercised at its seam in unit
+  tests and reasoned from the registered plugin list, but no build in this session ran it against the
+  real route: an unsigned simulator build cannot write the Keychain, so the app cannot connect there
+  without hiding the native bridge — and hiding it would also disable the native HTTP path being
+  tested. His phone is where this gets its real answer.
+- **His browser on the door origin.** The same-origin path is what the browser case exercises in
+  §11.2, but against the mock, not against the real app served from `:9443` (deploying a new `dist/`
+  to the door is Nova's card, not this one).
+- Native playback, lock-screen controls, Keystore/Keychain and the sideload install: unchanged from
+  §9.7 — still no device, still unverified.
+
+### 11.7 Artifacts
+
+```
+artifacts/Navilite-1.3.0-debug.apk      8,781,723 bytes   (v1.2: 8,780,787 — +936)
+artifacts/Navilite-1.3.0-unsigned.ipa     864,867 bytes   (v1.2:   864,067 — +800)
+```
+
+Both embed the same `dist/` the tests ran against — `shasum -a 256` of
+`dist/assets/index-B6xoPdyW.js` (`d641a31759a00e37fb24baa80225fc0980c773a668ef0e2ab8d5f5c024ebbb90`)
+compared against `assets/public/assets/index-B6xoPdyW.js` inside the APK and
+`Payload/App.app/public/assets/index-B6xoPdyW.js` inside the IPA: identical in all three. Neither
+carries any lyric text: grepping the shipped chunk for the mock's lines and for real lines returns
+nothing; the words stay on his server and in the device cache. The iOS build reports
+`app version 1.3.0 (4), UIBackgroundModes[0]=audio`.
