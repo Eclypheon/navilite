@@ -27,12 +27,23 @@ import { loadSettings, saveSettings, type PlaybackPreference, type Settings } fr
 import { CHANGELOG } from './changelog.ts';
 import { ICONS, cover, formatDuration, formatTime, h, icon, playIcon, replace, starIcon } from './dom.ts';
 import { createLyricsView, type LyricsView } from './lyrics.ts';
+import { createPager, type Pager } from './pager.ts';
 
 const PASSWORD_KEY = 'subsonic-password';
 const BUILD_ID = '__BUILD_ID__';
-/** Where the now-playing screen sends a left swipe, and where "close" goes if nowhere else. */
-const PLAYLISTS_ROUTE = '#/playlists';
 const DEFAULT_ROUTE = '#/artists';
+/** The now screen, on the spectrum pane. */
+const NOW_ROUTE = '#/now';
+/** The now screen, on the lyrics pane — the mode is part of the route so back/forward walk it. */
+const LYRICS_ROUTE = '#/now/lyrics';
+/*
+ * The three panes of the swipe pager, in the order the owner asked for: **playlist | spectrum |
+ * lyrics**. Pane 0 is the browser screen the app already had; the other two are inside the now
+ * overlay (see src/ui/pager.ts).
+ */
+const PANE_PLAYLIST = 0;
+const PANE_SPECTRUM = 1;
+const PANE_LYRICS = 2;
 
 type NowMode = 'spectrum' | 'lyrics';
 
@@ -66,9 +77,13 @@ interface Shell {
   nowShuffle: HTMLButtonElement;
   nowRepeat: HTMLButtonElement;
   lyricsHost: HTMLElement;
+  /** The two-pane strip inside the now screen: spectrum | lyrics. */
+  nowPages: HTMLElement;
   pillSpectrum: HTMLButtonElement;
   pillLyrics: HTMLButtonElement;
   nowMode: NowMode;
+  /** v1.5: the swipe pager behind the now screen (playlist | spectrum | lyrics). */
+  pager: Pager;
   lyrics: LyricsView;
   /** Song id currently marked as playing in a list, so the toggle only runs when it changes. */
   highlighted: string | null;
@@ -143,7 +158,7 @@ export async function boot(root: HTMLElement): Promise<void> {
   let restored = false;
   if (await restoreSession(ctx, shell, applyPalette)) {
     restored = await restorePlayQueue(ctx);
-    if (!location.hash) location.hash = restored ? '#/now' : DEFAULT_ROUTE;
+    if (!location.hash) location.hash = restored ? NOW_ROUTE : DEFAULT_ROUTE;
   }
 
   window.addEventListener('hashchange', () => renderRoute(ctx, shell));
@@ -181,6 +196,8 @@ export async function boot(root: HTMLElement): Promise<void> {
     libraryReady: () => ctx.library !== null,
     route: () => location.hash,
     nowMode: () => shell.nowMode,
+    /** v1.5: the swipe pager's own state — the pane, the offset and what it has transformed. */
+    pager: () => shell.pager.state(),
     playingRow: () => document.querySelector('.row.song.playing .row-title')?.textContent ?? null,
     context: () => shell.nowContext.textContent,
     // Visible lyrics, so an end-to-end check can read what the panel actually shows.
@@ -338,7 +355,18 @@ function buildShell(root: HTMLElement): Shell {
   const pillLyrics = h('button', { class: 'pill-option', text: 'Lyrics', onclick: () => setNowMode('lyrics') });
   const pill = h('div', { class: 'pill', role: 'tablist', 'aria-label': 'Spectrum or lyrics' }, [pillSpectrum, pillLyrics]);
 
-  const lyricsHost = h('div', { class: 'now-lyrics hidden' });
+  const lyricsHost = h('div', { class: 'now-lyrics' });
+  /*
+   * v1.5: the middle of the now-playing screen is a two-pane strip, and the overlay around it is
+   * the window the playlist is paged past — the geometry is in `src/ui/pager.ts`, the panes are
+   * here. The (x/y) line, the title block and the compact transport bar deliberately sit *outside*
+   * the strip: they are the same controls on whichever pane is showing, which is what keeps them
+   * working while a finger is mid-drag.
+   */
+  const nowPages = h('div', { class: 'now-pages' }, [
+    h('div', { class: 'now-page now-page-spectrum' }, [nowCover, visualizerHost]),
+    h('div', { class: 'now-page now-page-lyrics' }, [lyricsHost]),
+  ]);
   const nowOverlay = h('section', { class: 'now hidden', 'aria-label': 'Now playing' }, [
     h('div', { class: 'now-top' }, [
       h('button', { class: 'icon-button now-close', 'aria-label': 'Close now playing', onclick: () => closeNow() }, [
@@ -346,9 +374,7 @@ function buildShell(root: HTMLElement): Shell {
       ]),
       pill,
     ]),
-    nowCover,
-    visualizerHost,
-    lyricsHost,
+    nowPages,
     nowTitle,
     nowSubtitle,
     nowContext,
@@ -365,6 +391,20 @@ function buildShell(root: HTMLElement): Shell {
   ]);
 
   const toastNode = h('div', { class: 'toast' });
+
+  /*
+   * The pager is built before the shell object because the shell carries it: its callbacks reach
+   * the app through the same late-bound references the rest of the shell uses (`queueRefRef` is the
+   * shell, `queueRef` the queue), so none of them need the shell to exist yet.
+   */
+  const pager = createPager({
+    host: root,
+    list: viewScroll,
+    overlay: nowOverlay,
+    strip: nowPages,
+    onSettle: (position) => settlePane(position),
+    onPrepare: (target) => preparePane(target),
+  });
 
   const shell: Shell = {
     header,
@@ -395,9 +435,11 @@ function buildShell(root: HTMLElement): Shell {
     nowShuffle,
     nowRepeat,
     lyricsHost,
+    nowPages,
     pillSpectrum,
     pillLyrics,
     nowMode: 'spectrum',
+    pager,
     lyrics: null as unknown as LyricsView,
     highlighted: null,
     lastBrowseRoute: DEFAULT_ROUTE,
@@ -413,9 +455,6 @@ function buildShell(root: HTMLElement): Shell {
     if ((event.target as HTMLElement).closest('button, input')) return;
     openNow();
   });
-  bindSwipe(nowOverlay, (direction) => {
-    if (direction === 'left') location.hash = PLAYLISTS_ROUTE;
-  });
 
   root.replaceChildren(header, viewScroll, playerBar, nowOverlay, toastNode);
   return shell;
@@ -430,50 +469,85 @@ function togglePlayback(): void {
 
 /** The logo, and the mini player, both land here. */
 function openNow(): void {
-  if (location.hash !== '#/now') location.hash = '#/now';
+  if (location.hash !== NOW_ROUTE) location.hash = NOW_ROUTE;
 }
 
+/** The × on the now screen: page back to the playlist he is on, through the pager. */
 function closeNow(): void {
-  const target = queueRefRef.lastBrowseRoute || DEFAULT_ROUTE;
-  if (location.hash === '#/now') location.hash = target;
+  queueRefRef.pager.goTo(PANE_PLAYLIST, { animate: true });
 }
 
 /** The shell needs to be reachable from the module-level routing helpers. */
 let queueRefRef: Shell = null as unknown as Shell;
 
-/** Swipe left/right on an element; used on the now-playing screen. */
-function bindSwipe(element: HTMLElement, onSwipe: (direction: 'left' | 'right') => void): void {
-  let startX = 0;
-  let startY = 0;
-  let tracking = false;
-  element.addEventListener(
-    'touchstart',
-    (event) => {
-      const touch = event.touches[0];
-      if (!touch) return;
-      startX = touch.clientX;
-      startY = touch.clientY;
-      tracking = true;
-    },
-    { passive: true },
-  );
-  element.addEventListener(
-    'touchend',
-    (event) => {
-      if (!tracking) return;
-      tracking = false;
-      const touch = event.changedTouches[0];
-      if (!touch) return;
-      const dx = touch.clientX - startX;
-      const dy = touch.clientY - startY;
-      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.4) return;
-      onSwipe(dx < 0 ? 'left' : 'right');
-    },
-    { passive: true },
-  );
+/* -------------------------------------------------------------- the pager */
+
+/**
+ * The pager came to rest on a pane: say so in the route.
+ *
+ * The URL is the pager's state (see `renderRoute`), and writing it here is what makes the browser's
+ * back and forward buttons walk the panes — the owner's optional nice-to-have, and free once the
+ * route and the pane are the same fact.
+ */
+function settlePane(position: number): void {
+  const shell = queueRefRef;
+  if (!shell) return;
+  const target =
+    position === PANE_PLAYLIST
+      ? shell.lastBrowseRoute || DEFAULT_ROUTE
+      : position === PANE_LYRICS
+        ? LYRICS_ROUTE
+        : NOW_ROUTE;
+  if (location.hash !== target) {
+    location.hash = target;
+    return;
+  }
+  // The route did not move — a drag that came back to where it started — so nothing will re-render
+  // for us: put the screen back by hand, or the overlay would stay over the list.
+  if (position === PANE_PLAYLIST) hideNowScreen(shell);
 }
 
-function setNowMode(mode: NowMode): void {
+/**
+ * A drag has just been read as horizontal, heading for `target`: make that pane exist before it
+ * arrives. The overlay may still be hidden (a drag that starts on the playlist) and the lyrics are
+ * fetched on first need, so both are readied here rather than assumed.
+ */
+function preparePane(target: number): void {
+  const shell = queueRefRef;
+  if (!shell) return;
+  if (target === PANE_PLAYLIST) return;
+  shell.nowOverlay.classList.remove('hidden');
+  shell.playerBar.classList.add('hidden');
+  applyNowMode(target === PANE_LYRICS ? 'lyrics' : 'spectrum');
+}
+
+/** The now screen is showing on `pane`. */
+function showNowScreen(shell: Shell, pane: number): void {
+  shell.nowOverlay.classList.remove('hidden');
+  shell.playerBar.classList.add('hidden');
+  applyNowMode(pane === PANE_LYRICS ? 'lyrics' : 'spectrum');
+  shell.pager.show(pane);
+}
+
+/** The now screen is gone: the playlist is the screen, and the transport is back. */
+function hideNowScreen(shell: Shell): void {
+  shell.pager.hide();
+  shell.nowOverlay.classList.add('hidden');
+  shell.playerBar.classList.toggle('hidden', queueRef?.currentSong == null);
+}
+
+/** Which pane a route means. Anything that is not the now screen is the playlist. */
+function paneOfRoute(head: string, id: string | undefined): number {
+  if (head !== 'now') return PANE_PLAYLIST;
+  return id === 'lyrics' ? PANE_LYRICS : PANE_SPECTRUM;
+}
+
+/**
+ * Apply a mode to the screen — the pill, the class the dense text layout hangs off, and the lyrics
+ * themselves. It does not move the pager: `setNowMode` does that by writing the route, and the
+ * router animates.
+ */
+function applyNowMode(mode: NowMode): void {
   const shell = queueRefRef;
   shell.nowMode = mode;
   const lyrics = mode === 'lyrics';
@@ -481,13 +555,25 @@ function setNowMode(mode: NowMode): void {
   shell.pillLyrics.classList.toggle('active', lyrics);
   shell.pillSpectrum.setAttribute('aria-selected', String(!lyrics));
   shell.pillLyrics.setAttribute('aria-selected', String(lyrics));
-  shell.visualizerHost.classList.toggle('hidden', lyrics);
-  shell.lyricsHost.classList.toggle('hidden', !lyrics);
-  // v1.2: the class the stylesheet hangs the text-screen layout off — it hides the album art
-  // and gives the freed height to the lines instead of leaving the column at its 88 px minimum.
+  // v1.2/v1.5: the class the dense lyrics metrics hang off. The panes themselves are laid out side
+  // by side now, so nothing is hidden here — the pager decides what is on screen.
   shell.nowOverlay.classList.toggle('lyrics-mode', lyrics);
   // Load on first view rather than on every track change: fewer requests, same result.
   if (lyrics) shell.lyrics.show(queueRef?.currentSong ?? null);
+}
+
+/**
+ * The spectrum/lyrics pill. Both options are the *same pager* the finger drives — the route is what
+ * moves, so the switch slides the strip instead of cutting to the other pane.
+ */
+function setNowMode(mode: NowMode): void {
+  const target = mode === 'lyrics' ? LYRICS_ROUTE : NOW_ROUTE;
+  if (location.hash === target) return;
+  // A hashchange does not fire when the only difference is the trailing pane on the same screen and
+  // the app is already there, so apply the mode directly as well; the pager follows the route.
+  applyNowMode(mode);
+  queueRefRef.pager.goTo(mode === 'lyrics' ? PANE_LYRICS : PANE_SPECTRUM);
+  location.hash = target;
 }
 
 function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => PlaybackQueue | null): void {
@@ -651,7 +737,10 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
   const [head = 'artists', id, extra] = routeParts();
   setActiveTab(shell, head);
   const nowOpen = head === 'now';
-  shell.nowOverlay.classList.toggle('hidden', !nowOpen);
+  // v1.5: the route *is* the pager's position — `#/now` is the spectrum pane and `#/now/lyrics` the
+  // lyrics, so the router is what moves the pager (and the back button walks the panes).
+  if (nowOpen) showNowScreen(shell, paneOfRoute(head, id));
+  else hideNowScreen(shell);
   // v1.4: the overlay freezes what is under it, and closing it puts that view back where it was.
   setScrollLock(shell, nowOpen);
   if (!nowOpen && head !== 'connect') shell.lastBrowseRoute = location.hash || DEFAULT_ROUTE;
@@ -1080,7 +1169,7 @@ async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {
   pageTitle(shell, 'Favourites', `${songs.length} tracks · ${albums.length} albums · ${artists.length} artists`, [playAll]);
 
   if (songs.length === 0 && albums.length === 0 && artists.length === 0) {
-    shell.view.append(h('p', { class: 'muted', text: 'Nothing starred yet. Use the star on any album or track.' }));
+    shell.view.append(h('p', { class: 'muted', text: 'Nothing starred yet. Use the star on an album — its tracks come along.' }));
     return;
   }
 
@@ -1265,58 +1354,46 @@ function songRow(
   showAlbum: boolean,
   onRemove?: () => void,
 ): HTMLElement {
-  const row = h('div', { class: 'row song' }, [
-    h(
-      'button',
-      {
-        class: 'row-play',
-        'aria-label': `Play ${song.title}`,
-        onclick: () => {
-          void ctx.queue!.play(items, index, context);
-          openNow();
-        },
+  /*
+   * v1.5: the whole row is the tap target — "tapping anywhere on a song row must play that song".
+   * The play mark is the row's own affordance (`span.row-play`) rather than a second control inside
+   * a control, and the favourite star is gone from rows: the album screen still stars albums, the
+   * Favourites screen still lists what is starred, and the row's own highlight is untouched.
+   */
+  const row = h(
+    'button',
+    {
+      class: 'row song',
+      'aria-label': `Play ${song.title}`,
+      onclick: () => {
+        void ctx.queue!.play(items, index, context);
+        openNow();
       },
-      [icon(ICONS.play, 18)],
-    ),
-    h('div', { class: 'row-text' }, [
-      h('span', { class: 'row-title', text: song.title }),
-      h('span', { class: 'row-sub', text: [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ') }),
-    ]),
-    h('span', { class: 'row-time', text: formatDuration(song.duration) }),
-    h(
-      'button',
-      {
-        class: 'row-star',
-        'aria-label': song.starred ? 'Remove from favourites' : 'Add to favourites',
-        onclick: () => {
-          void (async () => {
-            try {
-              await ctx.library!.setStarred(song.id, 'song', !song.starred);
-              song.starred = song.starred ? undefined : new Date().toISOString();
-              replace(starHost, starIcon(Boolean(song.starred)));
-            } catch (error) {
-              ctx.toast(errorText(error), 'error');
-            }
-          })();
-        },
-      },
-      [],
-    ),
-  ]);
-  const starHost = row.querySelector('button.row-star') as HTMLButtonElement;
-  starHost.append(starIcon(Boolean(song.starred)));
-  if (onRemove) {
-    row.append(
-      h('button', { class: 'row-remove', 'aria-label': 'Remove from playlist', onclick: onRemove }, [icon(ICONS.close, 16)]),
-    );
-  }
+    },
+    [
+      h('span', { class: 'row-play' }, [icon(ICONS.play, 18)]),
+      h('div', { class: 'row-text' }, [
+        h('span', { class: 'row-title', text: song.title }),
+        h('span', { class: 'row-sub', text: [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ') }),
+      ]),
+      h('span', { class: 'row-time', text: formatDuration(song.duration) }),
+    ],
+  );
   let rows = ctx.rows.get(song.id);
   if (!rows) {
     rows = new Set();
     ctx.rows.set(song.id, rows);
   }
   rows.add(row);
-  return row;
+  if (!onRemove) return row;
+  // Remove-from-playlist cannot live inside the row any more — the row is one button — so it sits
+  // beside it, in a wrapper that keeps the two on one line.
+  return h('div', { class: 'row-shell' }, [
+    row,
+    h('button', { class: 'row-remove', 'aria-label': `Remove ${song.title} from this playlist`, onclick: onRemove }, [
+      icon(ICONS.close, 16),
+    ]),
+  ]);
 }
 
 /**

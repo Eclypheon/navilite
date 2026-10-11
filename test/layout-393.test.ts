@@ -13,7 +13,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const PORT = 4611;
@@ -90,6 +90,30 @@ test('the app has no horizontal overflow at 393 x 852 on any route, in either no
       .join('\n');
     assert.equal(code, 0, `the 393 px audit found horizontal overflow:\n${failed || output}`);
     assert.match(output, /RESULT: no horizontal overflow anywhere\./);
+
+    /*
+     * The owner's settings report, in the one place a *width* audit cannot see it.
+     *
+     * Every focused step now records the control's computed font size and the visual viewport before
+     * and after focus. A control under 16 px makes iOS Safari zoom the page in, which is what made
+     * the settings screen pannable for him — and a zoomed page has no horizontal overflow of its own,
+     * so a width-only audit calls it clean. Chrome does not perform the zoom, so the font size is the
+     * reading that has to hold the line here; the zoom itself is measured in real WebKit by
+     * `tools/device-probe.mjs --scenario focus`.
+     */
+    const report = JSON.parse(readFileSync('/tmp/navilite-layout-393.json', 'utf8')) as {
+      results: Array<{ label: string; detail?: { selector?: string; fontSize?: string; zoom?: number } }>;
+    };
+    const focused = report.results.filter((step) => step.detail?.selector && typeof step.detail?.zoom === 'number');
+    assert.ok(focused.length >= 3, `only ${focused.length} focus steps recorded — the settings screen may not be walked`);
+    for (const step of focused) {
+      const size = Number.parseFloat(String(step.detail?.fontSize));
+      assert.ok(
+        size >= 16,
+        `${step.detail?.selector} takes focus at ${step.detail?.fontSize} on ${step.label} — iOS zooms the page in below 16 px`,
+      );
+      assert.equal(step.detail?.zoom, 1, `${step.label} zoomed its visual viewport`);
+    }
   } finally {
     mock.kill('SIGKILL');
   }

@@ -303,8 +303,11 @@ button {
   font-size: 13px;
 }
 
+/*
+ * v1.5: the play mark is the row's own affordance, not a button of its own — the whole row plays the
+ * song now — so it keeps the pill shape and loses the parts that made it read as a separate control.
+ */
 .row-play,
-.row-star,
 .row-remove,
 .icon-button {
   display: grid;
@@ -319,20 +322,52 @@ button {
   flex: none;
 }
 
-.row:hover .row-play,
-.row-play:focus-visible {
-  color: var(--accent-primary);
-  border-color: var(--accent-primary);
+/* The row is the target now: the mark inside it never swallows the tap. */
+.row .row-play {
+  cursor: inherit;
+  pointer-events: none;
 }
 
-.row-star[aria-label^='Remove'] {
-  color: var(--accent-tertiary);
-  border-color: var(--accent-tertiary);
+.row:hover .row-play {
+  color: var(--accent-primary);
+  border-color: var(--accent-primary);
 }
 
 .row-remove:hover {
   color: var(--danger);
   border-color: var(--danger);
+}
+
+/*
+ * v1.5: one row, one tap target, so the pressed state has to be obvious across the whole width of
+ * it. A plate plus a ring, neither of which depends on the row's content, so a long unbroken title
+ * cannot break it — and the "now playing" highlight below still wins once the finger lifts.
+ */
+.row.song {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.row.song:active {
+  background: color-mix(in srgb, var(--accent-primary) 22%, var(--bg-raised));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-primary) 45%, var(--line));
+}
+
+.row.song:active .row-title,
+.row.song:active .row-sub {
+  color: var(--text);
+}
+
+/* A song row with a remove control beside it: the row keeps the width, the control sits at the end. */
+.row-shell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.row-shell > .row {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .thumb {
@@ -426,6 +461,23 @@ button {
   min-width: 0;
   margin: 0;
   padding: 8px 10px;
+}
+
+/*
+ * v1.5. iOS Safari zooms the whole page in when a form control smaller than 16 px takes focus, and a
+ * zoomed page is pannable sideways — the owner's report: *"when i'm in the settings screen i still
+ * seem to be able to scroll horizontally i think the dropdown option could be causing some
+ * overflow"*. Measured on the iPhone 15 Pro simulator against the v1.4 build: focusing the playback
+ * dropdown took the visual viewport to **×1.07** while `documentElement.scrollWidth` stayed at the
+ * viewport width, which is exactly why a width-only audit called that screen clean. 16 px is the
+ * size iOS stops zooming at, so every focusable control is set to it. Nothing else about the
+ * layout changes; this is the one property that decides it.
+ */
+.field,
+input.field,
+select.field,
+textarea.field {
+  font-size: 16px;
 }
 
 /*
@@ -669,7 +721,17 @@ img {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  /*
+   * The window the pager slides is clipped here, where the box is the whole screen — not on the
+   * strip, whose own box is one pane wide and would clip the *incoming* pane away (measured: the
+   * lyrics pane stopped hit-testing entirely).
+   *
+   * `clip` rather than `hidden` alone, because `hidden` leaves this box scrollable: anything that
+   * scrolls an ancestor into view drags it, and the lyrics panel used to call `scrollIntoView` on
+   * every highlighted line. `hidden` stays as the fallback for an engine without `clip`.
+   */
   overflow: hidden;
+  overflow: clip;
   padding-top: env(safe-area-inset-top);
   /*
    * v1.4. `overscroll-behavior: none` keeps a scroll inside this screen from chaining out of it —
@@ -751,12 +813,47 @@ img {
   flex: 1 1 auto;
   min-height: 88px;
   margin-top: 8px;
+  /* v1.5: clipped, not scrollable — see `.now-pages`. The lyrics panel inside is the scroller. */
   overflow: hidden;
+  overflow: clip;
 }
 
-.now-visualizer.hidden,
-.now-lyrics.hidden {
-  display: none;
+/*
+ * v1.5: the two panes of the now screen, side by side, one screen wide each, moved as a single
+ * strip by `src/ui/pager.ts`. Both are always laid out — the pager has to have the incoming pane
+ * on screen *before* the finger arrives, which is what makes the transition a pull rather than a
+ * swap — so neither pane is ever `display: none` any more; the strip's transform decides what is
+ * visible. The (x/y) line, the title and the transport bar live outside this box, which is why
+ * they keep working mid-drag.
+ *
+ * The strip itself is not clipped: its own box is one pane wide, so clipping here would clip the
+ * *incoming* pane away (measured — the lyrics pane stopped hit-testing at all). The clip belongs to
+ * `.now` above, whose box is the whole screen.
+ */
+.now-pages {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  /* The transform is rewritten every frame of a drag: its own layer keeps the screen from
+     repainting around it. */
+  will-change: transform;
+}
+
+.now-page {
+  display: flex;
+  flex: 0 0 100%;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  overflow: clip;
+}
+
+.now-page-lyrics .now-lyrics {
+  flex: 1 1 0;
+  min-height: 0;
+  margin-top: 0;
 }
 
 .now-canvas {
@@ -833,7 +930,15 @@ img {
   /* v1.4: this one is above the overlay and is meant to scroll, but not to pass the gesture on
      to anything outside it — `contain` keeps its scroll its own. */
   overscroll-behavior: contain;
-  padding: 4px 18px 12px;
+  /*
+   * v1.5. The owner's report: "the first lyric line is clipped by the top bar". Measured, two
+   * things were behind it — the first line's box started 4 px below the panel's top edge, *inside*
+   * the faded band of the mask below (transparent over the first 16 px), so line one was drawn
+   * faded. 18 px of top padding puts the line's box past the fade, at the top of a panel that now
+   * starts below the pill row rather than under it, so line one is drawn whole. The harness reads
+   * the number back as `firstLineInFade` / `firstLineTop` instead of trusting the arithmetic.
+   */
+  padding: 18px max(14px, env(safe-area-inset-right)) 14px max(14px, env(safe-area-inset-left));
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
 }
@@ -856,11 +961,13 @@ img {
 /* --------------------------------------------------------- lyrics mode (v1.2) */
 
 /*
- * Lyrics mode is the text screen: the album art goes away and every pixel it was holding goes
- * to the lines. This is not a cosmetic preference — measured on the 393 x 852 target with the
- * library's long Japanese titles, the art was a 357 px square sitting above the text, and the
- * text column had been squeezed to its 88 px `min-height`: **1 line of a 12-line song** fit on
- * screen.
+ * Lyrics mode is the text screen: the album art is on the other pane and every pixel goes to the
+ * lines. This is not a cosmetic preference — measured on the 393 x 852 target with the library's
+ * long Japanese titles, the art was a 357 px square sitting above the text, and the text column had
+ * been squeezed to its 88 px `min-height`: **1 line of a 12-line song** fit on screen.
+ *
+ * v1.5 moved these metrics from `.now.lyrics-mode` to the strip itself: the pane is set this way in
+ * both modes, so switching panes never reflows the text under the reader's eye mid-drag.
  *
  * 13 px on a 1.35 line box is the density choice. It is iOS's own caption size, it stays
  * comfortably legible for kanji and romaji at arm's length, and it fits roughly 37 lines where
@@ -868,29 +975,15 @@ img {
  * out by colour and weight only, so following the highlight never reflows the column under the
  * reader's eye.
  */
-.now.lyrics-mode .now-cover {
-  display: none;
-}
-
-.now.lyrics-mode .now-lyrics {
-  /*
-   * `flex-basis: 0` instead of `auto`. With `auto` the column is sized by its (long) content
-   * first and then shrunk to `min-height` by the rows above it; with `0` it takes the whole
-   * leftover height, which is what "as much of the song as possible" means.
-   */
-  flex: 1 1 0;
-  min-height: 0;
-  margin-top: 4px;
-}
-
-.now.lyrics-mode .lyrics {
-  padding: 0 max(14px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left));
-}
-
-.now.lyrics-mode .lyric-line {
+.now-pages .lyric-line {
   padding: 1px 0;
   font-size: 13px;
   line-height: 1.35;
+}
+
+.now-pages .lyrics-empty,
+.now-pages .lyrics-note {
+  font-size: 13px;
 }
 
 .lyrics-empty {

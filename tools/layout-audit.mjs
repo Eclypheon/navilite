@@ -221,6 +221,18 @@ export async function runAudit(cdp, options) {
 
 /* ----------------------------------------------------------------- reporting */
 
+/**
+ * Did focusing a control on this step zoom the page in? (v1.5.)
+ *
+ * A ratio of the visual viewport before and after focus: > 1 is an iOS focus-zoom, which is the
+ * mechanism behind "i still seem to be able to scroll horizontally" on a screen whose layout width
+ * is clean. `null`/`undefined` details (steps that focused nothing) are never zoomed.
+ */
+export function focusZoom(detail) {
+  if (!detail || typeof detail.zoom !== 'number') return false;
+  return detail.zoom > 1.001;
+}
+
 export function formatReport(report, safeArea) {
   const lines = [];
   const env = report.environment;
@@ -233,12 +245,21 @@ export function formatReport(report, safeArea) {
   lines.push('');
   let failures = 0;
   for (const result of report.results) {
-    const ok = result.horizontalOverflow <= 0;
+    // v1.5: a route is clean when it neither overflows nor zooms under a finger. An iOS focus-zoom
+    // leaves the layout width untouched and makes the page pannable anyway — the owner's settings
+    // report — so it counts as a failure here.
+    const zoom = focusZoom(result.detail);
+    const ok = result.horizontalOverflow <= 0 && !zoom;
     if (!ok) failures += 1;
     lines.push(`${ok ? 'ok  ' : 'FAIL'}  ${result.label}`);
     lines.push(
       `      innerWidth ${result.innerWidth} · document clientWidth ${result.documentClientWidth} · scrollWidth ${result.documentScrollWidth} · overflow ${result.horizontalOverflow} px`,
     );
+    if (zoom) {
+      lines.push(
+        `      ZOOMS: ${result.detail.selector} at ${result.detail.fontSize} font — visual viewport ×${result.detail.zoom} (${result.detail.before.vvWidth} → ${result.detail.after.vvWidth} px): an iOS focus-zoom makes the screen pannable sideways`,
+      );
+    }
     for (const offender of result.actualOffenders) {
       lines.push(`      OFFENDER: ${offender.selector}`);
       lines.push(
@@ -259,6 +280,11 @@ export function formatReport(report, safeArea) {
       lines.push(
         `      lyrics: ${d.visibleLines} of ${d.lines} lines fit whole · line box ${d.lineHeight} px at ${d.fontSize} · panel ${d.panelHeight} px · cover ${d.coverVisible ? `${d.coverHeight} px (visible)` : 'hidden'}`,
       );
+      if (typeof d.firstLineTop === 'number') {
+        lines.push(
+          `        first line: top ${d.firstLineTop} vs panel top ${d.panelTop} (${Math.round((d.firstLineTop - d.panelTop) * 100) / 100} px in) · inside the panel's ${d.firstLineFullyInside ? 'yes' : 'NO'} · in the faded 16 px band: ${d.firstLineInFade ? 'YES' : 'no'}`,
+        );
+      }
     }
     if (result.detail && typeof result.detail.loudPixels === 'number') {
       const d = result.detail;

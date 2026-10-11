@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.4, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4']);
+test('the changelog is the owner-visible list: v1.0 through v1.5, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -55,6 +55,23 @@ test('every v1.4 defect the owner reported is described in his own terms', () =>
   assert.match(text, /1,660 px|0 px/, 'v1.3 scrolled the page; v1.4 has no page to scroll');
   for (const item of v14?.items ?? []) {
     assert.doesNotMatch(item, /overscroll|overflow|flex|container query|scrollTop|viewport/i);
+  }
+});
+
+test('every v1.5 change the owner asked for is described in his own terms', () => {
+  const v15 = CHANGELOG.find((release) => release.version === '1.5');
+  const text = v15?.items.join('\n') ?? '';
+  // His reports, in the order he made them: the settings screen that moved under him, the first
+  // lyric line under the top edge, and the screens he asked to be able to swipe between.
+  assert.match(text, /settings screen stays put/, 'his first report: the settings screen');
+  assert.match(text, /first line of the lyrics/, 'his second report: the clipped first line');
+  assert.match(text, /three screens you swipe between/, 'the swipe he asked for');
+  // The numbers this release is proved on have to be in the text he reads.
+  assert.match(text, /15 px takes it at 16 px/, 'the focus size that caused the zoom');
+  assert.match(text, /18 px/, 'where the first lyric line sits now');
+  assert.match(text, /200 px of sideways travel/, 'the diagonal gesture that must not turn a page');
+  for (const item of v15?.items ?? []) {
+    assert.doesNotMatch(item, /viewport|focus-zoom|transform|translate|flex|gesture handler|visual viewport/i);
   }
 });
 

@@ -88,6 +88,8 @@ function buildProbeBundle() {
 (function () {
   var cfg = window.__naviliteProbeConfig || {};
   var audit = window.__naviliteLayoutAudit;
+  /** Readings taken before a failure, so the last post can still carry them. */
+  var partial = null;
   var SEED_KEY = 'navilite.layout-probe.seeded';
 
   function post(payload) {
@@ -224,6 +226,57 @@ function buildProbeBundle() {
         beat('connected; running the scroll-containment scenario on its own');
         return { device: audit.DEVICE, environment: audit.environment(), states: {}, scrollOnly: true };
       }
+      if (cfg.scenario === 'focus') {
+        /*
+         * The owner's two reports, in real WebKit, on their own.
+         *
+         * The four-minute walk is what Safari in the simulator cannot sit through, but these two
+         * readings need this engine specifically rather than Chrome: an iOS focus-zoom is a
+         * *visual viewport* zoom that Chrome never performs, and the first lyric line's place in the
+         * panel is a layout result only the shipping engine can produce. So: sign in, go to
+         * settings, focus the playback dropdown, then play a stress track and measure the lyrics.
+         *
+         * Each reading is put into the partial report as soon as it is taken, and a failure after that
+         * still posts what was measured — a run that dies at the second reading must not throw away
+         * the first.
+         */
+        partial = { device: audit.DEVICE, environment: audit.environment(), states: {}, focusOnly: true };
+        beat('connected; measuring the settings focus-zoom and the first lyric line');
+        location.hash = '#/settings';
+        return audit
+          .waitFor("Boolean(document.querySelector('select.field'))", 'the playback select', 20000)
+          .then(function () {
+            return audit.focusProbe('select.field');
+          })
+          .then(function (focus) {
+            partial.settings = focus;
+            beat('settings: ' + focus.selector + ' focuses at ' + focus.fontSize + ', visual viewport x' + focus.zoom);
+            location.hash = '#/album/album-ja-1';
+            return audit
+              .waitFor("document.querySelectorAll('.row.song').length > 0", 'the stress album', 20000)
+              .then(function () {
+                return audit.playRow(0);
+              })
+              .then(function () {
+                return audit.waitFor("location.hash === '#/now'", 'the now screen', 20000);
+              })
+              .then(function () {
+                return audit.setPillMode(1).catch(function () {
+                  return null;
+                });
+              })
+              .then(function () {
+                return audit.waitFor("Boolean(document.querySelector('.lyric-line'))", 'the lyric lines', 25000);
+              })
+              .then(function () {
+                return audit.lyricsDensity();
+              })
+              .then(function (lyrics) {
+                partial.lyrics = lyrics;
+                return partial;
+              });
+          });
+      }
       beat('connected, walking the routes');
       return audit.walk({
         onStep: function (label) {
@@ -232,6 +285,7 @@ function buildProbeBundle() {
       });
     })
     .then(function (report) {
+      if (report.focusOnly) return report;
       beat('layout walk done; running the v1.4 scroll-containment scenario');
       return audit.scrollContainment().then(
         function (scroll) {
@@ -249,12 +303,12 @@ function buildProbeBundle() {
       return post(report);
     })
     .catch(function (error) {
-      return post({
-        error: String((error && error.message) || error),
-        stack: error && error.stack,
-        environment: audit.environment(),
-        at: new Date().toISOString(),
-      });
+      var report = partial || {};
+      report.error = String((error && error.message) || error);
+      report.stack = error && error.stack;
+      report.environment = audit.environment();
+      report.at = new Date().toISOString();
+      return post(report);
     });
 })();
 `;
@@ -320,8 +374,22 @@ async function latestReport() {
 
 async function waitForReport(existing) {
   const deadline = Date.now() + WAIT_SECONDS * 1000;
+  let seen = existing;
   while (Date.now() < deadline) {
-    if ((await reportCount()) > existing) return await latestReport();
+    const count = await reportCount();
+    if (count > seen) {
+      seen = count;
+      const report = await latestReport();
+      /*
+       * A progress beat is not a report.
+       *
+       * The bootstrap posts one `beat` per step so a caller can watch a run it cannot see, and the
+       * last post of the run is the report itself (`device` and the readings, or `error`). Treating
+       * the first beat as the answer makes every device run "fail" the moment the app connects.
+       */
+      if (report && (report.device || report.error)) return report;
+      process.stdout.write(`  beat: ${report?.progress ?? JSON.stringify(report)}\n`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   return null;
@@ -384,6 +452,35 @@ async function main() {
     if (report.error) {
       process.stdout.write(`the probe failed: ${report.error}\n`);
       if (report.stack) process.stdout.write(`${report.stack}\n`);
+      // Whatever was measured before the failure is still a measurement.
+      if (report.settings) {
+        const focus = report.settings;
+        process.stdout.write(
+          `  measured before the failure — ${focus.selector}: focuses at ${focus.fontSize}, ` +
+            `visual viewport ${focus.before.vvWidth}x${focus.before.vvHeight} (scale ${focus.before.vvScale}) -> ` +
+            `${focus.after.vvWidth}x${focus.after.vvHeight} (scale ${focus.after.vvScale}), x${focus.zoom}\n`,
+        );
+        if (focus.surfaceWhileFocused) {
+          const s = focus.surfaceWhileFocused;
+          process.stdout.write(
+            `    ${s.surface}: ${s.surfaceClientWidth} -> ${s.surfaceScrollWidth} px (${s.surfaceOverflow} px to scroll sideways), ` +
+              `document ${s.documentOverflow} px\n`,
+          );
+        }
+        if (focus.widestWhileFocused) {
+          const w = focus.widestWhileFocused;
+          process.stdout.write(
+            `    widest inside the scroller: ${w.selector} — box ${w.clientWidth} px, content ${w.scrollWidth} px (${w.overflow} px wider)\n`,
+          );
+        }
+      }
+      if (report.lyrics) {
+        const lyrics = report.lyrics;
+        process.stdout.write(
+          `  measured before the failure — lyrics: ${lyrics.visibleLines} of ${lyrics.lines} lines fit whole in ${Math.round(lyrics.panelHeight)} px, ` +
+            `first line ${(lyrics.firstLineTop - lyrics.panelTop).toFixed(1)} px in, in the faded band: ${lyrics.firstLineInFade}\n`,
+        );
+      }
       process.stdout.write(`${JSON.stringify(report.environment ?? {}, null, 2)}\n`);
       process.exitCode = 3;
       return;

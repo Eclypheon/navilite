@@ -156,6 +156,128 @@
     };
   }
 
+  /**
+   * The visual viewport, which is where an iOS focus-zoom shows up and *nowhere else*.
+   *
+   * v1.5. The owner reported "when i'm in the settings screen i still seem to be able to scroll
+   * horizontally i think the dropdown option could be causing some overflow" — and there is no
+   * layout overflow on that screen at 393 px (measured, in both engines). What there *is*: iOS
+   * Safari zooms the page in when a form control smaller than 16 px takes focus, which makes the
+   * layout wider than the screen and pannable sideways. The zoom lives in `visualViewport.scale`,
+   * so that is what a run has to read; `documentElement.scrollWidth` stays clean throughout, which
+   * is why a width-only audit can call the screen clean while the owner is panning it.
+   */
+  function viewportState() {
+    var vv = window.visualViewport;
+    return {
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      vvWidth: vv ? round2(vv.width) : null,
+      vvHeight: vv ? round2(vv.height) : null,
+      vvScale: vv ? round2(vv.scale) : null,
+      docClientWidth: document.documentElement.clientWidth,
+      docScrollWidth: document.documentElement.scrollWidth,
+    };
+  }
+
+  /**
+   * Both surfaces the audit measures, kept apart.
+   *
+   * A single maximum hides which one moved, and the two mean different things: a *document* wider
+   * than the screen is a page the owner can pan, while a *scroll surface* wider than its box is the
+   * screen he is on being draggable sideways inside its own frame. Only naming them separately says
+   * which fix the reading asks for.
+   */
+  function overflowSurfaces() {
+    var surface = scrollSurfaces().scroller;
+    return {
+      surface: surface ? selectorFor(surface) : null,
+      surfaceClientWidth: surface ? surface.clientWidth : null,
+      surfaceScrollWidth: surface ? surface.scrollWidth : null,
+      surfaceOverflow: horizontalOverflowOf(surface),
+      documentOverflow: horizontalOverflowOf(document.documentElement),
+    };
+  }
+
+  /**
+   * The element inside the scroller with the most to scroll sideways.
+   *
+   * `actualOffenders` only names boxes whose *rectangle* leaves the screen, and a control with a long
+   * option in it is not one of those: its box fits, its content does not. That is the shape that
+   * widens a scroller without any element being visibly off-screen.
+   */
+  function widestInsideSurface() {
+    var surface = scrollSurfaces().scroller;
+    if (!surface) return null;
+    var best = null;
+    var all = surface.querySelectorAll('*');
+    for (var i = 0; i < all.length; i += 1) {
+      var over = horizontalOverflowOf(all[i]);
+      if (over > 0 && (!best || over > best.overflow)) {
+        best = {
+          overflow: over,
+          selector: selectorFor(all[i]),
+          clientWidth: all[i].clientWidth,
+          scrollWidth: all[i].scrollWidth,
+          rectWidth: round2(all[i].getBoundingClientRect().width),
+        };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Focus a form control the way a finger does, and report what the viewport did about it.
+   *
+   * `value` is optional: a long value is how "a long value in the field" gets measured rather than
+   * assumed. The control is blurred again afterwards so the next step starts from a clean state.
+   */
+  function focusProbe(selector, value) {
+    var el = document.querySelector(selector);
+    if (!el) return Promise.reject(new Error('no element for ' + selector));
+    if (typeof value === 'string') {
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    var before = viewportState();
+    var surfacesBefore = overflowSurfaces();
+    var fontSize = getComputedStyle(el).fontSize;
+    el.focus();
+    return new Promise(function (resolve) {
+      setTimeout(resolve, 700);
+    }).then(function () {
+      var after = viewportState();
+      var surfacesAfter = overflowSurfaces();
+      var detail = measure();
+      el.blur();
+      return {
+        selector: selector,
+        value: typeof value === 'string' ? value.slice(0, 80) : null,
+        fontSize: fontSize,
+        before: before,
+        after: after,
+        /** A ratio, not a boolean: 1.07 is an iOS focus-zoom, 1 is not. */
+        zoom: Math.round(((after.vvScale || 1) / (before.vvScale || 1)) * 1000) / 1000,
+        surfaceBeforeFocus: surfacesBefore,
+        surfaceWhileFocused: surfacesAfter,
+        /** The focused control's own box: a native control fits, its content may not. */
+        control: {
+          tag: el.tagName,
+          className: String(el.className || ''),
+          clientWidth: el.clientWidth,
+          scrollWidth: el.scrollWidth,
+          rectWidth: round2(el.getBoundingClientRect().width),
+        },
+        widestWhileFocused: widestInsideSurface(),
+        overflowWhileFocused: detail.horizontalOverflow,
+        offendersWhileFocused: detail.actualOffenders.map(function (item) {
+          return item.selector;
+        }),
+      };
+    });
+  }
+
   /** Is the document wider than the viewport, and if so, which element did it? */
   function measure() {
     var vw = window.innerWidth;
@@ -180,6 +302,13 @@
       if (style.display === 'none' || style.visibility === 'hidden') continue;
       var rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) continue;
+      /*
+       * v1.5: an element entirely to the left of the viewport cannot make the page wider — it can
+       * only be a pane the pager has slid off the screen. Counting those as "offenders at left < 0"
+       * would bury the real ones in noise, so they are skipped by position: a box that has no
+       * pixels right of 0 has nothing to say about horizontal width.
+       */
+      if (rect.right <= 0.5) continue;
       if (rect.right > vw + 0.5 || rect.left < -0.5) {
         overflowers.push({
           selector: selectorFor(el),
@@ -243,6 +372,7 @@
       route: location.hash,
       innerWidth: vw,
       innerHeight: vh,
+      viewport: viewportState(),
       documentClientWidth: doc.clientWidth,
       documentScrollWidth: doc.scrollWidth,
       bodyScrollWidth: document.body.scrollWidth,
@@ -282,14 +412,158 @@
       if (lineHeight === 0) lineHeight = rect.height;
       if (rect.top >= box.top - 0.5 && rect.bottom <= box.bottom + 0.5) visible += 1;
     }
+    /*
+     * v1.5: the first line, measured against the panel's own top edge rather than eyeballed.
+     *
+     * The owner reported "the first lyric line is clipped by the top bar". Two things can do that:
+     * the line sitting above the panel, or the panel's own fade — `.lyrics` carries a mask that is
+     * transparent over its top 16 px, so a line whose box starts inside that band is drawn faded
+     * (which reads as clipped). `firstLineTop` is the gap between the panel's top and the first
+     * line's top, so both are one number; `firstLineInFade` is the mask's opaque start.
+     */
+    var firstBox = lines.length > 0 ? lines[0].getBoundingClientRect() : null;
     return {
       lines: lines.length,
       visibleLines: visible,
       lineHeight: Math.round(lineHeight * 100) / 100,
       fontSize: lines[0] ? getComputedStyle(lines[0]).fontSize : null,
       panelHeight: Math.round(box.height * 100) / 100,
+      panelTop: round2(box.top),
+      // The element that clips it, if any (the scroll container's own box top).
+      hostTop: round2(host.getBoundingClientRect().top),
+      firstLineTop: firstBox ? round2(firstBox.top) : null,
+      firstLineBottom: firstBox ? round2(firstBox.bottom) : null,
+      /** The mask is transparent for the first 16 px: a line starting inside it is drawn faded. */
+      firstLineInFade: firstBox ? firstBox.top - box.top < 16 : null,
+      firstLineFullyInside: firstBox ? firstBox.top >= box.top - 0.5 && firstBox.bottom <= box.bottom + 0.5 : null,
       coverVisible: coverBox ? coverBox.height > 0 : false,
       coverHeight: coverBox ? Math.round(coverBox.height * 100) / 100 : 0,
+    };
+  }
+
+  /**
+   * The v1.5 pager's own geometry, mid-gesture included.
+   *
+   * The panes are the evidence: a drag that only *ends* somewhere can be a post-hoc animation, so
+   * the harness reads these boxes while the finger is still down and checks that the incoming pane
+   * moved by the distance the finger did — and that the two layers still tile, edge to edge, so no
+   * empty space is ever exposed between them.
+   */
+  function nowGeometry() {
+    var box = function (selector) {
+      var el = document.querySelector(selector);
+      if (!el) return null;
+      var r = el.getBoundingClientRect();
+      var style = getComputedStyle(el);
+      return {
+        selector: selector,
+        left: round2(r.left),
+        top: round2(r.top),
+        right: round2(r.right),
+        bottom: round2(r.bottom),
+        width: round2(r.width),
+        height: round2(r.height),
+        translate: style.transform,
+        overflow: style.overflow,
+        scrollTop: round2(el.scrollTop),
+        scrollHeight: Math.round(el.scrollHeight),
+        clientHeight: Math.round(el.clientHeight),
+      };
+    };
+    var now = document.querySelector('.now');
+    return {
+      route: location.hash,
+      nowHidden: now ? now.classList.contains('hidden') : null,
+      pager: pagerState(),
+      now: box('.now'),
+      pages: box('.now-pages'),
+      spectrum: box('.now-page-spectrum'),
+      lyricsPane: box('.now-page-lyrics'),
+      panel: box('.lyrics'),
+      list: box('.view-scroll'),
+      activePill: (document.querySelector('.pill-option.active') || {}).textContent || null,
+      context: (document.querySelector('.now-context') || {}).textContent || null,
+      transport: document.querySelectorAll('.now-bar .transport').length,
+    };
+  }
+
+  /**
+   * What a finger would land on, at the centre of every control that has to keep working mid-drag.
+   *
+   * The (x/y) line, the transport and the pill sit *outside* the strip the panes slide in, which is
+   * the whole reason they are still usable while a screen is arriving. Hit-testing them with the
+   * finger still down is the honest form of that claim.
+   */
+  function controlHitTest() {
+    var selectors = ['.now-context', '.now-bar .transport.big', '.pill-option.active', '.now-progress'];
+    var out = [];
+    for (var i = 0; i < selectors.length; i += 1) {
+      var el = document.querySelector(selectors[i]);
+      if (!el) {
+        out.push({ selector: selectors[i], found: false });
+        continue;
+      }
+      var r = el.getBoundingClientRect();
+      var x = Math.round(r.left + r.width / 2);
+      var y = Math.round(r.top + r.height / 2);
+      var hit = document.elementFromPoint(x, y);
+      out.push({
+        selector: selectors[i],
+        found: true,
+        x: x,
+        y: y,
+        hit: hit ? selectorFor(hit) : null,
+        insideControl: !!(hit && (hit === el || el.contains(hit))),
+        insideNow: !!(hit && hit.closest && hit.closest('.now')),
+        text: (el.textContent || '').slice(0, 60),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The lyrics panel's own scroll, the line that is lit, and where the *next* line is.
+   *
+   * v1.5 asks the follow to lead by one line — the upcoming line should be readable before the song
+   * reaches it — so the upcoming line's box is what gets checked, not the active one's.
+   */
+  function lyricsFollowState() {
+    var host = document.querySelector('.lyrics');
+    if (!host) return null;
+    var box = host.getBoundingClientRect();
+    var nodes = Array.prototype.slice.call(host.querySelectorAll('.lyric-line'));
+    var active = host.querySelector('.lyric-line.active');
+    var activeIndex = active ? nodes.indexOf(active) : -1;
+    var upcoming = activeIndex >= 0 ? nodes[activeIndex + 1] : null;
+    var relative = function (node) {
+      if (!node) return null;
+      var r = node.getBoundingClientRect();
+      return {
+        top: round2(r.top - box.top),
+        bottom: round2(r.bottom - box.top),
+        fullyVisible: r.top >= box.top - 0.5 && r.bottom <= box.bottom + 0.5,
+        text: (node.textContent || '').slice(0, 24),
+      };
+    };
+    return {
+      scrollTop: round2(host.scrollTop),
+      maxScroll: Math.max(0, Math.round(host.scrollHeight - box.height)),
+      height: Math.round(box.height),
+      lines: nodes.length,
+      activeIndex: activeIndex,
+      upcoming: upcoming ? Object.assign({ index: activeIndex + 1 }, relative(upcoming)) : null,
+      active: relative(active),
+      visible: nodes
+        .map(function (node, index) {
+          var r = node.getBoundingClientRect();
+          return { index: index, visible: r.bottom <= box.bottom + 0.5 && r.top >= box.top - 0.5 };
+        })
+        .filter(function (item) {
+          return item.visible;
+        })
+        .map(function (item) {
+          return item.index;
+        }),
     };
   }
 
@@ -370,6 +644,87 @@
     return true;
   }
 
+  /**
+   * The pager, as the app reports it (v1.5). `null` on a build that has no pager — the older
+   * payloads the same harness is run against for a before/after comparison.
+   */
+  function pagerState() {
+    if (!window.__navilite || typeof window.__navilite.pager !== 'function') return null;
+    try {
+      return window.__navilite.pager();
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * Wait for the pager to stop moving, so a reading is of a screen at rest.
+   *
+   * With `expected` it also waits for that pane. That is not belt-and-braces: the app's route and
+   * its pager are the same fact, but the *hashchange* that moves the pager arrives as its own task,
+   * so a caller that has only just set `location.hash` finds the pager still resting on the old
+   * pane with `settled: true` — and a "settle" check would return immediately and hand the next
+   * reading a half-open screen. Measured: that is what made the first v1.5 run report 0 of 25
+   * hit-test points inside the now screen.
+   */
+  function settlePager(expected) {
+    if (!pagerState()) return Promise.resolve(null);
+    if (typeof expected === 'number') return waitForPane(expected);
+    return waitFor(
+      "(function(){var p = window.__navilite.pager(); return Boolean(p) && p.settled === true;})()",
+      'the pager to settle',
+      8000,
+    ).then(pagerState);
+  }
+
+  /** Wait until the pager is resting on a pane. Pane 0 is the playlist, 1 spectrum, 2 lyrics. */
+  function waitForPane(index) {
+    if (!pagerState()) return Promise.resolve(null);
+    return waitFor(
+      "(function(){var p = window.__navilite.pager(); return Boolean(p) && p.position === " +
+        index +
+        ' && p.settled === true;})()',
+      'pane ' + index,
+      8000,
+    ).then(pagerState);
+  }
+
+  /**
+   * Wait until a mode is showing, on either shape of the app: v1.5 asks the pager which pane it is
+   * on, older builds are read from the `hidden` class the mode switch used to toggle.
+   */
+  function waitForMode(mode) {
+    if (pagerState()) return waitForPane(mode === 'lyrics' ? 2 : 1);
+    var selector = mode === 'lyrics' ? '.now-lyrics' : '.now-visualizer';
+    return waitFor("!document.querySelector('" + selector + "').classList.contains('hidden')", mode + ' mode');
+  }
+
+  /** How many song rows are on screen — the "the list is loaded" signal. */
+  function songRowCount() {
+    return document.querySelectorAll('.row.song').length;
+  }
+
+  /**
+   * Tap a song row the way a person does.
+   *
+   * v1.5 made the *whole row* the tap target and dropped the favourite button, so `.row-play` is a
+   * decorative icon now rather than a control. The harness keeps working across both shapes: a real
+   * `button.row-play` is clicked where it exists (v1.4 and earlier), otherwise the row itself is —
+   * which is the thing v1.5 is claiming, so it gets exercised rather than assumed.
+   */
+  function playRow(index) {
+    var rows = document.querySelectorAll('.row.song');
+    if (rows.length === 0) throw new Error('no song rows on this screen');
+    var row = rows[index || 0];
+    var button = row.querySelector('button.row-play');
+    if (button) {
+      button.click();
+      return 'button.row-play';
+    }
+    row.click();
+    return 'the row itself';
+  }
+
   /** A gesture in progress: finger down, moved sideways, not yet lifted. */
   function beginSwipe(selector) {
     var target = document.querySelector(selector);
@@ -410,17 +765,40 @@
 
     var step = function (label, run, detail) {
       list.push(
-        run().then(function () {
-          var state = Object.assign({ label: label, environment: environment() }, measure());
-          if (typeof detail === 'function') {
+        run()
+          .then(function () {
+            var state = Object.assign({ label: label, environment: environment() }, measure());
+            if (typeof detail !== 'function') return state;
+            /*
+             * A detail may be async since v1.5: the focus-zoom reading needs a frame or two of
+             * settling after the control takes focus, so a detail that returns a promise is
+             * awaited rather than dropped on the floor.
+             */
+            var value;
             try {
-              state.detail = detail();
+              value = detail();
             } catch (error) {
               state.detail = { error: String(error) };
+              return state;
             }
-          }
-          results.push(state);
-        }),
+            if (value && typeof value.then === 'function') {
+              return value.then(
+                function (resolved) {
+                  state.detail = resolved;
+                  return state;
+                },
+                function (error) {
+                  state.detail = { error: String((error && error.message) || error) };
+                  return state;
+                },
+              );
+            }
+            state.detail = value;
+            return state;
+          })
+          .then(function (state) {
+            results.push(state);
+          }),
       );
       return list[list.length - 1];
     };
@@ -443,18 +821,16 @@
     queue('Library (#/artists) — long Japanese artist name in the list', function () {
       return setHash('#/artists', "document.querySelectorAll('.row').length > 0", 'the artist list');
     });
-    // The iOS focus-zoom check. iOS zooms the page in when a form field smaller than 16 px gets
-    // focus, which makes the app wider than the screen and pannable sideways — the exact shape
-    // of "slightly too wide … horizontal scroll". Measuring it is the only way to know whether
-    // it happens on a given build and engine, so it is one of the audited states.
-    queue('Library — search field focused (iOS focus-zoom check)', function () {
-      return setHash('#/artists', "document.querySelectorAll('.row').length > 0", 'the artist list').then(function () {
-        var input = document.querySelector('.page-head .field');
-        if (input) input.focus();
-        return new Promise(function (resolve) {
-          setTimeout(resolve, 500);
-        });
-      });
+    // The iOS focus-zoom. iOS zooms the page in when a form control smaller than 16 px takes
+    // focus, which makes the layout wider than the screen and pannable sideways — the exact shape
+    // of "slightly too wide … horizontal scroll", and the one the owner reported on the settings
+    // screen ("i think the dropdown option could be causing some overflow"). The zoom lives in
+    // `visualViewport.scale` and leaves `documentElement.scrollWidth` untouched, so a width-only
+    // audit reports that screen clean while the owner is panning it. Hence a *focus* reading.
+    queue('Library — the search field focused, holding a long unbroken query', function () {
+      return setHash('#/artists', "document.querySelectorAll('.row').length > 0", 'the artist list');
+    }, function () {
+      return focusProbe('.page-head .field', 'バラードのなかのいちばん長いタイトルをここに入れる'.repeat(2));
     });
     queue('Artist (#/artist/artist-ja) — long Japanese album names in the grid', function () {
       return setHash('#/artist/artist-ja', "document.querySelectorAll('.card').length > 0", 'the stress artist');
@@ -462,8 +838,18 @@
     queue('Album (#/album/album-ja-1) — long Japanese and unbroken-Latin track titles', function () {
       return setHash('#/album/album-ja-1', "document.querySelectorAll('.row.song').length > 0", 'the stress album');
     });
+    queue('Album — the "Add to playlist" dropdown focused', function () {
+      return setHash('#/album/album-ja-1', "document.querySelectorAll('.row.song').length > 0", 'the stress album');
+    }, function () {
+      return focusProbe('.detail-text select');
+    });
     queue('Playlists (#/playlists) — two very long playlist names', function () {
       return setHash('#/playlists', "document.querySelectorAll('.row').length > 2", 'the playlist list');
+    });
+    queue('Playlists — a very long playlist name typed into the field and focused', function () {
+      return setHash('#/playlists', "document.querySelectorAll('.row').length > 2", 'the playlist list');
+    }, function () {
+      return focusProbe('.page-head .field', 'A playlist name long enough to push any field wider than the screen'.repeat(2));
     });
     queue('Playlist (#/playlist/pl-stress-ja) — long Japanese playlist name', function () {
       return setHash('#/playlist/pl-stress-ja', "document.querySelectorAll('.row.song').length > 0", 'the stress playlist');
@@ -471,18 +857,31 @@
     queue('Settings (#/settings) — the long playback-preference select', function () {
       return setHash('#/settings', "document.querySelector('select') !== null", 'settings');
     });
+    // The owner's own screen, in the state he reported it in: the playback dropdown, focused —
+    // which is the moment iOS decides whether to zoom.
+    queue('Settings — the playback dropdown focused (the screen the owner reported)', function () {
+      return setHash('#/settings', "document.querySelector('select') !== null", 'settings');
+    }, function () {
+      return focusProbe('select.field');
+    });
     queue('Changelog (#/changelog)', function () {
       return setHash('#/changelog', "document.querySelector('.release') !== null", 'the changelog');
     });
+    // The connect screen is a route, so it is walked like one. It used to be missing from this
+    // walk: `#/connect` is reachable while a session is live (the queue keeps playing), and it is
+    // the screen with the longest text in a field (the server address).
+    queue('Connect (#/connect) — the server address field holding a long address, focused', function () {
+      return setHash('#/connect', "document.querySelector('.connect .field') !== null", 'the connect form');
+    }, function () {
+      return focusProbe('.connect .field', 'https://alienlab.tailbed832.ts.net:9443/navidrome/very/long/path');
+    });
     queue('Now (#/now, spectrum) — long title, long "Playing from" line', function () {
       return setHash('#/playlist/pl-stress-ja', "document.querySelectorAll('.row.song').length > 0", 'the stress playlist again').then(function () {
-        // A real tap on the row's play button: the app's own handler, not a debug hook.
-        var rows = document.querySelectorAll('.row.song .row-play');
-        if (rows.length > 0) rows[0].click();
-        else throw new Error('no playable row in the stress playlist');
+        // The app's own tap target. v1.5 made the whole row one, so `playRow` uses the row.
+        playRow(0);
         return waitFor("location.hash === '#/now'", 'the now-playing screen').then(function () {
           return waitFor("Boolean(document.querySelector('.now-canvas'))", 'the spectrum canvas');
-        }).then(function () {
+        }).then(settlePager).then(function () {
           return new Promise(function (resolve) {
             setTimeout(resolve, 600); // let a frame or two of the visualiser land
           });
@@ -490,11 +889,16 @@
       });
     });
     queue('Now (#/now, lyrics) — long unbroken Japanese lyric lines', function () {
-      return setHash('#/now', 'true', 'nothing').then(function () {
+      return setHash('#/playlist/pl-stress-ja', "document.querySelectorAll('.row.song').length > 0", 'the stress playlist again').then(function () {
+        playRow(0);
+        return waitFor("location.hash === '#/now'", 'the now-playing screen').then(settlePager);
+      }).then(function () {
         var pills = document.querySelectorAll('.pill-option');
         if (pills.length < 2) throw new Error('no lyrics pill');
         pills[1].click();
-        return waitFor("document.querySelectorAll('.lyric-line').length > 0", 'the lyric lines').then(function () {
+        return waitForMode('lyrics').then(function () {
+          return waitFor("document.querySelectorAll('.lyric-line').length > 0", 'the lyric lines');
+        }).then(function () {
           return new Promise(function (resolve) {
             setTimeout(resolve, 250);
           });
@@ -503,12 +907,14 @@
     }, lyricsDensity);
     queue('Now (#/now, lyrics) — mid-swipe, finger down and moved', function () {
       beginSwipe('.now');
-      return Promise.resolve();
+      return new Promise(function (resolve) {
+        setTimeout(resolve, 120);
+      });
     }, lyricsDensity);
     queue('Now (#/now, lyrics) — after the swipe completes', function () {
       endSwipe('.now');
       return new Promise(function (resolve) {
-        setTimeout(resolve, 400);
+        setTimeout(resolve, 500);
       });
     }, lyricsDensity);
     /*
@@ -562,6 +968,103 @@
       paused: element.paused,
       currentTime: Math.round(element.currentTime * 1000) / 1000,
     };
+  }
+
+  /**
+   * Seek the real media element — what the owner does by dragging the progress bar.
+   *
+   * This is the only honest way to make the app light a given lyric line: the highlight is driven by
+   * the app's own progress path (`renderProgress` calls `lyrics.position()`), so a line that lights
+   * here is a line that lights for him, whether the position came from playing or from seeking.
+   */
+  function seekAudio(seconds) {
+    var element = window.__naviliteMediaElement;
+    if (!element || !isFinite(element.duration)) return null;
+    element.currentTime = Math.max(0, Math.min(element.duration - 0.05, Number(seconds)));
+    return audioState();
+  }
+
+  /** Where the real element is: the harness derives the sidecar's own timings from this. */
+  function audioState() {
+    var element = window.__naviliteMediaElement;
+    if (!element) return null;
+    return {
+      currentTime: element.currentTime,
+      duration: element.duration,
+      paused: element.paused,
+      readyState: element.readyState,
+    };
+  }
+
+  /**
+   * Pause the real element.
+   *
+   * A track that is left to run to its end has the app roll onto the next one, which re-renders the
+   * now screen and disturbs whatever the check was in the middle of. Pausing first keeps a seek to
+   * the last line a seek to the last line.
+   */
+  function pauseAudio() {
+    var element = window.__naviliteMediaElement;
+    if (!element) return null;
+    element.pause();
+    return audioState();
+  }
+
+  /**
+   * A flick, timed *inside* the page.
+   *
+   * The pager reads its release velocity from the `performance.now()` gaps between touchmoves. Every
+   * other gesture here goes through the input pipeline, which costs a round trip per move — a hundred
+   * times a finger's cadence — so a "fast" gesture driven that way measures up as a slow one and the
+   * velocity projection can never be reached. This drives the same listeners with `TouchEvent`s at a
+   * finger's pace (26 px every 8 ms) and records the offset after each move, so a commit here cannot
+   * be anything but the projection: the distance travelled is the same shallow one the slow check
+   * snaps back from.
+   */
+  function flickPager(options) {
+    var target = document.querySelector(options.selector || '.now-visualizer');
+    if (!target || typeof Touch !== 'function' || typeof TouchEvent !== 'function') return Promise.resolve(null);
+    var fromX = options.fromX;
+    var toX = options.toX;
+    var steps = options.steps || 3;
+    var gapMs = options.gapMs || 8;
+    var y = options.y || Math.round(window.innerHeight / 2);
+    var identifier = 7;
+    var make = function (x) {
+      return new Touch({ identifier: identifier, target: target, clientX: Math.round(x), clientY: y });
+    };
+    var fire = function (type, x) {
+      var point = make(x);
+      target.dispatchEvent(
+        new TouchEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          touches: type === 'touchend' ? [] : [point],
+          targetTouches: type === 'touchend' ? [] : [point],
+          changedTouches: [point],
+        }),
+      );
+    };
+    var offsets = [];
+    return new Promise(function (resolve) {
+      var started = performance.now();
+      fire('touchstart', fromX);
+      var send = function (index) {
+        if (index > steps) {
+          fire('touchend', toX);
+          resolve({ ms: Math.round(performance.now() - started), offsets: offsets });
+          return;
+        }
+        var x = fromX + ((toX - fromX) * index) / steps;
+        setTimeout(function () {
+          fire('touchmove', x);
+          var state = pagerState();
+          if (state) offsets.push(state.offset);
+          send(index + 1);
+        }, gapMs);
+      };
+      send(1);
+    });
   }
 
   function captureMediaElement() {
@@ -730,7 +1233,7 @@
     var settings = options || {};
     var hash = settings.hash || '#/playlist/pl-stress-long';
     var offset = typeof settings.offset === 'number' ? settings.offset : 400;
-    return setHash(hash, "document.querySelectorAll('.row.song .row-play').length > 4", 'the long playlist')
+    return setHash(hash, "document.querySelectorAll('.row.song').length > 4", 'the long playlist')
       .then(function () {
         var scroller = scrollSurfaces().scroller;
         var room = scrollableBy(scroller);
@@ -747,12 +1250,17 @@
       });
   }
 
-  /** The app's own route onto the now screen: tap play on a row, as a person does. */
+  /** The app's own route onto the now screen: tap a row, as a person does. */
   function openNowFromList() {
-    var play = document.querySelector('.row.song .row-play');
-    if (!play) return Promise.reject(new Error('no playable row on this screen'));
-    play.click();
+    var rows = document.querySelectorAll('.row.song');
+    if (rows.length === 0) return Promise.reject(new Error('no playable row on this screen'));
+    playRow(0);
     return waitFor("location.hash === '#/now'", 'the now screen')
+      // The spectrum pane, not merely "the pager has stopped": the hashchange that opens it is a
+      // later task, so this is the wait that makes the reading a screen at rest (see settlePager).
+      .then(function () {
+        return settlePager(1);
+      })
       .then(function () {
         return nextFrames(2);
       })
@@ -802,7 +1310,10 @@
     close.click();
     return waitFor("location.hash !== '#/now'", 'the browse screen')
       .then(function () {
-        return waitFor("document.querySelectorAll('.row.song .row-play').length > 4", 'the list again');
+        return settlePager(0);
+      })
+      .then(function () {
+        return waitFor("document.querySelectorAll('.row.song').length > 4", 'the list again');
       })
       .then(function () {
         return nextFrames(3);
@@ -810,16 +1321,73 @@
       .then(scrollState);
   }
 
-  /** The swipe left off the spectrum, as the app implements it: touch, not wheel. */
+  /**
+   * One finger swipe across the now screen, at real geometry: down near one edge, moved across,
+   * lifted near the other. Each move is dispatched separately, so the pager sees a drag with a
+   * direction and a velocity rather than a single jump.
+   */
+  function swipePager(direction) {
+    var target = document.querySelector('.now');
+    if (!target || typeof Touch !== 'function') {
+      // No now screen to swipe (a build that has closed it already, say).
+      return Promise.resolve(null);
+    }
+    var width = window.innerWidth || DEVICE.width;
+    var y = Math.round((window.innerHeight || DEVICE.height) / 2);
+    var from = direction === 'left' ? width - 40 : 40;
+    var to = direction === 'left' ? 40 : width - 40;
+    var point = function (x) {
+      return new Touch({ identifier: 7, target: target, clientX: Math.round(x), clientY: y });
+    };
+    var fire = function (type, x, touches) {
+      target.dispatchEvent(
+        new TouchEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          touches: touches,
+          targetTouches: touches,
+          changedTouches: [point(x)],
+        }),
+      );
+    };
+    fire('touchstart', from, [point(from)]);
+    for (var step = 1; step <= 5; step += 1) {
+      var x = from + ((to - from) * step) / 5;
+      fire('touchmove', x, [point(x)]);
+    }
+    fire('touchend', to, []);
+    return settlePager();
+  }
+
+  /**
+   * Swipe left until the playlist is on screen.
+   *
+   * v1.5 made the now screen a three-pane pager — playlist | spectrum | lyrics — so one left swipe
+   * from the spectrum lands on the lyrics and a second one lands on the playlist. This walks that
+   * route with real swipes and reports how many it took, which is the transition the owner asked
+   * for stated as a measurement rather than as an intention.
+   */
   function swipeLeftToPlaylists() {
-    if (!beginSwipe('.now')) return Promise.reject(new Error('the now screen did not accept a touch'));
-    endSwipe('.now');
-    return waitFor("location.hash === '#/playlists'", 'the playlists route')
+    var attempts = 0;
+    var firstPane = null;
+    var panes = [];
+    var advance = function () {
+      if (attempts >= 3) return Promise.resolve();
+      attempts += 1;
+      return swipePager('left').then(function (state) {
+        var pane = state ? state.position : null;
+        panes.push(pane);
+        if (firstPane === null) firstPane = pane;
+        if (location.hash.indexOf('#/playlist') === 0) return;
+        return advance();
+      });
+    };
+    return advance()
       .then(function () {
         return nextFrames(2);
       })
       .then(function () {
-        return { route: location.hash, state: scrollState() };
+        return { route: location.hash, swipes: attempts, panes: panes, firstPane: firstPane, state: scrollState() };
       });
   }
 
@@ -832,19 +1400,21 @@
     result.context = empty.context;
     result.engineState = empty.engineState;
     result.transport = document.querySelectorAll('.now-bar .transport').length;
+    result.pagerBefore = pagerState();
     pills[1].click();
-    return waitFor("!document.querySelector('.now-lyrics').classList.contains('hidden')", 'lyrics mode')
+    return waitForMode('lyrics')
       .then(function () {
         result.lyricsMode = true;
         return nextFrames(2);
       })
       .then(function () {
         pills[0].click();
-        return waitFor("!document.querySelector('.now-visualizer').classList.contains('hidden')", 'spectrum mode');
+        return waitForMode('spectrum');
       })
       .then(function () {
         result.spectrumMode = true;
         result.mode = window.__navilite ? window.__navilite.nowMode() : null;
+        result.pagerAfter = pagerState();
         return result;
       });
   }
@@ -854,7 +1424,11 @@
     var pills = document.querySelectorAll('.pill-option');
     if (pills.length < 2) return Promise.reject(new Error('no pill to click'));
     pills[index].click();
-    return nextFrames(2).then(scrollState);
+    return waitForMode(index === 1 ? 'lyrics' : 'spectrum')
+      .then(function () {
+        return nextFrames(2);
+      })
+      .then(scrollState);
   }
 
   /**
@@ -939,6 +1513,7 @@
         report.swipe = swiped;
       })
       .then(function () {
+        report.pager = pagerState();
         report.checks = {
           documentFrozen: report.documentFrozen,
           documentNeverScrolled: report.documentNeverScrolled,
@@ -946,9 +1521,16 @@
           listNeverMoved: report.listNeverMoved,
           listRestored: report.listRestored,
           overlayIsTheOnlyHitTarget: report.hitTest.allInsideNow,
-          swipeStillWorks: report.swipe.route === '#/playlists',
+          /*
+           * v1.5. The swipe no longer closes the screen outright: it moves the pager one pane, so
+           * the same gesture now walks spectrum -> lyrics -> the playlist he was on. Both halves are
+           * checked, because "the swipe does something" would be satisfied by the old behaviour too.
+           */
+          swipeLandsOnThePlaylist: String(report.swipe.route).indexOf('#/playlist') === 0,
+          swipeStepsThroughThePanes: report.swipe.firstPane === null || report.swipe.firstPane === 2,
           controlsStillWork: report.controls.transport === 5 && report.controls.mode === 'spectrum'
             && /^Playing from .+\(\d+\/\d+\)$/.test(String(report.controls.context)),
+          pagerSettledOnTheSpectrum: report.pager === null || report.pager.position === 1,
         };
         report.passed = Object.keys(report.checks).every(function (key) {
           return report.checks[key] === true;
@@ -961,6 +1543,8 @@
     DEVICE: DEVICE,
     environment: environment,
     measure: measure,
+    viewportState: viewportState,
+    focusProbe: focusProbe,
     lyricsDensity: lyricsDensity,
     spectrumSnapshot: spectrumSnapshot,
     silenceAudio: silenceAudio,
@@ -980,5 +1564,21 @@
     attemptViewerScroll: attemptViewerScroll,
     pokeFrozenList: pokeFrozenList,
     scrollContainment: scrollContainment,
+    // v1.5: the pager, and the app's own tap target for a row.
+    pagerState: pagerState,
+    settlePager: settlePager,
+    waitForPane: waitForPane,
+    waitForMode: waitForMode,
+    swipePager: swipePager,
+    playRow: playRow,
+    songRowCount: songRowCount,
+    // v1.5: the pager's own geometry and the two readings its checks are made of.
+    nowGeometry: nowGeometry,
+    controlHitTest: controlHitTest,
+    lyricsFollowState: lyricsFollowState,
+    seekAudio: seekAudio,
+    audioState: audioState,
+    pauseAudio: pauseAudio,
+    flickPager: flickPager,
   };
 })();

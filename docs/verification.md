@@ -997,3 +997,109 @@ off is compiled into what he installs, not just on disk.
   `{ apply: (palette) => applyPalette(palette) }` fixes it. Pre-existing since v1.1, untouched by this
   card, and it changes colours, so it wants its own change rather than a ride-along here.
 
+## 13. v1.5 — the swipe pager, the settings box, and the first lyric line (2026-10-11)
+
+What he asked for: the settings screen must stop moving under his finger, the first lyric line must
+stop hiding behind the top of the panel, and the now-playing screen should be three screens he can
+swipe between — playlist, spectrum, lyrics — with the next one *pulled* in rather than cut to.
+
+Two engines, and they answer different questions:
+
+- **Chrome at 393 x 852** (`tools/layout-audit.mjs`, every route, both now-playing modes) — where the
+  *cause* lives. It reports the computed `font-size` of every control it focuses, and it now reports
+  the focused state's own horizontal overflow.
+- **Safari, iPhone 15 Pro, iOS 18.7** (`tools/device-probe.mjs --scenario focus`, real WebKit, 393 x
+  852, dpr 3) — where the *effect* lives. Chrome never performs an iOS focus-zoom, so a Chrome run
+  can name the offending size but cannot show the zoom; that needs this engine.
+- **`tools/pager-check.mjs`** — the gestures, driven as real CDP touch events against the built app,
+  and the app's own state read back (never by calling an internal function to fake a result).
+
+### 13.1 The settings box that moved the screen
+
+| | v1.4 (before) | v1.5 (after) |
+| --- | --- | --- |
+| the playback dropdown's focus size (Chrome, 393) | `15px` | `16px` |
+| the (URL) box, the same | `15px` | `16px` |
+| visual viewport while focused (Safari, real device engine) | not run — see 13.5 | `393x695` scale `1` -> `393x695` scale `1`, **zoom x1** |
+
+iOS zooms a page in when a focused form control's text is under 16 px, and the zoom is the panning
+he reported: the page stays 393 px wide the whole time (`documentElement.scrollWidth` = 393 before
+and after focusing), which is why a width-only audit had been calling this screen clean. The fix is
+the size, and the measurement that proves it is the *computed size* plus the visual viewport in
+WebKit — a ratio of 1 is not a zoom, 1.07 would be.
+
+Found while doing this, **not fixed**: with the box focused, the settings *scroll surface* still
+carries `301 px` of horizontally scrollable content in WebKit (surface `393 -> 694 px`) while the
+page stays 393 px and no element's rectangle leaves the screen. The probe extension that names the
+element inside the scroller (`widestWhileFocused`) landed after this run, so the culprit is
+unidentified rather than exonerated. Follow-up card: `t_3d2e5ee5`.
+
+### 13.2 The first lyric line
+
+| | v1.4 (before) | v1.5 (after) |
+| --- | --- | --- |
+| first line's top vs the panel's top (Chrome, 393) | `+0.00 px` — in the 16 px faded band | `+18.00 px` — past it |
+| first line, Safari (real engine, 393) | not run — see 13.5 | panel top `56 px`, line top `74 px`, `firstLineInFade: false`, `firstLineFullyInside: true` |
+
+The fade at the top of the panel is where the words disappear; a line at `+0 px` is inside it, which
+is the "clipped" he saw. The panel's own scroll now opens with the first line clear of it.
+
+### 13.3 The pager — one run, 27 checks, nothing failed
+
+`node tools/pager-check.mjs --url http://127.0.0.1:4641 --json /tmp/v15-pager6.json` (393 x 852,
+dpr 3, real touch events). The two behaviours that carried the risk:
+
+- **The axis lock.** A mostly-vertical drag on the playlist, measured with 200 px of sideways travel
+  in it: the list scrolled and the pager stayed at `position 0, offset 0`, with **no transform
+  written at all** (`translate.list 0, overlay 0, strip 0`). Half a screen of sideways travel turns
+  no page.
+- **The pane follows the finger.** Over the drag's five samples the panes moved `1.09, 1.18, 1.27,
+  1.36, 1.45` pane-widths — the finger's own travel, monotonic — and the strip's transform matched
+  that travel to **0.00 px** (worst pane error `0.15 px`). The two panes always met edge to edge
+  while the finger was down (no gap, no overlap, the window still covering the screen).
+- **The swipe map.** From the spectrum, left is the lyrics (`#/now/lyrics`), left again is the
+  playlist he came from (`#/playlist/pl-stress-long`), right from the spectrum is the playlist,
+  right from the playlist is the lyrics — the ring turns both ways. The route follows the pane.
+- **Commit on velocity, not distance.** 0.2 pane-widths released slowly snaps back to the pane it
+  started on; the same 0.2 pane-widths released fast (34 ms, offsets `2.07 -> 2.13 -> 2.20`) turns
+  the page.
+- Also checked in the same run: the (x/y) line, the transport, the pill and the progress bar are all
+  hit-testable **mid-drag** (each lands on itself, not on the strip); the pill slides the strip
+  through the same pager instead of cutting; back from the lyrics is the spectrum and forward
+  returns to it; the lyric highlight keeps advancing while the finger is down (advanced by seeking
+  the real media element, not by calling a function in the app).
+
+### 13.4 The lyrics themselves — look and say
+
+From the same run, on a 36-line sidecar (16 lines fit the panel):
+
+- the highlight followed the song for all **36 of 36** lines, and the panel never scrolled past its
+  own end (worst `scrollTop - maxScroll` = `-38 px`, i.e. never overscrolled);
+- it **leads by one line**: for every lit line the upcoming one was already fully on screen, so the
+  line he is about to hear is visible when the current one lights up;
+- a hand scroll of `-49 px` was **left alone** — the auto-scroll did not pull it back while the
+  song played on — and the follow resumed once the grace ran out.
+
+### 13.5 Not verified — read this before trusting the numbers above
+
+- **The v1.4 side of the device pair was never run.** The before/after WebKit pair was abandoned
+  when the card was timeboxed, so the *device* readings above are v1.5-only; the v1.4 numbers in
+  13.1 and 13.2 are Chrome's, which is enough to name the cause but not to show the zoom.
+- **No device run of the pager at all.** Every gesture number above is Chrome-driven CDP touch
+  events at 393 x 852. Real-finger behaviour on iOS — particularly the axis lock against Safari's
+  own back-swipe — is reasoned about, not measured. Follow-up card: `t_3d2e5ee5`.
+- **Landscape and the iPad are out of scope** of every run here.
+- One more honest note: the v1.4 device log on disk still shows the old failure
+  (`the layout probe did not load`), including one attempt that died on a backtick inside a comment
+  in the probe's own bootstrap. That is fixed (`--scenario focus` runs), but its re-run did not fit
+  this card.
+
+### 13.6 A note on the cost of proving this
+
+Most of this card's wall clock went into verification scaffolding rather than the release: a new
+409-line harness, a probe extension, and a device pair that was designed, debugged and then dropped.
+The lesson to carry: for a card of this shape the check budget is about **ten minutes using the
+harnesses that already exist** — `pager-check.mjs` already covered the axis lock and the swipe map,
+and its one run is what §13.3 quotes. New scaffolding is only worth it when an existing harness
+*cannot* express the risk.
+
