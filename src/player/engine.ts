@@ -182,8 +182,15 @@ const ZERO_POLLS_BEFORE_THEME = 12;
 const SPECTRUM_POLL_MS = 33;
 /** The clock is reported while playing at this rate, so the display never sits still. */
 const CLOCK_TICK_MS = 200;
-/** A seek is corrected on the analysis tap once the drift is a real one. */
-const SPECTRUM_RESYNC_MS = 5000;
+/**
+ * How long the engine waits before asking again about a tap that is on the wrong item.
+ *
+ * v1.8.0 — much shorter than {@link SPECTRUM_RECHECK_MS}, because this is not a tap that is broken,
+ * it is a track change: the tap has to be moved onto the item that is now playing, and the bars are
+ * dark for exactly as long as that takes. One second is the backstop; the load's own install is the
+ * path that gets it right on the first try.
+ */
+const SPECTRUM_ORPHAN_RECHECK_MS = 1000;
 /**
  * How often a tap that has stopped answering is allowed to be *checked* against the player.
  *
@@ -229,6 +236,20 @@ const MAX_SPECTRUM_RECHECKS = 3;
 const FROZEN_FRAMES_BEFORE_THEME = 10;
 const METER_INTERVAL_MS = 100;
 
+/**
+ * A cheap fingerprint of one frame of bands.
+ *
+ * Zero only for a frame that is entirely silent, which is the case the "is it frozen?" question must
+ * not confuse with "has it changed?" — silence is already its own answer (the zero-frame counter).
+ */
+function spectrumChecksum(bands: readonly number[]): number {
+  let checksum = 0;
+  for (let index = 0; index < bands.length; index += 1) {
+    checksum = (checksum + (bands[index] ?? 0) * (index + 1)) % 2147483647;
+  }
+  return checksum;
+}
+
 export class AudioEngine {
   private readonly el: HTMLAudioElement;
   private readonly os: OsName;
@@ -257,8 +278,10 @@ export class AudioEngine {
   private spectrumPoll: ReturnType<typeof setInterval> | null = null;
   private spectrumZeroPolls = 0;
   private spectrumPolls = 0;
-  private lastSpectrumResyncAt = 0;
   private lastSpectrumRecheckAt = 0;
+  /** The last native frame's fingerprint, and how many polls in a row have repeated it. */
+  private lastNativeChecksum = -1;
+  private identicalNativeFrames = 0;
   /** Polls in a row where the tap said it was not playing, and how many re-checks that has cost. */
   private spectrumDeadPolls = 0;
   private spectrumRechecks = 0;
@@ -801,7 +824,6 @@ export class AudioEngine {
         this.inTransition -= 1;
       }
       this.setNativePosition(positionMs, false);
-      if (this.native?.hasNativeSpectrum) void this.native?.resyncSpectrum?.(positionMs);
       this.emit();
       return;
     }
@@ -980,6 +1002,18 @@ export class AudioEngine {
        * the app says is playing.
        */
       if (this.track !== track) return;
+      /*
+       * v1.8.0 — the tap is installed **now**, on the item the load just put in place.
+       *
+       * v1.7.7 installed it from the `playing` transition instead, which fires *before* this load:
+       * `bridge.load` is what unloads the old asset and preloads the new one, so at that moment the
+       * player still held the *outgoing* item and the plugin's `attach` — which verifies against the
+       * item it is already on — reported success without touching anything. The tap then stayed on
+       * the item the player had left, and nothing re-armed it on the new one: the bars froze on the
+       * previous song until a pause/resume. Here the load has resolved and `player.currentItem` is
+       * the new item, so the same `attach` installs on it.
+       */
+      this.attachSpectrum(track);
       await bridge.play(startMs / 1000);
     } catch (cause) {
       this.fail(cause);
@@ -1031,37 +1065,33 @@ export class AudioEngine {
       return;
     }
     if (this.spectrumPoll !== null) return;
-    const positionMs = this.nativePositionMs;
     this.nativeBands = null;
     this.spectrumZeroPolls = 0;
     this.spectrumPolls = 0;
     this.spectrumLive = false;
+    this.lastNativeChecksum = -1;
+    this.identicalNativeFrames = 0;
     /*
      * Start reading **now**, not when the plugin says it has started.
      *
-     * `startSpectrum` resolves once the tap is on the audible player's item, which means waiting for
-     * the item to know its audio track. That is a formality when the player is already playing, but
-     * the poll is safe before the tap exists — a frame that is not live yet is exactly what the
-     * zero-poll counter is for, and it costs nothing to start reading first.
+     * A frame that is not live yet is exactly what the zero-poll counter is for, and it costs nothing
+     * to start reading first: it is what makes the first real frame appear the moment the tap has one,
+     * rather than one poll later.
      */
     this.spectrumPoll = setInterval(() => void this.pollSpectrum(), SPECTRUM_POLL_MS);
     this.lastSpectrumRecheckAt = this.clockNow();
-    void bridge
-      .startSpectrum(track.url, positionMs)
-      .then((started) => {
-        if (!started) {
-          this.modeReason = 'the native spectrum tap did not start, so the bars are on the album-art theme';
-          this.emit();
-          return;
-        }
-        if (this.track !== track || this.backend !== 'native') return;
-        this.lastSpectrumResyncAt = this.clockNow();
-      })
-      .catch((error: unknown) => {
-        this.spectrumLive = false;
-        this.modeReason = `the native spectrum tap failed (${error instanceof Error ? error.message : String(error)})`;
-        this.emit();
-      });
+    /*
+     * v1.8.0 — no install from here.
+     *
+     * v1.7.7 called `startSpectrum` from this transition, which fires *before* `bridge.load`: the
+     * plugin's `attach` was then asked about the item the player still had — the outgoing one — and,
+     * because it verifies an item that already carries this tap, it answered "yes" without touching
+     * anything. The new item was left untapped. The install now happens in `startNative` once the load
+     * has resolved (`attachSpectrum`). What is left here is the *verify* a resume and a return from
+     * the foreground need, and only when no load is in flight: during a load, asking about the tap is
+     * asking about the wrong item.
+     */
+    if (this.inTransition === 0) this.verifySpectrum();
     void this.pollSpectrum();
   }
 
@@ -1100,6 +1130,31 @@ export class AudioEngine {
     const frame = await bridge.spectrumFrame();
     if (!frame || !this.track) return;
     this.spectrumPolls += 1;
+    /*
+     * The tap is on an item the player has moved off — v1.8.0.
+     *
+     * The plugin reports which item it is tapped on (`itemIsCurrent`: the item the tap holds against
+     * `player.currentItem`), and that is the signal the v1.7.7 recheck was *trying* to read: it was
+     * gated on `frame.playing`, which is the **player's** answer, and the player is playing the new
+     * track throughout the swap — so the orphan it was written for could never fire. A track change
+     * left the bars frozen on the previous song's last frame (or on the theme) until a pause/resume.
+     *
+     * Nothing is drawn while this is true: the previous song's last frame is not a measurement of
+     * this one. The tap is re-attached to the item the player is on now, no more often than
+     * {@link SPECTRUM_ORPHAN_RECHECK_MS} — and, in the normal case, the load has already installed it
+     * (see `attachSpectrum`), so this is only ever the backstop.
+     */
+    if (frame.itemIsCurrent === false) {
+      this.nativeBands = null;
+      this.spectrumDeadPolls = 0;
+      if (this.spectrumLive) {
+        this.spectrumLive = false;
+        this.modeReason = 'the tap is on the item the player has moved off — re-attaching it to the track that is playing';
+        this.emit();
+      }
+      if (this.clockNow() - this.lastSpectrumRecheckAt >= SPECTRUM_ORPHAN_RECHECK_MS) this.verifySpectrum();
+      return;
+    }
     const playing = this.state === 'playing' && frame.playing;
     if (!playing) {
       /*
@@ -1160,11 +1215,24 @@ export class AudioEngine {
         this.emit();
       }
     }
-    // The tap decodes its own copy on its own clock, so it is re-aligned with the player every few
-    // seconds: the frame it shows must be the frame coming out of the speaker.
-    if (this.clockNow() - this.lastSpectrumResyncAt >= SPECTRUM_RESYNC_MS) {
-      this.lastSpectrumResyncAt = this.clockNow();
-      await this.resyncSpectrum();
+    /*
+     * The same frame over and over is not a measurement — v1.8.0, and the same rule the web path has
+     * had since v1.1 (see `sample()`).
+     *
+     * The native path trusted `frame.live`, which is the *tap's* own opinion that it is producing
+     * something. A tap that is alive but stuck on one buffer — the shape an orphaned one produces
+     * when the player it is listening to has moved on — would otherwise be drawn as if it were the
+     * new song, which is the owner's "it is not showing... it is showing the last song" family. An
+     * identical, non-silent frame ten polls in a row is a frozen buffer, not an audio signal.
+     */
+    const checksum = spectrumChecksum(frame.bands);
+    const identical = checksum !== 0 && checksum === this.lastNativeChecksum;
+    this.lastNativeChecksum = checksum;
+    this.identicalNativeFrames = identical ? this.identicalNativeFrames + 1 : 0;
+    if (this.identicalNativeFrames >= FROZEN_FRAMES_BEFORE_THEME && this.spectrumLive) {
+      this.spectrumLive = false;
+      this.modeReason = 'the native tap kept returning the same frame, which is not a measurement — showing the album-art theme';
+      this.emit();
     }
   }
 
@@ -1217,13 +1285,41 @@ export class AudioEngine {
     void bridge.startSpectrum(track.url, this.nativePositionMs).catch(() => undefined);
   }
 
-  /** Line the tap up with the position the audible player reports. */
-  private async resyncSpectrum(): Promise<void> {
+  /**
+   * Put the tap on the item a load has just put in place, and say so if it will not go.
+   *
+   * v1.8.0 — this is the install, and it is the only place a load installs. `bridge.load` has
+   * resolved, so the player's current item is the new one and the plugin's `attach` — which verifies
+   * an item that already carries this tap and installs on any other — lands on the item that is
+   * about to be heard. Called after a load and nowhere else; a resume reaches the same plugin method
+   * through {@link verifySpectrum}, where it is a verify.
+   */
+  private attachSpectrum(track: TrackRequest): void {
     const bridge = this.native;
-    if (!bridge?.resyncSpectrum || this.backend !== 'native') return;
-    await bridge.resyncSpectrum(this.nativeClock());
+    if (this.backend !== 'native' || !bridge?.startSpectrum) return;
+    void bridge
+      .startSpectrum(track.url, this.nativePositionMs)
+      .then((started) => {
+        if (this.track !== track || this.backend !== 'native') return;
+        if (started) return;
+        this.modeReason = 'the native spectrum tap did not start, so the bars are on the album-art theme';
+        this.emit();
+      })
+      .catch((error: unknown) => {
+        if (this.track !== track) return;
+        this.spectrumLive = false;
+        this.modeReason = `the native spectrum tap failed (${error instanceof Error ? error.message : String(error)})`;
+        this.emit();
+      });
   }
 
+  /**
+   * Line the tap up with the position the audible player reports.
+   *
+   * v1.8.0 — deleted, with the `resync` plugin method behind it. The tap is *on* the player that is
+   * heard, so its clock and the player's are one clock: `driftMs` was answered `0` unconditionally,
+   * which made this a bridge round trip twelve times a minute that corrected nothing.
+   */
   /* --------------------------------------------------------- the web audio path */
 
   /**

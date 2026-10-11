@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.7.7, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4', '1.7.5', '1.7.6', '1.7.7']);
+test('the changelog is the owner-visible list: v1.0 through v1.8.0, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4', '1.7.5', '1.7.6', '1.7.7', '1.8.0']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -273,5 +273,26 @@ test('the v1.7.7 entry names the two things he saw — the bars that would not c
   assert.match(text, /small gap in the music/, 'the gap he heard on the phone');
   for (const item of v177?.items ?? []) {
     assert.doesNotMatch(item, /AVPlayer|MTAudioProcessingTap|tap|plugin|FFT|vDSP|AVFoundation|engine|lifecycle|mix/i);
+  }
+});
+
+test('the v1.8.0 entry names the two things he saw — the bar he could not drag, and the bars on the old song', () => {
+  const v180 = CHANGELOG.find((release) => release.version === '1.8.0');
+  const text = v180?.items.join('\n') ?? '';
+  /*
+   * His report, as the thing that happened to him: *"the seek bar still doesn't let me drag it i can
+   * only tap to seek"*, and the visualiser that stayed on the previous song's bars after a change of
+   * track. Both entries say what he did and what it does now; neither says how — no touch channel, no
+   * pointer events, no item identity, no render thread — because none of that is visible to him.
+   */
+  assert.match(text, /seek bar takes your thumb/, 'the drag he could not do');
+  assert.match(text, /Dragging it moves the song now, on the phone/, 'and that it is fixed on the phone, where he reported it');
+  assert.match(text, /only a quick touch worked/, 'his words: he could only tap to seek');
+  assert.match(text, /never turns the page/, 'and the other half of his report, the swipe that won instead');
+  assert.match(text, /bars keep up with the sound/, 'the visualiser, by the name he uses for it');
+  assert.match(text, /sitting on the one before it/, 'the symptom after a change of track');
+  assert.match(text, /settle down to nothing/, 'and the pause, which must decay rather than show a placeholder');
+  for (const item of v180?.items ?? []) {
+    assert.doesNotMatch(item, /pointer|touch event|channel|item|tap|plugin|FFT|vDSP|AVFoundation|engine|thread|bridge|iOS Safari|WebKit/i);
   }
 });

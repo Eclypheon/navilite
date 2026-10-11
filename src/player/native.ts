@@ -56,7 +56,6 @@ interface NaviliteRemotePlugin {
 interface NaviliteSpectrumPlugin {
   start(options: { url: string; positionMs: number }): Promise<{ started: boolean; sampleRate: number; bandCount: number }>;
   stop(): Promise<{ stopped: boolean }>;
-  resync(options: { positionMs: number }): Promise<{ driftMs: number }>;
   bands(): Promise<NativeSpectrumFrame>;
 }
 
@@ -73,6 +72,15 @@ export interface NativeSpectrumFrame {
   silentFrames: number;
   positionMs: number;
   playing: boolean;
+  /**
+   * Whether the item the tap is installed on is still the player's current item — v1.8.0.
+   *
+   * The one signal that separates "the tap is broken" from "the player has moved on to another item
+   * and left the tap behind": `playing` cannot tell them apart, because the *player* is playing the
+   * new track throughout. Optional so that a bridge without it (an older plugin) reads as "not known"
+   * and nothing is concluded from it.
+   */
+  itemIsCurrent?: boolean;
   readable: boolean;
   sampleRate: number;
 }
@@ -118,7 +126,6 @@ export interface NativeBridge {
    */
   startSpectrum?(url: string, positionMs: number): Promise<boolean>;
   stopSpectrum?(): Promise<void>;
-  resyncSpectrum?(positionMs: number): Promise<number>;
   spectrumFrame?(): Promise<NativeSpectrumFrame | null>;
   /** Whether this platform can produce the spectrum from the native player at all. */
   readonly hasNativeSpectrum: boolean;
@@ -292,15 +299,6 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           await spectrum.stop();
         } catch (error) {
           console.warn('[navilite] the native spectrum tap did not stop', error);
-        }
-      },
-      async resyncSpectrum(positionMs) {
-        if (!spectrum) return 0;
-        try {
-          const result = await spectrum.resync({ positionMs });
-          return Number.isFinite(result.driftMs) ? result.driftMs : 0;
-        } catch {
-          return 0;
         }
       },
       async spectrumFrame() {

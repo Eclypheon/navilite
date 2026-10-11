@@ -938,6 +938,19 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
   /** True from the moment a finger lands on the bar until the gesture ends: we are the writer. */
   let dragging = false;
   let pointerId: number | null = null;
+  /**
+   * Which channel owns the gesture that is running.
+   *
+   * v1.8.0 — this is the fix. The two input channels are not interchangeable on iOS: a native
+   * `<input type=range>` is driven by WebKit's own recogniser, and the pointer stream that belongs
+   * to the touch it claims is *cancelled* as soon as that recogniser takes over, while the touch
+   * stream is delivered either way. v1.7.4 wrote the position from `pointermove` alone, so the only
+   * writer of the value was an event the platform stops sending — which is why the drag worked in
+   * the Chrome harness (whose synthetic touch feeds Chrome's input pipeline, which *does* synthesize
+   * pointer events) and did nothing at all on the phone, while a tap still worked, because a tap
+   * needs no move at all.
+   */
+  let owner: 'pointer' | 'touch' | null = null;
 
   const durationOf = (): number => queueDurationMs(getQueue());
   const valueMs = (): number => (Number(input.value) / 1000) * durationOf();
@@ -1053,10 +1066,13 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
     }
     dragging = false;
     pointerId = null;
+    owner = null;
   };
 
   const onPointerDown = (event: PointerEvent): void => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    // A gesture the touch channel has already claimed is not this channel's to write (v1.8.0).
+    if (owner === 'touch') return;
     /*
      * The gesture is the bar's from here, and it is the bar that will write the value.
      *
@@ -1065,6 +1081,7 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
      * so the platform's own slider does not begin a second, relative drag underneath ours. Both
      * writers running is precisely the "nothing happens" this is fixing.
      */
+    owner = 'pointer';
     dragging = true;
     pointerId = event.pointerId;
     begin();
@@ -1081,20 +1098,79 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
   };
 
   const onPointerMove = (event: PointerEvent): void => {
-    if (!dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
+    if (owner !== 'pointer' || !dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
     if (event.cancelable) event.preventDefault();
     write(event.clientX);
   };
 
   const onPointerUp = (event: PointerEvent): void => {
-    if (!dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
+    if (owner !== 'pointer' || !dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
     release(pointerId);
     finish();
   };
 
   const onPointerCancel = (): void => {
-    if (!dragging) return;
+    if (owner !== 'pointer' || !dragging) return;
     release(pointerId);
+    cancel();
+  };
+
+  /**
+   * The touch channel: the finger's own events, and the ones this control now owns the drag on.
+   *
+   * v1.8.0 — everything the owner reported as "i can only tap to seek" comes from the missing writer
+   * here. A real finger on a native `<input type=range>` produces no usable `pointermove` in WebKit
+   * (the control's own recogniser claims the touch and the pointer stream is cancelled), so the bar
+   * has to take the movement from `touchmove`, which iOS delivers for this control as for any other
+   * element. Two separate things are needed and neither is optional:
+   *
+   *   - `write(touches[0].clientX)` on the move — the value comes from where the finger *is*, over
+   *     the bar's own box, exactly the reading the tap already used;
+   *   - `preventDefault()` on a **non-passive** `touchmove` — `touch-action: none` stops the page
+   *     scrolling, it does not stop the range control's own drag, and letting both run is the
+   *     "nothing happens" of two writers again. A passive listener cannot call `preventDefault`, so
+   *     the option is part of the fix rather than a detail of it.
+   *
+   * The `touchstart` listener is deliberately passive and writes nothing but the value: it must not
+   * prevent the default there, because the browser needs it to see this as a touch sequence at all.
+   */
+  const onTouchStart = (event: TouchEvent): void => {
+    const touch = event.touches[0];
+    // A second finger is a pinch or a scroll, not a seek: give the gesture up rather than fight it.
+    if (event.touches.length > 1) {
+      if (owner === 'touch') {
+        owner = null;
+        dragging = false;
+        cancel();
+      }
+      return;
+    }
+    if (!touch) return;
+    owner = 'touch';
+    dragging = true;
+    begin();
+    write(touch.clientX);
+  };
+
+  const onTouchMove = (event: TouchEvent): void => {
+    if (owner !== 'touch' || !dragging) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    if (event.cancelable) event.preventDefault();
+    write(touch.clientX);
+  };
+
+  const onTouchEnd = (): void => {
+    if (owner !== 'touch') return;
+    owner = null;
+    dragging = false;
+    finish();
+  };
+
+  const onTouchCancel = (): void => {
+    if (owner !== 'touch') return;
+    owner = null;
+    dragging = false;
     cancel();
   };
 
@@ -1102,7 +1178,10 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
   input.addEventListener('pointermove', onPointerMove);
   input.addEventListener('pointerup', onPointerUp);
   input.addEventListener('pointercancel', onPointerCancel);
-  input.addEventListener('touchstart', begin, { passive: true });
+  input.addEventListener('touchstart', onTouchStart, { passive: true });
+  // Non-passive by necessity: this listener's `preventDefault` is what keeps the native control
+  // from taking the movement the bar is measuring (see the note on `onTouchStart`).
+  input.addEventListener('touchmove', onTouchMove, { passive: false });
   input.addEventListener('input', () => {
     // Our own drag is the writer for the length of the gesture; a second writer is the bug.
     if (dragging) return;
@@ -1112,12 +1191,8 @@ function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => Playbac
   input.addEventListener('change', () => {
     if (!dragging) finish();
   });
-  input.addEventListener('touchend', () => {
-    if (!dragging) finish();
-  }, { passive: true });
-  input.addEventListener('touchcancel', () => {
-    if (!dragging) cancel();
-  }, { passive: true });
+  input.addEventListener('touchend', onTouchEnd, { passive: true });
+  input.addEventListener('touchcancel', onTouchCancel, { passive: true });
 }
 
 function queueDurationMs(queue: PlaybackQueue | null): number {

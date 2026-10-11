@@ -118,3 +118,8 @@ Plain language, user-visible changes only. The app shows this same list under
 ## 1.7.7 — 2026-10-11
 
 - The bars no longer need a new song before they come back. Pausing, or leaving the app and returning, used to take the spectrum apart and put it back together while the song was already playing — which is why it sometimes stayed dark until you picked another track, and why you heard a small gap in the music just before it returned. It is now fitted once and left alone, so it is there the moment the sound is.
+
+## 1.8.0 — 2026-10-11
+
+- The seek bar takes your thumb. Dragging it moves the song now, on the phone as well as on the web page: before, only a quick touch worked, because the bar was listening for the kind of event iOS stops sending the moment your thumb starts moving on a slider, so a drag did nothing at all. It listens for the touch itself now, and a sweep along the bar never turns the page.
+- And the bars keep up with the sound. Switching to another song used to leave them sitting on the one before it until you paused and played again: they now come up with the track you are hearing, in that song's own colours from its cover art. Pausing lets them settle down to nothing instead of showing the waiting picture.

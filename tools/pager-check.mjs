@@ -714,8 +714,126 @@ async function main() {
         `panel scrollTop ${duringGrace.scrollTop} → ${afterGrace.scrollTop} after the 4 s grace (max ${afterGrace.maxScroll}, active line ${duringGrace.activeIndex} → ${afterGrace.activeIndex})`,
       );
       say('');
-      },
-      { width: 393, height: 852, deviceScaleFactor: 3 },
+
+      /*
+       * 11. the same drag on the **touch** channel alone (v1.8.0), and last on purpose.
+       *
+       * The seek-bar check above drives CDP's touch input, which feeds Chrome's own input pipeline —
+       * and Chrome synthesizes PointerEvents from it, which a real finger on a native `<input
+       * type=range>` in WebKit does not produce. That is exactly why it passed for two releases while
+       * the owner could not drag the bar at all. So this stage dispatches **only** touch events, built
+       * in the page and sent at the element found by hit-testing the finger's own coordinates: they
+       * travel up through `#app`, the ancestor whose touch listeners read a drag on the bar as a page
+       * turn, and its handlers run on the way. Nothing here produces a pointer event, so the only
+       * writer that can move the value is the bar's own touch path — which, before v1.8.0, did not
+       * exist (the value stayed exactly where it was for all six moves: that is the number this check
+       * was written to catch).
+       *
+       * It runs *after* the lyric stages because the app's own follow is deliberately sensitive to
+       * touches — a hand on the panel takes hold of the scroll — and the walk above measures animated
+       * positions. A synthetic touch sequence issued in the middle of it perturbs those readings, so
+       * this stage is the last thing the run does and nothing is measured after it.
+       */
+      await evaluate(cdp, `${IN_PAGE}setPillMode(0)`);
+      await evaluate(cdp, `${IN_PAGE}settlePager(1)`);
+      const touchGeometry = await evaluate(cdp, GEOMETRY);
+      if (!touchGeometry.progress) throw new Error('the seek bar is not in the now screen geometry');
+      const touchRestingPose = poseOf(touchGeometry);
+      const touchDrag = await evaluate(
+        cdp,
+        `(() => {
+          const audit = window.__naviliteLayoutAudit;
+          const app = document.getElementById('app');
+          const bar = document.querySelector('.now-progress .progress');
+          const rect = bar.getBoundingClientRect();
+          const y = rect.top + rect.height / 2;
+          const xAt = (fraction) => rect.left + rect.width * fraction;
+          const targetAt = (x) => document.elementFromPoint(x, y) || bar;
+          const touchAt = (x) => new Touch({
+            identifier: 7,
+            target: targetAt(x),
+            clientX: x,
+            clientY: y,
+            pageX: x,
+            pageY: y,
+            screenX: x,
+            screenY: y,
+            radiusX: 4,
+            radiusY: 4,
+            rotationAngle: 0,
+            force: 1,
+          });
+          const fire = (type, x) => {
+            const list = type === 'touchend' ? [] : [touchAt(x)];
+            targetAt(x).dispatchEvent(new TouchEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              touches: list,
+              targetTouches: list,
+              changedTouches: [touchAt(x)],
+            }));
+          };
+          const pose = () => {
+            const geometry = audit.nowGeometry();
+            const translateX = (value) => {
+              const match = /matrix\\(1, 0, 0, 1, (-?[\\d.]+), 0\\)/.exec(String(value));
+              return match ? Number(match[1]) : 0;
+            };
+            return [
+              Math.round(((geometry.pager && geometry.pager.offset) || 0) * 1000),
+              translateX(geometry.now.translate),
+              translateX(geometry.pages.translate),
+              translateX(geometry.list.translate),
+            ].join(':');
+          };
+          // Counted, so "dispatched through the ancestor" is a number in the report rather than an
+          // assumption about where the events went.
+          let ancestorSaw = 0;
+          const probe = () => { ancestorSaw += 1; };
+          app.addEventListener('touchstart', probe);
+          app.addEventListener('touchmove', probe);
+          app.addEventListener('touchend', probe);
+          const values = [];
+          const poses = [];
+          const fromX = xAt(0.2);
+          const toX = xAt(0.8);
+          fire('touchstart', fromX);
+          for (let step = 1; step <= 6; step += 1) {
+            fire('touchmove', fromX + ((toX - fromX) * step) / 6);
+            values.push(Number(bar.value));
+            poses.push(pose());
+          }
+          fire('touchend', toX);
+          app.removeEventListener('touchstart', probe);
+          app.removeEventListener('touchmove', probe);
+          app.removeEventListener('touchend', probe);
+          return {
+            values,
+            poses,
+            ancestorSaw,
+            targetWasInsideTheBar: bar.contains(targetAt(fromX)),
+          };
+        })()`,
+      );
+      readings.stages.seekTouchDrag = { ...touchDrag, restingPose: touchRestingPose };
+      check(
+        'a drag delivered as touch events only seeks the bar, with the pager never moving',
+        touchDrag.values.length >= 6 &&
+          touchDrag.targetWasInsideTheBar &&
+          touchDrag.values.every((value, index) => index === 0 || value >= touchDrag.values[index - 1]) &&
+          Math.abs(touchDrag.values[touchDrag.values.length - 1] - 800) <= 60,
+        `bar value after each touchmove: ${touchDrag.values.join(' → ')} (the finger went to 80 % of the bar; ` +
+          `the events were hit-tested onto the bar itself: ${touchDrag.targetWasInsideTheBar})`,
+      );
+      check(
+        'and it passes through the ancestor that used to take the gesture, which does not move a pane',
+        touchDrag.ancestorSaw === 8 && touchDrag.poses.every((pose) => pose === touchRestingPose),
+        `#app saw ${touchDrag.ancestorSaw} of those touch events; the pager pose stayed ` +
+        `${[...new Set(touchDrag.poses)].join(' / ')} (at rest ${touchRestingPose})`,
+        );
+        },
+        { width: 393, height: 852, deviceScaleFactor: 3 },
     );
   } catch (error) {
     // The report still has to land: a harness that dies without writing its measurements leaves

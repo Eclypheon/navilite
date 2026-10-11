@@ -1,6 +1,7 @@
 import Accelerate
 import AVFoundation
 import Foundation
+import os
 
 #if canImport(Capacitor)
 import Capacitor
@@ -123,6 +124,9 @@ final class AudibleSpectrumTap {
     /// How long `attach` waits for the audible item to have its audio track known. The player that is
     /// being tapped is already playing or about to, so this is a formality, not a load.
     static let trackWaitSeconds = 5.0
+    /// How often the analysis queue looks for a fresh window of PCM (v1.8.0). Shorter than the hop
+    /// (~23 ms of audio), so nothing waits for it: a window is ready on roughly every second tick.
+    static let analysisIntervalMs = 10
 
     private let lock = NSLock()
     private var item: AVPlayerItem?
@@ -146,15 +150,41 @@ final class AudibleSpectrumTap {
     private var silentFrames = 0
     private var lastFrameLive = false
 
-    // FFT, built once, on the tap's own thread.
+    /*
+     * ------------------------------------------------------------------ the hand-off
+     *
+     * v1.8.0 — **nothing here runs on the audio render thread any more.**
+     *
+     * Until v1.8.0 the tap's `process` callback did the windowing, the 2048-point FFT, the band fold
+     * *and* took an `NSLock` — on the thread that is rendering the audio the user is hearing. vDSP is
+     * fast and a frame every ~23 ms is small, so it usually got away with it, but a render thread must
+     * never block on a lock the main thread can hold, and it must not allocate. Apple's own guidance
+     * for `MTAudioProcessingTap` is to copy the samples out and process elsewhere. So the callback now
+     * writes the PCM it is handed into a small preallocated ring and returns; a timer on a dedicated
+     * queue drains that ring and does the window, the FFT and the fold off the audio thread.
+     *
+     * The lock on the render thread is an `os_unfair_lock` held for a sample-store loop, not an
+     * `NSLock` held across an FFT: it is the kernel's own unfair lock, which donates priority rather
+     * than inverting it. The `lock` above is still what guards the published bands, and it is now only
+     * ever taken off the render thread.
+     */
+    private var pcm = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
+    private var pcmWrite = 0
+    private var sinceLastFrame = 0
+    private var pcmLock = os_unfair_lock_s()
+    private let analysisQueue = DispatchQueue(label: "app.navilite.spectrum.analysis", qos: .userInitiated)
+    private var analysisTimer: DispatchSourceTimer?
+    /// Set false to tell a handler that is already queued that the FFT setup is going away.
+    private var draining = false
+    /// The window the analysis queue is working on. Owned by `analysisQueue`, never shared.
+    private var analysisWindow = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
+
+    // FFT, built once, on the analysis queue — never on the render thread.
     private var fftSetup: FFTSetup?
     private var sampleRate: Double = 0
     /// The format of the buffers the tap hands us, as reported by the tap itself at `prepare`.
     private var tapFormat: AudioStreamBasicDescription?
     private var window = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
-    private var ring = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
-    private var ringIndex = 0
-    private var sinceLastFrame = 0
     private var windowed = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
     private var realp = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
     private var imagp = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
@@ -362,6 +392,16 @@ final class AudibleSpectrumTap {
             // Whether the tap is currently on an item at all — the difference between "no frames
             // because it is quiet" and "no frames because nothing is tapped".
             "attached": item != nil,
+            /*
+             * Whether the item the tap is on is still the item the player is playing — v1.8.0.
+             *
+             * This is the answer the engine's orphan check reads. It is a plain identity comparison
+             * between the item this tap was installed on and `player.currentItem`, made here, where
+             * both are in hand: a track change replaces the player's item, and the tap stays on the
+             * old one until it is installed on the new one. `playing` cannot see that, because the
+             * player *is* playing — the new track — throughout.
+             */
+            "itemIsCurrent": item != nil && item === player?.currentItem,
             // The lifecycle rule, as numbers: installs may only grow for a new item, verifies grow
             // with every pause, resume, seek and return to the foreground.
             "installs": installCount,
@@ -376,11 +416,27 @@ final class AudibleSpectrumTap {
     fileprivate func prepare(sampleRate: Double, format: AudioStreamBasicDescription) {
         self.sampleRate = sampleRate
         self.tapFormat = format
-        guard fftSetup == nil else { return }
-        let log2n = vDSP_Length(log2(Float(AudibleSpectrumTap.windowSize)))
-        fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
-        vDSP_hann_window(&window, vDSP_Length(AudibleSpectrumTap.windowSize), Int32(vDSP_HANN_NORM))
-        buildBandRanges()
+        /*
+         * Everything the analysis needs is built here, on `analysisQueue`, and the timer that drains
+         * the PCM ring is started with it. `prepare` is called by the tap before the first `process`,
+         * so this is the one moment nothing is being analysed; doing it inside the queue's own
+         * `sync` is what makes the FFT setup and the timer's handler mutually exclusive.
+         */
+        analysisQueue.sync {
+            guard self.analysisTimer == nil else { return }
+            let log2n = vDSP_Length(log2(Float(AudibleSpectrumTap.windowSize)))
+            guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return }
+            self.fftSetup = setup
+            vDSP_hann_window(&self.window, vDSP_Length(AudibleSpectrumTap.windowSize), Int32(vDSP_HANN_NORM))
+            self.buildBandRanges()
+            self.draining = true
+            let timer = DispatchSource.makeTimerSource(queue: self.analysisQueue)
+            let interval = AudibleSpectrumTap.analysisIntervalMs
+            timer.schedule(deadline: .now() + .milliseconds(interval), repeating: .milliseconds(interval), leeway: .milliseconds(2))
+            timer.setEventHandler { [weak self] in self?.drainAndAnalyze() }
+            self.analysisTimer = timer
+            timer.resume()
+        }
     }
 
     /// The same log spacing the canvas uses: 64 bands over bins 2 … 60% of the spectrum, geometrically.
@@ -402,17 +458,21 @@ final class AudibleSpectrumTap {
     }
 
     /**
-     * One tap callback's worth of PCM.
+     * One tap callback's worth of PCM, and nothing else.
      *
      * `bufferList` is the rendered audio the user is hearing: reading it is the whole point, and it
      * is never written to — the buffers carry straight on to the output, which is what makes this a
      * measurement of the sound rather than a copy of it.
+     *
+     * v1.8.0 — this runs on the render thread, so it does the one cheap thing: decode each sample into
+     * the float ring. No FFT, no lock held across computation, no allocation, no dispatch. The window
+     * and the transform happen on `analysisQueue` (see `drainAndAnalyze`), which is what keeps the
+     * visualiser from ever being the reason the audio stutters.
      */
     fileprivate func consume(bufferList: UnsafeMutablePointer<AudioBufferList>, frames frameCount: Int) {
-        guard frameCount > 0, let setup = fftSetup, let format = tapFormat else { return }
+        guard frameCount > 0, let format = tapFormat else { return }
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
         guard let first = buffers.first, let data = first.mData else { return }
-        readable = true
         let channels = max(1, Int(format.mChannelsPerFrame))
         let interleaved = (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
         let stride = interleaved ? channels : 1
@@ -420,6 +480,9 @@ final class AudibleSpectrumTap {
         let isFloat = (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0
         let bits = Int(format.mBitsPerChannel)
 
+        os_unfair_lock_lock(&pcmLock)
+        defer { os_unfair_lock_unlock(&pcmLock) }
+        readable = true
         for index in 0..<frameCount {
             let value: Float
             if isFloat && bits == 32 {
@@ -436,21 +499,41 @@ final class AudibleSpectrumTap {
                 readable = false
                 return
             }
-            ring[ringIndex] = value
-            ringIndex = (ringIndex + 1) % AudibleSpectrumTap.windowSize
+            pcm[pcmWrite] = value
+            pcmWrite = (pcmWrite + 1) % AudibleSpectrumTap.windowSize
             sinceLastFrame += 1
-            if sinceLastFrame >= AudibleSpectrumTap.hop {
-                sinceLastFrame = 0
-                analyze(with: setup)
-            }
         }
+    }
+
+    /**
+     * The analysis half, on `analysisQueue`: take the most recent window of PCM and transform it.
+     *
+     * Polled rather than signalled, deliberately: posting to a queue from the render thread is an
+     * allocation, and the whole point of the hand-off is that the render thread only stores floats.
+     * The timer runs every {@link AudibleSpectrumTap.analysisIntervalMs}, which is shorter than the
+     * hop, so a window is ready on roughly every second tick and nothing is ever late.
+     */
+    private func drainAndAnalyze() {
+        guard draining, let setup = fftSetup else { return }
+        var ready = false
+        os_unfair_lock_lock(&pcmLock)
+        if sinceLastFrame >= AudibleSpectrumTap.hop {
+            sinceLastFrame = 0
+            for index in 0..<AudibleSpectrumTap.windowSize {
+                analysisWindow[index] = pcm[(pcmWrite + index) % AudibleSpectrumTap.windowSize]
+            }
+            ready = true
+        }
+        os_unfair_lock_unlock(&pcmLock)
+        guard ready else { return }
+        analyze(with: setup)
     }
 
     private func analyze(with setup: FFTSetup) {
         let n = AudibleSpectrumTap.windowSize
         let half = n / 2
         for index in 0..<n {
-            windowed[index] = ring[(ringIndex + index) % n] * window[index]
+            windowed[index] = analysisWindow[index] * window[index]
         }
         windowed.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else { return }
@@ -498,8 +581,25 @@ final class AudibleSpectrumTap {
     }
 
     fileprivate func unprepare() {
-        if let setup = fftSetup { vDSP_destroy_fftsetup(setup) }
-        fftSetup = nil
+        /*
+         * Stop the analysis before the setup it uses is destroyed.
+         *
+         * The timer's handler runs on `analysisQueue`, and a handler may already be queued when this
+         * (render-thread) call arrives: cancelling stops future deliveries, the `sync` waits for the
+         * queue to be free, and `draining = false` is checked at the top of the handler, so anything
+         * that runs after this point returns without touching the FFT setup it can no longer see.
+         */
+        analysisTimer?.cancel()
+        analysisTimer = nil
+        analysisQueue.sync {
+            self.draining = false
+            if let setup = self.fftSetup { vDSP_destroy_fftsetup(setup) }
+            self.fftSetup = nil
+        }
+        os_unfair_lock_lock(&pcmLock)
+        pcmWrite = 0
+        sinceLastFrame = 0
+        os_unfair_lock_unlock(&pcmLock)
     }
 
     fileprivate func finalize() {
@@ -576,7 +676,6 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "start", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "resync", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "bands", returnType: CAPPluginReturnPromise)
     ]
 
@@ -662,15 +761,14 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     }
 
     /**
-     * Nothing is left to line up.
+     * Nothing is left to line up — v1.8.0, and now there is no method here at all.
      *
      * The tap is *on* the player that is heard, so its position and the player's are the same clock,
-     * not two clocks to keep together. Kept in the contract (and cheap) so the caller does not have to
-     * know that.
+     * not two clocks to keep together; `resync` answered `driftMs: 0` unconditionally, which the
+     * engine called twelve times a minute. The plugin method and the JS call that reached it are both
+     * deleted rather than kept as a no-op: a bridge round trip per five seconds that corrects nothing
+     * is the kind of thing that gets mistaken for a working feature.
      */
-    @objc func resync(_ call: CAPPluginCall) {
-        call.resolve(["driftMs": 0])
-    }
 
     /// The most recent frame: 64 band values in 0…255, and whether it was a real measurement.
     @objc func bands(_ call: CAPPluginCall) {

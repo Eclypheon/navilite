@@ -70,7 +70,8 @@ interface SpectrumState {
   startedAtMs: number;
   startCalls: number;
   stopCalls: number;
-  resyncCalls: number;
+  /** What the plugin answers to "is the tap on the item the player is on now?" (see v1.8.0). */
+  itemIsCurrent?: boolean;
   /** Frames produced so far — what "silence reads as silence" is judged against. */
   frames: number;
   silentFrames: number;
@@ -145,10 +146,6 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         record.spectrum.stopCalls += 1;
         record.spectrum.started = false;
       },
-      async resyncSpectrum(positionMs: number) {
-        record.spectrum.resyncCalls += 1;
-        return positionMs - record.spectrum.startedAtMs;
-      },
       async spectrumFrame() {
         // Every frame differs from the one before it, the way a real FFT of music does — and a
         // silent source reads as silence, which is the flat case the visualiser must detect.
@@ -168,6 +165,9 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
           silentFrames: record.spectrum.silentFrames,
           positionMs: record.truth.positionMs,
           playing: record.spectrum.playing && record.truth.playing,
+          // The plugin's own answer to "is the tap on the item the player is on now?" — flipped to
+          // false by the orphan test, which is the case v1.7.7 could not see.
+          itemIsCurrent: record.spectrum.itemIsCurrent,
           readable: true,
           sampleRate: 44_100,
         };
@@ -304,7 +304,6 @@ function recording(overrides: Partial<Recording> = {}): Recording {
       startedAtMs: 0,
       startCalls: 0,
       stopCalls: 0,
-      resyncCalls: 0,
       frames: 0,
       silentFrames: 0,
       // A plausible loud frame: most bands carrying energy, none of them pinned.
@@ -1041,6 +1040,90 @@ test('the tap is installed once and outlives a pause and a trip to the backgroun
 
     /* ---- 4. the invariant underneath all of it ---- */
     assert.equal(record.spectrum.started, true, 'one tap, installed once, still on the item at the end');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.8.0 — the tap follows *the item*, not the transport.
+ *
+ * The review's finding, in the words of the design it came from: the tap was installed from the
+ * `playing` transition, which fires *before* `bridge.load` — so on a change of track the plugin was
+ * asked about the item the player still had, answered "already tapped" about the outgoing one, and
+ * nothing ever re-armed it on the new one. The bars froze on the previous song's last frame (or fell
+ * to the theme) until a pause/resume, and no recovery path could see it: the dead-poll recheck was
+ * gated on `frame.playing`, which is the *player's* answer and stays true across the swap.
+ *
+ * So this test changes the track and asserts the two halves of the fix:
+ *
+ *   - the install happens **after** the load, against the item the load put in place — the new
+ *     stream is what is tapped, without a pause or a second play to get there;
+ *   - when the plugin reports that the tap is on the item the player has *left* (`itemIsCurrent`),
+ *     nothing is drawn from the old song and the tap is re-attached to the one that is playing.
+ */
+test('a change of track taps the new item, and the old item is never drawn', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  /** How long it took `predicate` to hold, in ms, or null if it never did inside the budget. */
+  const until = async (predicate: () => boolean, budgetMs: number): Promise<number | null> => {
+    const started = Date.now();
+    for (;;) {
+      if (predicate()) return Date.now() - started;
+      if (Date.now() - started > budgetMs) return null;
+      await settle(5);
+    }
+  };
+  try {
+    const record = recording();
+    record.truth = { playing: true, positionMs: 60_000, durationMs: 180_000 };
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(150);
+    assert.equal(record.spectrum.startCalls, 1, 'the first track installs the tap once');
+    assert.equal(engine.status().spectrum, true, 'and the bars are live');
+
+    /* ---- the change of track ---- */
+    record.calls = [];
+    await engine.play(OTHER_TRACK);
+    await settle(150);
+    assert.equal(
+      record.spectrum.startedUrl,
+      OTHER_TRACK.url,
+      `the tap went onto the item the load put in place — calls: ${record.calls.join(', ')}`,
+    );
+    assert.ok(
+      record.calls.some((call) => call.startsWith('startSpectrum@')),
+      'and the install was asked for as part of the load, not from the transport transition',
+    );
+    assert.equal(engine.status().spectrum, true, 'the new song is fed from the start');
+
+    /* ---- and the orphan the review found: the tap left on the outgoing item ---- */
+    const startCallsBeforeOrphan = record.spectrum.startCalls;
+    record.spectrum.itemIsCurrent = false;
+    await settle(80);
+    assert.equal(
+      engine.readSpectrum(),
+      null,
+      'the previous song’s last frame is not a measurement of this one, so nothing is drawn from it',
+    );
+    // The re-attach is rate-limited to one a second (SPECTRUM_ORPHAN_RECHECK_MS), so the check waits
+    // past that window before it insists the plugin was asked again.
+    await settle(1_000);
+    const reAttached = await until(() => record.spectrum.startCalls > startCallsBeforeOrphan, 400);
+    assert.ok(reAttached !== null, 'a tap on the item the player has left is re-attached, on its own');
+    record.spectrum.itemIsCurrent = true;
+    const backAfterSwap = await until(() => engine.status().spectrum === true, 250);
+    assert.ok(backAfterSwap !== null, 'and the bars are live again inside 250 ms of the new item');
+    const frame = engine.readSpectrum();
+    assert.ok(frame !== null && frame.some((value) => value > 0), 'handing back real bands for the new track');
+    say(
+      `v1.8.0 — after a change of track: ${record.spectrum.startCalls} tap call(s), the new stream tapped ` +
+        `at load; with the tap orphaned, nothing drawn and re-attached ${reAttached} ms later, live again ` +
+        `${backAfterSwap} ms after that`,
+    );
   } finally {
     fakes.restore();
     await stopAll(engines);
