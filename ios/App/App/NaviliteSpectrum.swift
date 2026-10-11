@@ -701,7 +701,8 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "start", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "bands", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "bands", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "configureBuffer", returnType: CAPPluginReturnPromise)
     ]
 
     /// The asset id `src/player/native.ts` loads every track under.
@@ -805,6 +806,40 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     /// The most recent frame: 64 band values in 0…255, and whether it was a real measurement.
     @objc func bands(_ call: CAPPluginCall) {
         call.resolve(spectrum.snapshot())
+    }
+
+    /**
+     * Aim the audible item at a forward buffer of `seconds` (v1.9.2).
+     *
+     * *"play as soon as ~5 seconds of audio are buffered, then keep filling behind it"* is the
+     * owner's request, and `AVPlayerItem.preferredForwardBufferDuration` is the only lever
+     * AVFoundation gives for it. Nothing set it anywhere: the player was left to fill as much as it
+     * could and to decide for itself when it had enough, which is why a track could take a minute
+     * on his link before a note was heard.
+     *
+     * It is here rather than in the audio vendor's plugin because it is *our* plugin that can reach
+     * the audible player (see `AudibleBridgePlayer`, the same reflective, read-only lookup the tap
+     * uses) — the vendor exposes no API for buffer policy. This changes a number on an item that is
+     * already playing; it does not start, stop, seek or reconfigure anything, so it cannot make a
+     * sound. Called after every load's play and after every adoption, because the item that is
+     * audible changes at both.
+     */
+    @objc func configureBuffer(_ call: CAPPluginCall) {
+        let seconds = call.getDouble("seconds") ?? 5
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                call.reject("the spectrum plugin is gone")
+                return
+            }
+            guard let audible = AudibleBridgePlayer.find(from: self.bridge), let item = audible.player.currentItem else {
+                // No audible item yet (a cold start, or the lookup failed): the player keeps its
+                // own policy, which is exactly what every build before this one had.
+                call.resolve(["buffered": false])
+                return
+            }
+            item.preferredForwardBufferDuration = max(1, seconds)
+            call.resolve(["buffered": true, "seconds": item.preferredForwardBufferDuration, "assetId": audible.assetId])
+        }
     }
 }
 

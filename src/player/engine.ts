@@ -43,7 +43,7 @@
  * says so in one line and draws the album-art theme rather than animating a lie.
  */
 import { platformInfo, type OsName } from '../platform.ts';
-import { createNativeBridge, type NativeBridge, type NativeBridgeEvents, type NativeSpectrumFrame, type NativeTrackInfo } from './native.ts';
+import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativeSpectrumFrame, type NativeTrackInfo } from './native.ts';
 
 export type PlaybackBackend = 'web' | 'native';
 
@@ -196,6 +196,62 @@ const TRANSPORT_MUTE_MS = 1500;
  * arrives still closes it.
  */
 const SEEK_MUTE_MS = 1500;
+/**
+ * How long a native seek is allowed to take before the engine gives up waiting on the promise (v1.9.3).
+ *
+ * AVFoundation seeks can fail to settle (e.g. `finished == false` during rapid scrubs),
+ * so a deadline is essential to prevent `this.seekInFlight` from hanging forever.
+ */
+const SEEK_TIMEOUT_MS = 1500;
+
+/**
+ * How long a start has to produce sound before the app says, on screen, that it did not (v1.9.2).
+ *
+ * This is the end of the road that v1.9.1's bounded calls started: a load whose round trips all
+ * answered and whose stream never arrived. Until now the engine took its own optimistic `playing`
+ * for an answer, the queue cleared its loading state on it, and the screen claimed to be playing a
+ * track that was not — for ever, with the clock pinned at zero. The owner's own words for it are
+ * *"even after a minute it doesn't load"*, and nothing on the screen ever said so.
+ *
+ * The conclusion is now the player's, not the promise's: the first position report for this
+ * generation is the evidence that sound exists (`concludeStart('player')`). If fifteen seconds pass
+ * without one, the app says so, the queue retries once at the next rung down, and the row waits for
+ * a tap. Fifteen is deliberately generous — the owner accepts ~15 s for the first track on mobile
+ * data — and it is a *ceiling*, not a target: when the sound arrives at two seconds, that is when
+ * the app says `playing`.
+ */
+const START_DEADLINE_MS = 15000;
+
+/**
+ * How far from the offset a start asked for a position report may be and still be that start's
+ * (v1.9.2).
+ *
+ * A start asks for the very beginning of a track, and the item it replaces is still reporting its
+ * own position — minutes into the track — while the new one is being fetched. Three seconds is
+ * wider than any jitter in a fresh item's first report and far narrower than "the outgoing track".
+ */
+const START_ANCHOR_SLACK_MS = 3000;
+
+/**
+ * A promise that resolves to `fallback` if `work` has not answered within `ms` (v1.9.2).
+ *
+ * Used for the one thing outside the bridge calls that could still hold a start for ever: building
+ * the bridge itself. The timer is always cleared, so a fast answer leaves nothing running.
+ */
+function withDeadline<T>(work: Promise<T>, fallback: T, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    work,
+    new Promise<T>((resolve) => {
+      timer = setTimeout(() => {
+        console.warn(`[navilite] ${what} did not answer within ${ms} ms`);
+        resolve(fallback);
+      }, ms);
+    }),
+  ]).finally(() => {
+    if (timer !== null) clearTimeout(timer);
+  });
+}
 
 /** ~1.8 s of silence from the analyser while audio is definitely playing = not real samples. */
 const ZERO_FRAMES_BEFORE_THEME = 18;
@@ -365,6 +421,49 @@ export class AudioEngine {
    * and the first audio arrives in a seek's time instead of after a cold fetch.
    */
   private preparedSongId: string | null = null;
+  /**
+   * The start in flight, and how it ends (v1.9.2). See {@link START_DEADLINE_MS}.
+   *
+   * While this is set, `play()` has not resolved: the caller is waiting for the player to say that
+   * sound exists. Exactly one of three things resolves it — the player's own first report
+   * (`player`), the app leaving the screen with the load still running (`background`: the reports
+   * stop arriving, and the return path reads the player rather than guessing), or the deadline
+   * (`timeout`, the case the screen has to report).
+   */
+  private startWait: {
+    resolve: (source: 'player' | 'background' | 'timeout' | 'superseded') => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+  /**
+   * Whether the last start ended without sound (v1.9.2).
+   *
+   * The queue reads this once `play()` has returned: it is the difference between "the stream is
+   * playing" and "we asked, and nothing came". A start that failed is retried once at the next rung
+   * down by the queue, and if that fails too the screen says so and waits for a tap.
+   */
+  private startFailed = false;
+  /**
+   * The offset **this start** was asked for — what tells this track's reports from the outgoing
+   * item's.
+   *
+   * It belongs to the start and to nothing else (v1.9.4): written by `startNative` when the start
+   * begins, replaced by the player's own word if that word lands outside the window, and written by
+   * no other path — `seek` used to write it, which is a start's own gate being moved by an unrelated
+   * transport.
+   */
+  private startAnchorMs = 0;
+  /**
+   * The seek in flight, and the newest target that arrived while it was (v1.9.2).
+   *
+   * A drag writes a value per frame; v1.9.1 sent one seek every 120 ms and let them all overlap, and
+   * every one of those is a **zero-tolerance** seek on the plugin's own audio queue
+   * (`RemoteAudioAsset.swift`: it settles only when AVFoundation reports the seek finished). Eight
+   * overlapping seeks a second is how this app jams the queue that every later transport call —
+   * including the boundary's adopt — has to wait behind. One at a time, coalesced to the newest
+   * target: the finger's last position is the one that matters and the queue stays free.
+   */
+  private seekInFlight: Promise<void> | null = null;
+  private seekTarget: number | null = null;
   /**
    * Whether the player has actually reported a position for the load in flight.
    *
@@ -566,6 +665,56 @@ export class AudioEngine {
     return this.nativePositionMs >= duration - NATIVE_END_SLACK_MS;
   }
 
+  /**
+   * The player has said there is sound — and this is the only place a start may be called started
+   * (v1.9.2).
+   *
+   * Two things happen here, and both are the same statement: if the machine is still at `loading`,
+   * the player's own report is what moves it to `playing` (nothing else does — the optimistic
+   * dispatch that used to be at the top of a load is deleted); and if a caller is waiting on this
+   * start, it is released. `background` is not a claim that sound exists: it is the app leaving the
+   * screen with the load still running, where the reports stop arriving and the return path reads
+   * the player rather than guessing. `timeout` is the only ending that is a failure, and it is the
+   * one the screen is told about.
+   */
+  private concludeStart(source: 'player' | 'background' | 'timeout' | 'superseded'): void {
+    if (source === 'player') {
+      if (this.state === 'loading') this.dispatch({ type: 'engine-state', playing: true });
+      this.startFailed = false;
+    }
+    const wait = this.startWait;
+    if (!wait) return;
+    this.startWait = null;
+    clearTimeout(wait.timer);
+    wait.resolve(source);
+  }
+
+  /**
+   * Wait for the player's own word that this start has produced sound, or for
+   * {@link START_DEADLINE_MS} to run out. Resolved by {@link concludeStart} from anywhere.
+   */
+  private awaitStart(): Promise<'player' | 'background' | 'timeout' | 'superseded'> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.startWait = null;
+        resolve('timeout');
+      }, START_DEADLINE_MS);
+      if (typeof timer === 'object' && typeof timer.unref === 'function') timer.unref();
+      this.startWait = { resolve, timer };
+    });
+  }
+
+  /**
+   * Whether the last start ended without sound (v1.9.2).
+   *
+   * The queue reads this the moment `play()` returns; it is the difference between "it is playing"
+   * and "we asked, and nothing came", which is the difference between a track and a screen that
+   * claims one for ever.
+   */
+  startDidFail(): boolean {
+    return this.startFailed;
+  }
+
   private startClockTick(): void {
     if (this.clockTimer !== null) return;
     this.clockTimer = setInterval(() => {
@@ -749,7 +898,34 @@ export class AudioEngine {
       this.nativeReady = this.nativeFactory(this.os, {
         onPosition: (seconds) => {
           if (this.backend !== 'native') return;
-          this.setNativePosition(seconds * 1000);
+          const ms = seconds * 1000;
+          this.setNativePosition(ms);
+          /*
+           * The player's own position is the evidence that sound exists (v1.9.2) — *this* track's
+           * position, that is. The item being replaced keeps reporting for as long as the new stream
+           * is still being fetched, and a stale report is not evidence about the item being loaded:
+           * what separates them is the offset this start asked for, which no report from a track that
+           * is minutes in can be near.
+           *
+           * **And a report that misses that offset is no longer thrown away (v1.9.4).** This gate was
+           * the whole of the owner's *"when a track finishes it switches to native audio mode"*: the
+           * anchor is a guess this side makes about where the start begins, the player's report is
+           * the fact, and when the fact landed more than {@link START_ANCHOR_SLACK_MS} away from the
+           * guess it was discarded — for ever. Nothing re-armed the gate (`awaitStart` was the only
+           * other exit and it resolves `timeout` after {@link START_DEADLINE_MS}), so a start whose
+           * two paths disagree rested in `loading`: `startConsumers` never ran, the spectrum stayed
+           * false, and the bar chip read *native audio* with dead bars while the track was audibly
+           * playing. A report arriving while a start is *still waiting* is the player's own word
+           * about the item it holds, so the guess is replaced by it and the start is concluded on
+           * that report. Outside a wait there is nothing to conclude: the report is an ordinary
+           * position report about the item playing, and an anchor can be as stale as it likes.
+           */
+          if (Math.abs(ms - this.startAnchorMs) <= START_ANCHOR_SLACK_MS) {
+            this.concludeStart('player');
+          } else if (this.startWait !== null) {
+            this.startAnchorMs = ms;
+            this.concludeStart('player');
+          }
           this.emit();
           this.onProgress?.(this.nativePositionMs, this.durationMs());
         },
@@ -781,6 +957,8 @@ export class AudioEngine {
           if (this.inTransition()) return;
           if (isPlaying) {
             this.dispatch({ type: 'engine-state', playing: true });
+            // The audibly-playing item is the player's word that sound exists (v1.9.2).
+            this.concludeStart('player');
             return;
           }
           // Not playing and we did not ask it to stop: that is an interruption, not a pause.
@@ -802,18 +980,31 @@ export class AudioEngine {
           this.reportEnded('the player reported the item complete');
         },
       });
-      const bridge = await this.nativeReady;
-      // The lock-screen next/previous are the platform's to deliver; register once, at the same
-      // moment the engine exists, so a lock-screen button works before the screen is ever opened.
+      /*
+       * The bridge's own build is the one thing outside the bridge calls that could still hold a
+       * start for ever (v1.9.2): a plugin that never answers `configure` or an `addListener` left the
+       * first tap of a session waiting on a promise that never settled — no fetch, no sound, and no
+       * word about either. Ten seconds, and the app carries on without it.
+       *
+       * `this.nativeReady` keeps the real promise (not the race), so a build that is merely slow is
+       * picked up by the next attempt rather than being written off for the session.
+       */
+      const bridge = await withDeadline(this.nativeReady, null, BRIDGE_BUILD_TIMEOUT_MS, 'the native audio bridge');
+      // The lock-screen next/previous are the platform's to deliver; registered as soon as a bridge
+      // exists, whether that is this attempt or a later one.
       if (bridge && !this.remoteDetach) {
         this.remoteDetach = bridge.listenRemoteCommands({
           next: () => this.onNextRequested?.(),
           previous: () => this.onPreviousRequested?.(),
         });
       }
+      if (!bridge) return null;
+      this.native = bridge;
+      return bridge;
     }
-    this.native = await this.nativeReady;
-    return this.native;
+    const bridge = await withDeadline(this.nativeReady, this.native, BRIDGE_BUILD_TIMEOUT_MS, 'the native audio bridge');
+    if (bridge) this.native = bridge;
+    return bridge;
   }
 
   /* ------------------------------------------------------------------- transport */
@@ -835,6 +1026,12 @@ export class AudioEngine {
       this.emit();
       return;
     }
+    /*
+     * Whatever start was waiting for the player is not this one (v1.9.2): its caller is being
+     * replaced, and it must not report a failure for a track the listener has already left.
+     */
+    this.concludeStart('superseded');
+    this.startFailed = false;
     this.generation += 1;
     this.track = track;
     this.error = null;
@@ -874,28 +1071,32 @@ export class AudioEngine {
    * no prepared slot. It never rejects: a preparation that cannot happen costs a cold fetch at the
    * boundary, which is where v1.9.0 left it — not a failure the listener should see.
    */
-  async prepareNext(track: TrackRequest): Promise<void> {
-    if (!this.nativePlatform) return;
-    if (this.preparedSongId === track.id) return;
+  async prepareNext(track: TrackRequest): Promise<boolean> {
+    if (!this.nativePlatform) return false;
+    if (this.preparedSongId === track.id) return true;
     const bridge = this.native ?? (await this.ensureNative());
-    if (!bridge?.prepare) return;
+    if (!bridge?.prepare) return false;
     /*
      * Claimed before the call, not after: two prepares for the same next track (a tap, then the
      * queue's own start) must not both go out, and the claim is what makes the second one a no-op.
+     *
+     * v1.9.2 — **and given back when the prepare did not happen.** `bridge.prepare` answers whether
+     * the plugin actually took the asset; a prepare that timed out, or that the bridge refused
+     * because the listener had already moved on, leaves no prepared track behind, so the claim must
+     * not outlive it. That leak is what the owner hit as a track that never came: the slot stayed
+     * claimed for a track that was never loaded, the queue then refused to re-prepare it ("already
+     * holding exactly this"), and the boundary paid a cold fetch with no word about why.
      */
     this.preparedSongId = track.id;
-    try {
-      await bridge.prepare({
-        url: track.url,
-        title: track.title,
-        artist: track.artist,
-        album: track.album,
-        artworkUrl: track.artworkUrl,
-      });
-    } catch (error) {
-      this.preparedSongId = null;
-      console.warn('[navilite] the next track could not be prepared on the player', error);
-    }
+    const settled = (await bridge.prepare({
+      url: track.url,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      artworkUrl: track.artworkUrl,
+    })) === true;
+    if (!settled) this.preparedSongId = null;
+    return settled;
   }
 
   /** Throw the prepared track away — the queue is not going where it was prepared for. */
@@ -930,6 +1131,9 @@ export class AudioEngine {
   async pause(): Promise<void> {
     if (this.state !== 'playing' && this.state !== 'loading') return;
     this.generation += 1;
+    // A pause the listener asked for is not a start that failed (v1.9.2): the wait ends without a
+    // failure being reported for the track he has just stopped.
+    this.concludeStart('superseded');
     if (this.backend === 'native') {
       this.dispatch({ type: 'transport', action: 'pause' });
       // A deadline, not a bracket: the window closes whether or not the plugin ever answers.
@@ -1019,25 +1223,55 @@ export class AudioEngine {
    * as the report that starts the clock (`setNativePosition(…, false)`).
    */
   async seek(positionMs: number): Promise<void> {
-    this.generation += 1;
     if (this.backend === 'native') {
       /*
-       * The seek's own window, and the shortest one — and now a *deadline*, which is the whole of
-       * the owner's *"using the seek bar seems to disable the playlist from advancing to the next
-       * song automatically after the current"*. It was a counter, closed in a `finally` that only
-       * ran when the plugin's `setCurrentTime` settled; on a zero-tolerance seek of a transcoded
-       * remote item it does not settle, so the counter stayed at one for the rest of the session and
-       * both end-of-track doors stayed shut. Seeking changes nothing about whether the queue
-       * advances: it never cancels an asset, never touches the play order, and its report window
-       * expires.
+       * **One seek in flight, and the newest target wins (v1.9.2).**
        *
-       * It is also deliberately outside the asset lane: a seek is not a load, it must not queue
-       * behind one, and it must never be able to hold up the boundary that adopts the next track.
+       * A drag writes a value per frame and v1.9.1 sent one seek every 120 ms, all of them
+       * overlapping. Each of those is a zero-tolerance seek on the plugin's own audio queue — it
+       * settles only when AVFoundation reports the seek finished — so a drag was eight blocking
+       * seeks a second on the very queue that every later transport call has to wait behind,
+       * including the adopt at a track boundary. A finger on the bar could therefore stall the
+       * queue's own advance, which is the shape of the owner's *"it took around 40s to load"*.
+       *
+       * What the listener means is where his finger *is*, not every position on the way there, so a
+       * seek that arrives while one is running is remembered and issued when the running one has
+       * answered — or when its own deadline (SEEK_TIMEOUT_MS) has, which is what keeps this from
+       * becoming a new way to wait for ever.
        */
-      this.muteReports(SEEK_MUTE_MS);
-      await this.native?.seek(positionMs / 1000);
-      this.setNativePosition(positionMs, false);
-      this.emit();
+      if (this.seekInFlight) {
+        this.seekTarget = positionMs;
+        await this.seekInFlight;
+        return;
+      }
+      const run = (async () => {
+        this.generation += 1;
+        /*
+         * **The anchor belongs to a start, and a seek is not one (v1.9.4).**
+         *
+         * This line used to write `startAnchorMs` — the field a *start's* own gate reads — so a seek
+         * that landed while a start was settling moved the window out from under the report that
+         * start was waiting for, and the start was declared failed while the track was audibly
+         * playing. Where the player is after a seek is not a starting anchor: no start is waiting on
+         * one, and a report that arrives while one *is* waiting now re-anchors itself
+         * (`onPosition`).
+         */
+        this.muteReports(SEEK_MUTE_MS);
+        if (this.native) {
+          await withDeadline(this.native.seek(positionMs / 1000), undefined, SEEK_TIMEOUT_MS, 'native.seek');
+        }
+        this.setNativePosition(positionMs, false);
+        this.emit();
+      })();
+      this.seekInFlight = run;
+      try {
+        await run;
+      } finally {
+        if (this.seekInFlight === run) this.seekInFlight = null;
+      }
+      const newest = this.seekTarget;
+      this.seekTarget = null;
+      if (newest !== null && newest !== positionMs) await this.seek(newest);
       return;
     }
     if (Number.isFinite(this.el.duration)) this.el.currentTime = Math.max(0, positionMs / 1000);
@@ -1046,6 +1280,9 @@ export class AudioEngine {
 
   async stop(): Promise<void> {
     this.generation += 1;
+    this.concludeStart('superseded');
+    this.seekInFlight = null;
+    this.seekTarget = null;
     this.el.pause();
     this.el.removeAttribute('src');
     this.track = null;
@@ -1085,6 +1322,13 @@ export class AudioEngine {
     if (hidden) {
       this.foreground = false;
       this.wasPlayingBeforeHide = this.state === 'playing';
+      /*
+       * A start that was still waiting for the player's word ends here (v1.9.2) — but not as a
+       * failure. Off screen the reports stop arriving, so the wait could only ever end in a timeout
+       * the listener would be told about on the way back for a track that may be playing perfectly;
+       * the return path reads the player itself (`sync`) and settles it from the truth.
+       */
+      this.concludeStart('background');
       // The player keeps playing and keeps reporting *to nobody* — the web view is suspended and
       // no callback arrives. So the clock stops counting here rather than at an unknown later
       // moment; what it shows is the last position the player was known to be at.
@@ -1110,8 +1354,11 @@ export class AudioEngine {
     if (truth) {
       this.setNativePosition(truth.positionMs);
       if (truth.durationMs > 0) this.nativeDurationMs = truth.durationMs;
-      if (truth.playing) this.dispatch({ type: 'engine-state', playing: true });
-      else if (this.state === 'playing') {
+      if (truth.playing) {
+        this.dispatch({ type: 'engine-state', playing: true });
+        // The player's own answer for the audible item: sound exists (v1.9.2).
+        this.concludeStart('player');
+      } else if (this.state === 'playing') {
         this.dispatch({ type: 'interruption' });
         this.modeReason = this.wasPlayingBeforeHide
           ? 'the track was playing when the app left the screen and the player is not playing now — one tap on play starts it again from here, and nothing was written to the player to get there'
@@ -1201,7 +1448,15 @@ export class AudioEngine {
     const generation = this.generation;
     // Nothing is audible yet: the clock holds the offset until the player reports a position.
     this.positionReported = false;
-    this.dispatch({ type: 'transport', action: 'play' });
+    /*
+     * **No optimistic `playing` any more (v1.9.2).**
+     *
+     * This used to dispatch `transport play` here, before a single byte had been fetched — which is
+     * how the screen came to claim a track that was not playing, for ever, with the clock pinned at
+     * zero. The state stays `loading` (dispatched by `play`'s own `select`) until the player reports
+     * sound, and that report is what moves it (`concludeStart('player')`).
+     */
+    this.startAnchorMs = Math.max(0, startMs);
     /*
      * **The boundary: this track was already prepared, so there is nothing to load (v1.9.1).**
      *
@@ -1279,6 +1534,28 @@ export class AudioEngine {
      */
     if (generation !== this.generation && this.state !== 'playing') {
       await bridge.pause();
+      this.emit();
+    }
+    /*
+     * **And now the start has to be *proved*, or the app says it did not happen (v1.9.2).**
+     *
+     * Every round trip above can have answered perfectly and the stream still not be coming: what
+     * that produces, without this wait, is a screen that says `playing`, a clock at zero and no
+     * sound — for ever, and with nothing to tell the listener why. The evidence is the player's own
+     * first report for this track (`concludeStart('player')`, from `onPosition`/`onState`), and the
+     * end of the wait is either that or {@link START_DEADLINE_MS}.
+     *
+     * A start that ran out of time is reported, not hidden: the queue sees it (`startDidFail`),
+     * retries once at the next rung down, and if that fails too the screen carries the failure until
+     * a tap. Never a transport that says playing while nothing sounds.
+     */
+    if (this.state !== 'loading') return;
+    const outcome = await this.awaitStart();
+    if (this.track !== track) return;
+    if (outcome === 'timeout') {
+      this.startFailed = true;
+      this.modeReason = 'the track did not start in time — tap it again to try once more, and the app will ask for a smaller stream';
+      this.dispatch({ type: 'failure', message: 'the track did not start in time' });
       this.emit();
     }
   }

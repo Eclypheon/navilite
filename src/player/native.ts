@@ -57,6 +57,15 @@ interface NaviliteSpectrumPlugin {
   start(options: { url: string; positionMs: number }): Promise<{ started: boolean; sampleRate: number; bandCount: number }>;
   stop(): Promise<{ stopped: boolean }>;
   bands(): Promise<NativeSpectrumFrame>;
+  /**
+   * Aim the audible item at a forward buffer of `seconds` (v1.9.2).
+   *
+   * Ours to reach because our plugin holds the audible `AVPlayer` already (the same reflective
+   * lookup the tap uses); the vendor plugin has no API for it. Optional in the type so a build
+   * whose plugin predates it degrades to "no forward-buffer target", which is what every build
+   * before this one had.
+   */
+  configureBuffer(options: { seconds: number }): Promise<{ buffered: boolean; seconds?: number }>;
 }
 
 /** One frame of the native spectrum, plus what the tap thinks about it. */
@@ -114,7 +123,7 @@ export interface NativeBridge {
    * Optional, so a bridge without it (an older plugin, the fake bridge in the tests) is a bridge
    * that still plays — with a cold fetch at the track boundary, which is where v1.9.0 left it.
    */
-  prepare?(info: NativeTrackInfo): Promise<void>;
+  prepare?(info: NativeTrackInfo): Promise<boolean>;
   /**
    * Make the prepared track the audible one and free the slot it came from (v1.9.1).
    *
@@ -123,6 +132,17 @@ export interface NativeBridge {
   adopt?(): Promise<boolean>;
   /** Throw the prepared track away — the queue is not going where it was prepared for. */
   discard?(): Promise<void>;
+  /**
+   * A prepare the listener did not ask for must issue nothing (v1.9.2).
+   *
+   * The queue prepares the track that *follows* the one playing, which is a bet on the listener
+   * staying where he is. When he moves — a tap far down the list, a next he pressed — that bet is
+   * off, and the prepare for the abandoned chain must not touch the player: on a phone holding two
+   * slots on a link with room for one stream, an unasked-for preload is competing with the very
+   * track he is waiting for. Bumped by the bridge itself whenever a load or a discard takes the
+   * slot, and safely callable from anywhere.
+   */
+  invalidatePrepared?(): void;
   play(startSeconds: number): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -191,26 +211,67 @@ const SLOT_WRITE_GRACE_MS = 800;
  *
  * A rejected call is not an error the listener should see either — it is reported and the fallback
  * stands, exactly as the plugin's own `missing-plugin` path does.
+ *
+ * v1.9.2 — **the result says whether the plugin answered at all.** A call that timed out and a call
+ * that answered `undefined` used to be the same value, and for the prepared slot that difference is
+ * the whole bug: a prepare that timed out was recorded as a prepared track, so the next boundary
+ * adopted nothing and nothing said so. Callers that care about the distinction use this; callers
+ * that only need the answer use {@link bounded}.
  */
-async function bounded<T>(work: Promise<T>, fallback: T, what: string, ms = BRIDGE_TIMEOUT_MS): Promise<T> {
+async function boundedSettled<T>(
+  work: Promise<T>,
+  fallback: T,
+  what: string,
+  ms = BRIDGE_TIMEOUT_MS,
+): Promise<{ value: T; settled: boolean }> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
-    return await Promise.race([
-      work.catch((error: unknown) => {
-        console.warn(`[navilite] the native bridge call "${what}" failed`, error);
-        return fallback;
-      }),
-      new Promise<T>((resolve) => {
+    const value = await Promise.race([
+      work.then((answer) => ({ value: answer, settled: true })),
+      new Promise<{ value: T; settled: false }>((resolve) => {
         timer = setTimeout(() => {
           console.warn(`[navilite] the native bridge call "${what}" did not answer within ${ms} ms`);
-          resolve(fallback);
+          resolve({ value: fallback, settled: false });
         }, ms);
       }),
     ]);
+    return value;
+  } catch (error) {
+    console.warn(`[navilite] the native bridge call "${what}" failed`, error);
+    return { value: fallback, settled: false };
   } finally {
     if (timer !== null) clearTimeout(timer);
   }
 }
+
+/** The same, for the calls where the answer is all that matters. */
+async function bounded<T>(work: Promise<T>, fallback: T, what: string, ms = BRIDGE_TIMEOUT_MS): Promise<T> {
+  return (await boundedSettled(work, fallback, what, ms)).value;
+}
+
+/**
+ * How long the native bridge itself may take to build before a start gives up on it (v1.9.2).
+ *
+ * Building it is a dynamic import plus `configure` plus three `addListener` round trips — three
+ * more round trips through the same bridge that every transport call queues on, and none of them
+ * was bounded. A plugin that never answers them left the first tap of a session waiting on a
+ * promise that would never settle: the app fetched nothing, played nothing and said nothing. Ten
+ * seconds is longer than any healthy build (it is measured in tens of milliseconds) and it is the
+ * whole of the first tap's budget.
+ */
+const BRIDGE_BUILD_TIMEOUT_MS = 10000;
+
+export { BRIDGE_BUILD_TIMEOUT_MS };
+
+/**
+ * How far ahead of the play position the audible item is asked to fill, in seconds (v1.9.2).
+ *
+ * This is the owner's own request — *"play as soon as ~5 seconds of audio are buffered, then keep
+ * filling behind it"* — and it is the one lever AVFoundation exposes for it. Unset, the player
+ * fills as much as it can and playback begins when it decides it has enough; set, it is the target
+ * the player starts on and keeps filling behind.
+ */
+const BUFFER_AHEAD_SECONDS = 5;
 
 export async function createNativeBridge(os: OsName, events: NativeBridgeEvents): Promise<NativeBridge | null> {
   if (os === 'web') return null;
@@ -241,6 +302,15 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     let preparedId = SLOTS[1] ?? 'navilite-next';
     /** When a slot was last written. See {@link SLOT_WRITE_GRACE_MS}. */
     let slotWrittenAt = 0;
+    /**
+     * The prepare epoch (v1.9.2). See {@link NativeBridge.invalidatePrepared}.
+     *
+     * A prepared job captures the epoch when it is asked for, and checks it again when its turn on
+     * the lane comes: a prepare for a chain the listener has left is not merely late, it is a
+     * request nobody made, so it issues nothing at all. Bumped here, by the two things that take
+     * the slot over — a load and a discard.
+     */
+    let preparedEpoch = 0;
 
     /**
      * Whether an event is about the asset the listener is hearing.
@@ -318,6 +388,28 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       await NativeAudio.preload({ assetId: slot, assetPath: info.url, isUrl: true, notificationMetadata: metadata(info) });
     };
 
+    /**
+     * Tell the player how far ahead to fill the item the listener is hearing (v1.9.2).
+     *
+     * This is ours to do because the audible item is reachable from our own iOS plugin, which
+     * already finds the audible `AVPlayer` reflectively for the spectrum tap (see
+     * `ios/App/App/NaviliteSpectrum.swift`); the vendor plugin exposes no API for it. It runs
+     * *after* the item is in place — a load, or an adoption at a boundary — so it is a property
+     * written on an item that is already the right one, and it makes no sound.
+     *
+     * Android has no equivalent call: the vendor's player builds stock `DefaultLoadControl`, which
+     * fills 50 s of media before it will start. That one is patched at the source by
+     * `tools/patch-native-audio.mjs`, which is the only way to reach it.
+     */
+    const configureBuffer = async (): Promise<void> => {
+      if (!spectrum) return;
+      try {
+        await spectrum.configureBuffer({ seconds: BUFFER_AHEAD_SECONDS });
+      } catch (error) {
+        console.warn('[navilite] the player would not take a forward-buffer target', error);
+      }
+    };
+
     const startService = async () => {
       if (!service) return;
       try {
@@ -337,6 +429,11 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
 
     return {
       async load(info) {
+        /*
+         * A load is the listener's own request, and it takes the audible slot over (v1.9.2): any
+         * prepare still on the lane for the chain he has left is refused rather than performed.
+         */
+        preparedEpoch += 1;
         await bounded(inAssetLane(() => fillSlot(audibleId, info)), undefined, 'load');
       },
       async prepare(info) {
@@ -345,8 +442,30 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          * or writes the queue. It is a preload on the same plugin, under the other asset id, and the
          * player it creates is never sent `play` — which is the whole difference between this and the
          * second engine v1.7.6 deleted.
+         *
+         * v1.9.2 — **it answers whether it happened, and it performs nothing if the listener has
+         * moved on.** Two halves of one fix: the epoch, checked on the lane rather than at the call,
+         * so a prepare the listener did not ask for issues nothing even when it was queued; and the
+         * boolean, so the queue records a prepared track only when there is one. A prepare that
+         * timed out used to be indistinguishable from a successful one, and the slot it claimed was
+         * never given back.
          */
-        await bounded(inAssetLane(() => fillSlot(preparedId, info)), undefined, 'prepare');
+        const epoch = preparedEpoch;
+        const result = await boundedSettled(
+          inAssetLane(async () => {
+            if (epoch !== preparedEpoch) return false;
+            await fillSlot(preparedId, info);
+            return true;
+          }),
+          false,
+          'prepare',
+        );
+        return result.settled && result.value;
+      },
+      invalidatePrepared() {
+        // A caller that knows the chain is abandoned can say so without touching the player; the
+        // lane job that is already waiting for its turn reads this and issues nothing.
+        preparedEpoch += 1;
       },
       async adopt() {
         const from = preparedId;
@@ -371,6 +490,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         if (!started) return false;
         audibleId = from;
         preparedId = to;
+        // The adopted item is the audible one now: the forward-buffer target belongs on it, and
+        // the item it was prepared as is a different one by the time it is heard (v1.9.2).
+        await configureBuffer();
         await startService();
         slotWrittenAt = Date.now();
         await bounded(
@@ -389,6 +511,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       },
       async discard() {
         slotWrittenAt = Date.now();
+        // A discarded slot is a chain nobody is on any more: a prepare still waiting for its turn
+        // for it issues nothing (v1.9.2).
+        preparedEpoch += 1;
         await bounded(
           inAssetLane(async () => {
             try {
@@ -406,6 +531,15 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         // Behind the same lane: the play for a track whose preload is still running must not
         // overtake it, and it must not start the previous track's asset either.
         await bounded(inAssetLane(() => NativeAudio.play({ assetId: audibleId, time: Math.max(0, startSeconds) })), undefined, 'play');
+        /*
+         * The forward-buffer target, written **after** the play call (v1.9.2).
+         *
+         * The plugin sets its `currentlyPlayingAssetId` when it is asked to play, and that is what
+         * our own plugin finds the audible player by; asking before this point would aim the target
+         * at the outgoing item. Setting it after the play is still in time — the player fills
+         * towards this target for as long as the item plays.
+         */
+        await configureBuffer();
       },
       async pause() {
         await bounded(NativeAudio.pause({ assetId: audibleId }), undefined, 'pause');

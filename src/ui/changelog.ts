@@ -217,4 +217,24 @@ export const CHANGELOG: ChangelogRelease[] = [
       'The visualiser shows the new song from its first moment, and the sound no longer waits behind it. Working out which track to measure used to hold up the app while the new stream was being fetched, which is why the bars stayed dark through that gap and why the start was slower than a plain tap.',
     ],
   },
+  {
+    version: '1.9.2',
+    date: '2026-10-12',
+    items: [
+      'The app uses one stable security code per session, so your server can recognise and cache files over relay connections instead of negotiating a fresh code on every request.',
+      'The app measures how long each song actually takes to start playing rather than downloading extra bytes in the background.',
+      'The next song is prepared directly on the phone\'s player and seamlessly handed over when the track changes.',
+      'Dragging the seek bar is smooth and responsive, sending one clean position update without piling up delayed requests.',
+      'The player honestly shows its loading state and confirms sound is coming out before reporting that music is playing.',
+    ],
+  },
+  {
+    version: '1.9.3',
+    date: '2026-10-12',
+    items: [
+      'Moving the seek bar never leaves the player hanging if the phone takes longer than usual to settle on the new position.',
+      'Rapidly switching songs or scrubbing cleanly releases earlier requests so playback never stalls.',
+      'Clearer recovery and retry if a track fails to start over a lossy mobile connection.',
+    ],
+  },
 ];

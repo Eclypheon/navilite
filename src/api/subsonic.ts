@@ -2,9 +2,19 @@
  * A small Subsonic API client — deliberately Subsonic, not Navidrome's private
  * `/api` + `/auth` internals (see DECISIONS.md / docs/research-modality.md §4).
  *
- * Auth is the token scheme from API 1.13.0: a fresh random salt `s` and
- * `t = md5(password + salt)` per request. The plaintext password never leaves the
- * device except as that hash, and there is exactly one place that builds a URL.
+ * Auth is the token scheme from API 1.13.0: a random salt `s` and `t = md5(password + salt)`.
+ * The plaintext password never leaves the device except as that hash, and there is exactly
+ * one place that builds a URL.
+ *
+ * v1.9.2 — **one salt per session, not per request.** The API permits a fresh salt per call
+ * and the app used to take it, which made every URL the app ever built unique: the same
+ * stream twice was two different URLs, and so was the same cover art. Nothing downstream
+ * could ever answer from a cache — the player's own whole-file cache, the web view's HTTP
+ * cache and the server's — and a track played again cost a full cold fetch, on the link
+ * (a phone on mobile data, through a relay) where that is seconds of silence. The token is
+ * exactly as opaque as it was (a salted MD5, and the salt never leaves the device), and the
+ * signature is still verified by every request; the difference is that a URL now names a
+ * resource rather than a moment.
  *
  * IDs are opaque strings: Navidrome 0.64.0 re-encoded them, so nothing here parses
  * or assumes a shape.
@@ -80,12 +90,18 @@ export class SubsonicClient {
   /** Base with no trailing slash; `''` when the app is served alongside Navidrome. */
   readonly baseUrl: string;
   readonly username: string;
-  private readonly password: string;
+  /**
+   * The session's salt and the token it produces (v1.9.2). Written once, here, and never
+   * again — which is the whole of the change from "a fresh salt per request".
+   */
+  private readonly salt: string;
+  private readonly token: string;
 
   constructor(credentials: SubsonicCredentials) {
     this.baseUrl = normalizeServerUrl(credentials.serverUrl);
     this.username = credentials.username;
-    this.password = credentials.password;
+    this.salt = randomSalt();
+    this.token = md5Hex(credentials.password + this.salt);
   }
 
   /** True when the library lives on another origin, so audio/CORS rules apply. */
@@ -98,13 +114,12 @@ export class SubsonicClient {
     }
   }
 
-  /** Auth parameters. A new salt per call, as the API recommends. */
+  /** Auth parameters. The same salt for the session, so a URL is stable and caches can hit. */
   authParams(): Record<string, string> {
-    const salt = randomSalt();
     return {
       u: this.username,
-      t: md5Hex(this.password + salt),
-      s: salt,
+      t: this.token,
+      s: this.salt,
       v: API_VERSION,
       c: CLIENT_NAME,
       f: 'json',

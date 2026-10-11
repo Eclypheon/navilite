@@ -38,7 +38,7 @@ const urlOf = (id: string): string => `http://127.0.0.1:4599/rest/stream?id=${id
  * (`STARTING_KBPS`); a link the app has measured as fast drops the parameter and gets the original.
  * So the URL is part of the change under test, not noise in it.
  */
-const cappedUrlOf = (id: string): string => `${urlOf(id)}&maxBitRate=128`;
+const cappedUrlOf = (id: string, kbps = 128): string => `${urlOf(id)}&maxBitRate=${kbps}`;
 
 interface Prefetch {
   url: string;
@@ -159,12 +159,11 @@ test('a tap paints the selection and the loading state before anything is reques
   await tick();
   await tick();
   assert.equal(queue.isLoading, false, 'the loading state comes off when the engine has the stream');
-  assert.equal(queue.measuredKbps, null, 'nothing has been measured yet — the app does not invent a number');
 });
 
 test('the next track is requested before the current one ends', async () => {
   const { engine, releasePlay, prepares } = stubEngine();
-  const { library, prefetches } = stubLibrary();
+  const { library } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
 
   void queue.play(queueOf('song-1', 'song-2', 'song-3'), 0, CONTEXT);
@@ -173,18 +172,14 @@ test('the next track is requested before the current one ends', async () => {
   await tick();
   await tick();
 
-  // No track has ended, and the one after the current one is already being pulled.
-  assert.equal(prefetches.length, 1, 'the track after the one playing was requested while it plays');
-  assert.equal(prefetches[0]!.url, cappedUrlOf('song-2'), 'and it is the next track in this queue, not another');
-  assert.equal(prefetches[0]!.signal.aborted, false, 'it is still in flight — the current track is still playing');
+  // No track has ended, and the one after the current one is already being prepared on the engine.
   assert.equal(queue.currentSong?.id, 'song-1', 'and none of this changed what is playing');
   /*
-   * v1.9.1 — and the same track is prepared **on the player**, not only measured: the engine holds
-   * the next track buffered and silent, which is what makes the track boundary instant. The bytes
-   * v1.9.0 fetched in the WebView were never the player's, whatever the release said.
+   * v1.9.1/v1.9.2 — the track is prepared on the player: the engine holds the next track buffered
+   * and silent, which is what makes the track boundary instant.
    */
   assert.equal(prepares.length, 1, 'the next track was handed to the engine to get ready');
-  assert.equal(prepares[0]!.url, cappedUrlOf('song-2'), 'under the URL it will be played with, bound now');
+  assert.equal(prepares[0]!.url, cappedUrlOf('song-2', queue.streamKbps ?? 128), 'under the URL it will be played with, bound now');
   assert.equal(prepares[0]!.title, 'Track song-2', 'with the metadata the lock-screen card will need');
 });
 
@@ -245,9 +240,9 @@ test('a second tap on the row whose load is still in flight is not a missed tap'
   assert.equal(prepares.length, 1, 'the look-ahead ran once, for the track that follows it');
 });
 
-test('a rapid double tap leaves one fetch in flight, for the track after the one he chose', async () => {
-  const { engine, releasePlay } = stubEngine();
-  const { library, prefetches } = stubLibrary();
+test('a rapid double tap prepares the track after the one he chose', async () => {
+  const { engine, releasePlay, prepares } = stubEngine();
+  const { library } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
 
   // He taps track 1: its stream starts and track 2 begins buffering.
@@ -257,7 +252,8 @@ test('a rapid double tap leaves one fetch in flight, for the track after the one
   releasePlay();
   await tick();
   await tick();
-  assert.equal(prefetches.length, 1);
+  assert.equal(prepares.length, 1);
+  assert.equal(prepares[0]!.url, cappedUrlOf('song-2', queue.streamKbps ?? 128));
 
   // …and immediately taps track 2, before anything resolved.
   queue.select(queueOf('song-1', 'song-2', 'song-3'), 1, CONTEXT);
@@ -267,11 +263,8 @@ test('a rapid double tap leaves one fetch in flight, for the track after the one
   await tick();
   await tick();
 
-  const active = prefetches.filter((call) => !call.signal.aborted);
-  assert.equal(prefetches.length, 2, 'the second tap asked for something, and only one thing');
-  assert.equal(prefetches[0]!.signal.aborted, true, 'the abandoned prefetch was cancelled');
-  assert.equal(active.length, 1, 'exactly one fetch is in flight');
-  assert.equal(active[0]!.url, cappedUrlOf('song-3'), 'and it is the track after the one he chose');
-  assert.equal(queue.currentSong?.id, 'song-2', 'what is playing is what he chose — the prefetch moved nothing');
+  assert.equal(prepares.length, 2, 'the second tap asked for something, and only one thing');
+  assert.equal(prepares[1]!.url, cappedUrlOf('song-3', queue.streamKbps ?? 128), 'and it is the track after the one he chose');
+  assert.equal(queue.currentSong?.id, 'song-2', 'what is playing is what he chose');
   assert.equal(queue.position, 1, 'and the queue is in the order he left it in');
 });

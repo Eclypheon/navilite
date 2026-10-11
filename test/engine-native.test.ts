@@ -67,6 +67,8 @@ interface Recording {
    * of a track was ignored for the rest of the session.
    */
   seekNeverSettles: boolean;
+  /** True when fakeBridge.play should not immediately emit onPosition. */
+  deferPosition?: boolean;
   /** The bridge's own event sink, so a test can make the player report a position or a state. */
   events: NativeBridgeEvents | null;
   /** What the player reports from `sync()`, i.e the truth after a foreground return. */
@@ -120,7 +122,16 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
       async play(seconds: number) {
         record.calls.push(`play@${Math.round(seconds)}`);
         await wait(ROUND_TRIP_MS);
-        record.truth = { ...record.truth, playing: true };
+        record.truth = { ...record.truth, playing: true, positionMs: seconds * 1000 };
+        /*
+         * v1.9.2 — a player that has been told to play **reports where it is**, and that report is
+         * what the engine now waits for before it will say the track is playing (`concludeStart`).
+         * A fake that accepted the call and said nothing would be a fake of the bug this release is
+         * about: every round trip answering, and no sound.
+         */
+        if (!record.deferPosition) {
+          record.events?.onPosition(Math.max(0, seconds));
+        }
       },
       pause: () => action('pause'),
       async resume() {
@@ -146,6 +157,9 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         record.prepares.push(info.url);
         record.preparedUrl = info.url;
         await wait(ROUND_TRIP_MS);
+        // v1.9.2: the answer is whether the player took the track — the queue records a prepared
+        // track only on `true`.
+        return true;
       },
       async adopt() {
         const url = record.preparedUrl;
@@ -158,6 +172,8 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         record.adopts += 1;
         record.truth = { ...record.truth, playing: true, positionMs: 0 };
         await wait(5);
+        // The adopted item is playing now, and it says so: the same report a load's play produces.
+        record.events?.onPosition(0);
         return true;
       },
       async discard() {
@@ -359,6 +375,7 @@ function recording(overrides: Partial<Recording> = {}): Recording {
     adopts: 0,
     preparedUrl: null,
     seekNeverSettles: false,
+    deferPosition: false,
     events: null,
     truth: { playing: true, positionMs: 1000, durationMs: 180_000 },
     refuseResume: false,
@@ -841,9 +858,10 @@ test('the press is not behind the bridge round trips', async () => {
     const playing = engine.play(TRACK);
     const stateOnPress = engine.status().state;
     const uiLatencyMs = Math.round(performance.now() - pressedAt);
-    assert.equal(stateOnPress, 'playing', 'the transport is playing on the tick of the press');
+    assert.equal(stateOnPress, 'loading', 'the transport is loading on the tick of the press');
 
     await playing;
+    assert.equal(engine.status().state, 'playing', 'and playing once the player speaks');
     const soundLatencyMs = Math.round(performance.now() - pressedAt);
     // v1.7 flipped the state only after `load` + `play` had both resolved — that is this number.
     assert.ok(soundLatencyMs >= ROUND_TRIP_MS * 2, `the bridge really is in the path (${soundLatencyMs} ms of round trips)`);
@@ -955,10 +973,11 @@ test('the displayed position does not run from the press to the first sound', as
   const engines: AudioEngine[] = [];
   try {
     const record = recording();
+    record.deferPosition = true;
     record.truth = { playing: true, positionMs: 0, durationMs: 180_000 };
     const engine = nativeEngine(record);
     engines.push(engine);
-    await engine.play(TRACK);
+    const playing = engine.play(TRACK);
     await settle(300);
     const beforeReport = engine.status().positionMs;
     say(`the clock between the press and the player's first report: ${Math.round(beforeReport)} ms after 300 ms of real time`);
@@ -966,6 +985,7 @@ test('the displayed position does not run from the press to the first sound', as
 
     // The player's own report is what starts it, and it counts from that position.
     record.events?.onPosition(0.4);
+    await playing;
     await settle(240);
     const afterReport = engine.status().positionMs;
     say(`and from the player's own report of 400 ms: ${Math.round(afterReport)} ms after 240 ms more`);
