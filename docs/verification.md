@@ -1032,7 +1032,7 @@ Found while doing this, **not fixed**: with the box focused, the settings *scrol
 carries `301 px` of horizontally scrollable content in WebKit (surface `393 -> 694 px`) while the
 page stays 393 px and no element's rectangle leaves the screen. The probe extension that names the
 element inside the scroller (`widestWhileFocused`) landed after this run, so the culprit is
-unidentified rather than exonerated. Follow-up card: `t_3d2e5ee5`.
+unidentified rather than exonerated. Follow-up card: `t_16a5dbe5`.
 
 ### 13.2 The first lyric line
 
@@ -1087,7 +1087,7 @@ From the same run, on a 36-line sidecar (16 lines fit the panel):
   13.1 and 13.2 are Chrome's, which is enough to name the cause but not to show the zoom.
 - **No device run of the pager at all.** Every gesture number above is Chrome-driven CDP touch
   events at 393 x 852. Real-finger behaviour on iOS — particularly the axis lock against Safari's
-  own back-swipe — is reasoned about, not measured. Follow-up card: `t_3d2e5ee5`.
+  own back-swipe — is reasoned about, not measured. Follow-up card: `t_16a5dbe5`.
 - **Landscape and the iPad are out of scope** of every run here.
 - One more honest note: the v1.4 device log on disk still shows the old failure
   (`the layout probe did not load`), including one attempt that died on a backtick inside a comment
