@@ -697,13 +697,27 @@ const STRESS_LYRIC_LINES = [
   'だからぼくはもういちどさいしょのひかりのほうへあるいていく',
 ];
 
+/**
+ * How many times those lines repeat in the stress album's sidecar.
+ *
+ * Twelve lines fit a phone's lyric panel whole, which makes a lyric *scroll* untestable: with
+ * nothing to scroll, "it followed the song" and "it left your scroll alone" are both vacuously true.
+ * Real songs run to dozens of lines, so the stress sidecar does too — three verses, thirty-six lines,
+ * which is a scroll on any phone.
+ */
+const STRESS_LYRIC_REPEATS = 3;
+
+/** The stress album's sidecar: the lines above, repeated. */
+const STRESS_SIDECAR_LINES = Array.from({ length: STRESS_LYRIC_REPEATS }, () => STRESS_LYRIC_LINES).flat();
+
 /** The lyrics this mock's library holds for a track — or nothing at all. */
 function lyricsFor(song) {
   if (!song || NO_LYRICS) return null;
   if (STRESS && song.albumId === STRESS_ALBUM_ID) {
-    // A long, unbroken Japanese line: the shape a lyric panel has to lay out on a phone.
-    return STRESS_LYRIC_LINES.map((value, index) =>
-      LYRICS_PLAIN ? { value } : { start: Math.round((index * song.duration * 1000) / STRESS_LYRIC_LINES.length), value },
+    // A long, unbroken Japanese line: the shape a lyric panel has to lay out on a phone. Repeated,
+    // because a sidecar that fits the panel whole cannot exercise the *scroll* the panel does.
+    return STRESS_SIDECAR_LINES.map((value, index) =>
+      LYRICS_PLAIN ? { value } : { start: Math.round((index * song.duration * 1000) / STRESS_SIDECAR_LINES.length), value },
     );
   }
   if (song.albumId !== PILOT_ALBUM_ID) return null;
@@ -922,6 +936,14 @@ const server = createServer((request, response) => {
     state.requests = [];
     state.scrobbles = [];
     state.lyrics = [];
+    /*
+     * The header promises "clear that state", and `/__state` lists the saved play queue and the
+     * starred ids among it. Both live for the life of this process, so without these two lines a
+     * harness run inherits the *previous* run's queue: the app restores it on boot (v1.6's
+     * exact-resume, see src/ui/app.ts `restorePlayQueue`) and comes up already playing a track.
+     */
+    state.starred.clear();
+    state.playQueue = null;
     send(response, 200, { reset: true }, { 'content-type': 'application/json; charset=utf-8' });
     return;
   }

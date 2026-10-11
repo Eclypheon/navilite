@@ -122,31 +122,36 @@ that and never pretends:
 | Same origin as Navidrome (the design) | **Real spectrum.** |
 | Cross-origin, server sends `Access-Control-Allow-Origin` on `/rest/stream` | **Real spectrum** (`crossorigin="anonymous"`). |
 | Cross-origin, no ACAO on the stream | Plays anyway (the element's `crossOrigin` flag is dropped), reports *"the library sent no Access-Control-Allow-Origin for this stream … the spectrum cannot be real"*, and shows the album-art theme. |
-| Native playback (APK/IPA background, lock screen) | Album-art theme. The audio plugin exposes no PCM to JavaScript, so there is nothing truthful to draw. The UI says so on screen. |
-| Audio context suspended (iOS background) | Album-art theme, reason shown. |
+| Native playback (APK/IPA) | **Real spectrum** from the native tap — an FFT of the audio the player is playing, taken inside `ios/App/App/NaviliteSpectrum.swift` (iOS only). |
+| Native playback on a build with no tap (Android today) | Album-art theme, and the app says exactly that. There is no second copy of the stream in the page to measure instead: v1.7 deleted the second audio engine. |
+| Audio context suspended (iOS background) | Album-art theme while the app is out of sight; the music is native and keeps playing; the visualiser re-arms on the way back in. |
 
 The mode chip on the player bar and the now-playing screen always names the live mode
 (`spectrum` / `theme` / `native audio`) and the reason underneath it. Two specific traps are
 handled explicitly, because both were observed while building this:
 
 - the analyser's destination buffer is **cleared before every read** — a tainted analyser can
-  leave the previous track's frame in place, which would display a stale spectrum as if it
-  were live;
+  leave the previous track's frame in place, which would display a stale spectrum as if it were
+  live;
 - a frame that stays **byte-identical** for ~2.5 s is treated as not-a-measurement too.
 
 ## Platform behaviour
 
 | | PWA (browser) | Android APK | iOS IPA (sideloaded) |
 |---|---|---|---|
-| Real spectrum | Yes (foreground) | Yes in the foreground; theme in the background | Yes in the **foreground only** — Web Audio does not survive iOS backgrounding |
-| Background playback | Android: yes (media element). iOS: unreliable | Yes — native ExoPlayer + a foreground service | Yes — AVFoundation, `UIBackgroundModes: audio` |
+| Engine | the media element — the only engine a browser has | native ExoPlayer + a foreground service | native AVFoundation, `UIBackgroundModes: audio` |
+| Real spectrum | Yes, from the analyser (foreground) | Theme — this build has no tap on its player | Yes — an FFT of the player's own audio, foreground |
+| Background playback | Android: yes (media element). iOS: unreliable | Yes | Yes |
 | Lock-screen controls | Media Session (Android, iOS 15+) | Plugin's Now Playing notification | `MPNowPlayingInfoCenter` |
 | Credential storage | Web storage (exfiltrable) — the UI says so | Android Keystore / EncryptedSharedPreferences | iOS Keychain |
 
-The wrapped builds hand playback between Web Audio and the native engine at the same position
-when the app goes to the background and back (`src/player/engine.ts`), so the spectrum is real
-while you are looking at it and the music keeps playing when you are not. `Settings → Playback`
-can pin either engine if you prefer.
+**One engine, one clock, one state machine** (`src/player/engine.ts`). The engine is chosen by the
+platform, once: the phone's own player inside a wrapped build, the media element in a browser.
+There is no setting that picks between them (v1.7.3 removed it), and there is **no fallback that
+plays** — if a wrapped build cannot build its native player it reports that rather than quietly
+starting a second engine in the page. Every input — a transport tap, a lock-screen command, a
+player event, an interruption, `visibilitychange` — goes through the one reducer, and returning to
+the app **reads** the player and adopts its answer rather than writing to it.
 
 ## Networking (the part that is not this repo)
 
@@ -333,7 +338,7 @@ of v1 scope.
 ## Layout
 
 ```
-src/api/        Subsonic client, MD5, types          src/player/   engine (Web Audio + native), visualiser, palette, Media Session
+src/api/        Subsonic client, MD5, types          src/player/   engine (one state machine; native or web), visualiser, palette, Media Session
 src/state/      library cache, playback queue        src/storage/  settings, credential storage (Keychain/Keystore/web)
 src/ui/         shell, router, views, player bar     tools/        mock library, icon generator, APK/IPA build scripts
 ```

@@ -28,4 +28,19 @@ class ViewController: CAPBridgeViewController {
         webView.scrollView.alwaysBounceHorizontal = false
         return webView
     }
+
+    /**
+     * v1.7: register our own lock-screen plugin.
+     *
+     * The rest of the plugin set is discovered by `cap sync` from the installed npm packages
+     * (`capacitor.config.json`'s `packageClassList`), which a Swift-only local plugin has no entry in —
+     * so it is registered by hand here, which is also the documented Capacitor seam for a local
+     * plugin. `bridge` is assigned immediately before this is called (`CAPBridgeViewController.loadView`),
+     * so this is the earliest point the bridge can accept it.
+     */
+    override func capacitorDidLoad() {
+        super.capacitorDidLoad()
+        bridge?.registerPluginInstance(NaviliteRemote())
+        bridge?.registerPluginInstance(NaviliteSpectrum())
+    }
 }

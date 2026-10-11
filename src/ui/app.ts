@@ -23,16 +23,65 @@ import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
-import { loadSettings, saveSettings, type PlaybackPreference, type Settings } from '../storage/settings.ts';
+import { loadSettings, saveSettings, type Settings } from '../storage/settings.ts';
+import { loadSnapshot } from '../storage/session.ts';
 import { CHANGELOG } from './changelog.ts';
 import { ICONS, cover, formatDuration, formatTime, h, icon, playIcon, replace, starIcon } from './dom.ts';
 import { createLyricsView, type LyricsView } from './lyrics.ts';
+import { createPager, type Pager } from './pager.ts';
 
 const PASSWORD_KEY = 'subsonic-password';
 const BUILD_ID = '__BUILD_ID__';
-/** Where the now-playing screen sends a left swipe, and where "close" goes if nowhere else. */
-const PLAYLISTS_ROUTE = '#/playlists';
 const DEFAULT_ROUTE = '#/artists';
+/** The now screen, on the spectrum pane. */
+const NOW_ROUTE = '#/now';
+/** The now screen, on the lyrics pane — the mode is part of the route so back/forward walk it. */
+const LYRICS_ROUTE = '#/now/lyrics';
+/**
+ * v1.6: the *stacked* screens — settings, the changelog, the connect form.
+ *
+ * They are pushed on top of whatever you were looking at, not panes of the pager: there is nothing
+ * beside them to page to, so the pager's gesture surface is off while one is showing and the only
+ * horizontal gesture that means anything is a right swipe *back* to the screen they were opened from.
+ */
+const STACKED_ROUTES = new Set(['settings', 'changelog', 'connect']);
+/**
+ * Pixels of movement that still counts as a tap rather than a scroll.
+ *
+ * v1.6.2. The number is the whole discriminator now — it was one of three in v1.6, and the other two
+ * were the ones refusing real taps (see `bindTapSurface`). **8 px, measured as straight-line
+ * distance**, is the canonical value for this: it is the `DRAG_SLOP` in the tap-vs-scroll research
+ * this release was asked to conform to (`navilite-tap-vs-scroll-canonical.md`, §1 and §3 — "px of
+ * touch movement that is still a tap"; `@use-gesture`'s `tapsThreshold` defaults to 3, Swiper uses a
+ * comparable per-device number, and both are in the same order as WebKit's own slop before it gives
+ * up on a tap).
+ *
+ * Note the direction: the app was at 10 px *per axis*, which is up to 14 px of travel diagonally,
+ * so moving to the documented 8 px straight-line is **tighter**, not looser — a press-and-hold that
+ * then swipes has to be recognised as a drag sooner, which is what the owner asked for. That change
+ * is the one risky edit in this release (refusing a click is how v1.6 broke tapping), which is why
+ * the harness now also proves a *wobbling* tap still plays: see `holdThenDrag` and `jitterTap` in
+ * `tools/v16-check.mjs`.
+ */
+const TAP_SLOP_PX = 8;
+/**
+ * How long a refusal may wait for the click it belongs to.
+ *
+ * A refusal is armed when a gesture ends as a drag and is consumed by the *very next* click. If that
+ * click never comes — WebKit claims the gesture itself and cancels the touch sequence, or the
+ * browser suppresses the click on its own — the refusal has to expire rather than sit there and eat a
+ * later tap. 700 ms is longer than the gap between a real drag's `touchend` and its click on every
+ * engine here, and shorter than any deliberate pause between two taps.
+ */
+const SUPPRESS_TTL_MS = 700;
+/*
+ * The three panes of the swipe pager, in the order the owner asked for: **playlist | spectrum |
+ * lyrics**. Pane 0 is the browser screen the app already had; the other two are inside the now
+ * overlay (see src/ui/pager.ts).
+ */
+const PANE_PLAYLIST = 0;
+const PANE_SPECTRUM = 1;
+const PANE_LYRICS = 2;
 
 type NowMode = 'spectrum' | 'lyrics';
 
@@ -66,15 +115,33 @@ interface Shell {
   nowShuffle: HTMLButtonElement;
   nowRepeat: HTMLButtonElement;
   lyricsHost: HTMLElement;
+  /** The two-pane strip inside the now screen: spectrum | lyrics. */
+  nowPages: HTMLElement;
   pillSpectrum: HTMLButtonElement;
   pillLyrics: HTMLButtonElement;
   nowMode: NowMode;
+  /** v1.5: the swipe pager behind the now screen (playlist | spectrum | lyrics). */
+  pager: Pager;
   lyrics: LyricsView;
   /** Song id currently marked as playing in a list, so the toggle only runs when it changes. */
   highlighted: string | null;
+  /** v1.9.0: whether that row was also drawn in its loading state, so the toggle has both facts. */
+  highlightedLoading: boolean;
   /** The last non-now route, so closing the now screen returns where you were. */
   lastBrowseRoute: string;
+  /** v1.6: the screen a stacked one (settings, the changelog) was opened from. */
+  stackedFrom: string;
   scrubbing: boolean;
+  /**
+   * Where the finger is, in ms, while a seek bar is being dragged (v1.7.2).
+   *
+   * The label used to be written only from the engine's own position, and only when no finger was
+   * down — so while dragging, the clock sat still and he had no way to know where he was seeking
+   * to. *"can you make it so the timing changes dynamically as i drag the seek bar so i know to what
+   * time im seeking to if i release it?"* This is that number: the destination, shown from the
+   * finger rather than from the player, and cleared the moment the gesture ends — however it ends.
+   */
+  scrubMs: number | null;
   /** The route whose content is in `view` right now — the key the scroll restore is filed under. */
   viewRoute: string | null;
   /** True while the now-playing screen covers `view` and its scroll container is frozen. */
@@ -105,10 +172,18 @@ export async function boot(root: HTMLElement): Promise<void> {
   const settings = loadSettings();
   const secrets = await createSecretStore(platform.os);
   const engine = new AudioEngine();
-  engine.setPreference(settings.playback);
+  /*
+   * The one engine, and the one place a build chooses it: inside the Capacitor shell the native
+   * player, in a browser the media element. There is no preference that selects between them any
+   * more (v1.7.3 deleted "web audio only"), and nothing to hand over at hide time. `prewarm()`
+   * builds the native bridge before the first press so the press does not pay for it — it produces
+   * no sound.
+   */
+  engine.prewarm();
 
   const shell = buildShell(root);
   const visualizer = attachVisualizer(shell.canvas, engine, DEFAULT_PALETTE);
+  visualizerRef = visualizer;
 
   const lyrics = new LyricsService(
     new LyricsCache(),
@@ -135,22 +210,41 @@ export async function boot(root: HTMLElement): Promise<void> {
 
   const applyPalette = (palette: Palette): void => {
     ctx.palette = palette;
+    // The canvas is a consumer of the same palette, applied in the same call — see `applyPaletteVars`.
     applyPaletteVars(shell, palette);
-    visualizer.setPalette(palette);
   };
   applyPalette(DEFAULT_PALETTE);
 
   let restored = false;
   if (await restoreSession(ctx, shell, applyPalette)) {
     restored = await restorePlayQueue(ctx);
-    if (!location.hash) location.hash = restored ? '#/now' : DEFAULT_ROUTE;
+    if (!location.hash) location.hash = restored ? NOW_ROUTE : DEFAULT_ROUTE;
   }
 
   window.addEventListener('hashchange', () => renderRoute(ctx, shell));
   engine.subscribe((status) => updatePlayerBar(ctx, shell, status));
-  document.addEventListener('visibilitychange', () => {
-    void ctx.engine.handleVisibility(document.hidden);
-  });
+  refreshSeekLabels = () => updatePlayerBar(ctx, shell, engine.status());
+  /*
+   * Going out of sight is the last moment the app is guaranteed to be running: write the exact
+   * resume snapshot here rather than hope the OS gives us another tick.
+   */
+  const onLifecycle = (hidden: boolean): void => {
+    void ctx.engine.handleVisibility(hidden);
+    if (hidden) ctx.queue?.flushSnapshot();
+  };
+  /*
+   * Every lifecycle input, into the one machine.
+   *
+   * `visibilitychange` is the one that fires on iOS when the app is backgrounded; `pageshow` /
+   * `pagehide` and `focus` cover the web page and the cases where visibility alone does not move
+   * (a bfcache restore, a tab that was never hidden). Capacitor's own `appStateChange` is not
+   * wired because `@capacitor/app` is not a dependency of this app, and adding one for an event
+   * `visibilitychange` already delivers on both platforms would be a new moving part, not a fix.
+   */
+  document.addEventListener('visibilitychange', () => onLifecycle(document.hidden));
+  window.addEventListener('pagehide', () => onLifecycle(true));
+  window.addEventListener('pageshow', () => onLifecycle(document.hidden));
+  window.addEventListener('focus', () => onLifecycle(false));
   window.addEventListener('keydown', (event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
     if (event.key === ' ') {
@@ -181,14 +275,26 @@ export async function boot(root: HTMLElement): Promise<void> {
     libraryReady: () => ctx.library !== null,
     route: () => location.hash,
     nowMode: () => shell.nowMode,
+    /** v1.5: the swipe pager's own state — the pane, the offset and what it has transformed. */
+    pager: () => shell.pager.state(),
     playingRow: () => document.querySelector('.row.song.playing .row-title')?.textContent ?? null,
-    /** What theme the app is holding — so a harness can prove the palette was applied at all. */
-    palette: () => ctx.palette,
     context: () => shell.nowContext.textContent,
     // Visible lyrics, so an end-to-end check can read what the panel actually shows.
     lyrics: () => Array.from(document.querySelectorAll('.lyric-line')).map((node) => node.textContent),
     activeLyric: () => document.querySelector('.lyric-line.active')?.textContent ?? null,
     lyricsMessage: () => document.querySelector('.lyrics-empty')?.textContent ?? null,
+    /**
+     * v1.7.2: the spectrum the canvas is drawing from, band by band — the native tap's own frame
+     * when the native player is the engine, and the analyser's bins otherwise. Read-only, and the
+     * only way an end-to-end check (or a person with devtools) can quote what the bars are showing.
+     */
+    spectrumBands: () => {
+      const data = engine.spectrumData();
+      return data ? Array.from(data) : null;
+    },
+    /** The last native tap frame, straight from the plugin: bands plus the tap's own counters. */
+    nativeSpectrum: () => engine.readNativeFrame(),
+
     /** The track the player is on, and the track the lyrics panel loaded for. */
     tracks: () => ({
       playing: ctx.queue?.currentSong?.id ?? null,
@@ -295,7 +401,7 @@ function buildShell(root: HTMLElement): Shell {
         h('button', { class: 'transport small', 'aria-label': 'Next', onclick: () => void queueRef?.next() }, [icon(ICONS.next)]),
       ]),
     ]),
-    h('div', { class: 'pb-progress' }, [barPosition, barProgress, barDuration]),
+    h('div', { class: 'pb-progress', 'data-pager': 'off' }, [barPosition, barProgress, barDuration]),
     barChip,
   ]);
 
@@ -340,22 +446,31 @@ function buildShell(root: HTMLElement): Shell {
   const pillLyrics = h('button', { class: 'pill-option', text: 'Lyrics', onclick: () => setNowMode('lyrics') });
   const pill = h('div', { class: 'pill', role: 'tablist', 'aria-label': 'Spectrum or lyrics' }, [pillSpectrum, pillLyrics]);
 
-  const lyricsHost = h('div', { class: 'now-lyrics hidden' });
+  const lyricsHost = h('div', { class: 'now-lyrics' });
+  /*
+   * v1.5: the middle of the now-playing screen is a two-pane strip, and the overlay around it is
+   * the window the playlist is paged past — the geometry is in `src/ui/pager.ts`, the panes are
+   * here. The (x/y) line, the title block and the compact transport bar deliberately sit *outside*
+   * the strip: they are the same controls on whichever pane is showing, which is what keeps them
+   * working while a finger is mid-drag.
+   */
+  const nowPages = h('div', { class: 'now-pages' }, [
+    h('div', { class: 'now-page now-page-spectrum' }, [nowCover, visualizerHost]),
+    h('div', { class: 'now-page now-page-lyrics' }, [lyricsHost]),
+  ]);
   const nowOverlay = h('section', { class: 'now hidden', 'aria-label': 'Now playing' }, [
-    h('div', { class: 'now-top' }, [
+    h('div', { class: 'now-top', 'data-pager': 'off' }, [
       h('button', { class: 'icon-button now-close', 'aria-label': 'Close now playing', onclick: () => closeNow() }, [
         icon(ICONS.close),
       ]),
       pill,
     ]),
-    nowCover,
-    visualizerHost,
-    lyricsHost,
+    nowPages,
     nowTitle,
     nowSubtitle,
     nowContext,
-    h('div', { class: 'now-progress' }, [nowPosition, nowProgress, nowDuration]),
-    h('div', { class: 'now-bar', 'aria-label': 'Playback controls' }, [nowShuffle, h('button', {
+    h('div', { class: 'now-progress', 'data-pager': 'off' }, [nowPosition, nowProgress, nowDuration]),
+    h('div', { class: 'now-bar', 'data-pager': 'off', 'aria-label': 'Playback controls' }, [nowShuffle, h('button', {
       class: 'transport',
       'aria-label': 'Previous',
       onclick: () => void queueRef?.previous(),
@@ -367,6 +482,20 @@ function buildShell(root: HTMLElement): Shell {
   ]);
 
   const toastNode = h('div', { class: 'toast' });
+
+  /*
+   * The pager is built before the shell object because the shell carries it: its callbacks reach
+   * the app through the same late-bound references the rest of the shell uses (`queueRefRef` is the
+   * shell, `queueRef` the queue), so none of them need the shell to exist yet.
+   */
+  const pager = createPager({
+    host: root,
+    list: viewScroll,
+    overlay: nowOverlay,
+    strip: nowPages,
+    onSettle: (position) => settlePane(position),
+    onPrepare: (target) => preparePane(target),
+  });
 
   const shell: Shell = {
     header,
@@ -397,13 +526,18 @@ function buildShell(root: HTMLElement): Shell {
     nowShuffle,
     nowRepeat,
     lyricsHost,
+    nowPages,
     pillSpectrum,
     pillLyrics,
     nowMode: 'spectrum',
+    pager,
     lyrics: null as unknown as LyricsView,
     highlighted: null,
+    highlightedLoading: false,
     lastBrowseRoute: DEFAULT_ROUTE,
+    stackedFrom: '',
     scrubbing: false,
+    scrubMs: null,
     viewRoute: null,
     scrollLocked: false,
     pendingScroll: null,
@@ -415,9 +549,13 @@ function buildShell(root: HTMLElement): Shell {
     if ((event.target as HTMLElement).closest('button, input')) return;
     openNow();
   });
-  bindSwipe(nowOverlay, (direction) => {
-    if (direction === 'left') location.hash = PLAYLISTS_ROUTE;
-  });
+  /*
+   * v1.6.1: the list is the tap surface. It owns both facts a tap needs — where the finger went down,
+   * and whether the list moved under it — and refuses exactly one click after a drag, once.
+   * See `bindTapSurface`.
+   */
+  bindTapSurface(viewScroll);
+  bindStackedBack(root);
 
   root.replaceChildren(header, viewScroll, playerBar, nowOverlay, toastNode);
   return shell;
@@ -426,40 +564,218 @@ function buildShell(root: HTMLElement): Shell {
 /** The queue is created after the shell, so the shell's buttons read it lazily. */
 let queueRef: PlaybackQueue | null = null;
 
+/**
+ * How a settled (or cancelled) seek puts the label back where it belongs.
+ *
+ * `updatePlayerBar` is the one writer of the transport's own position, and it is created with the
+ * app context — after the shell, and therefore after the seek bars are bound. This is the seam
+ * between them: a hook the bars call when the finger has gone, so the number stops being the
+ * finger's and becomes the player's again on the same frame rather than on the next status event.
+ */
+let refreshSeekLabels: () => void = () => undefined;
+
 function togglePlayback(): void {
   void queueRef?.toggle();
 }
 
 /** The logo, and the mini player, both land here. */
 function openNow(): void {
-  if (location.hash !== '#/now') location.hash = '#/now';
+  if (location.hash !== NOW_ROUTE) location.hash = NOW_ROUTE;
 }
 
+/** The × on the now screen: page back to the playlist he is on, through the pager. */
 function closeNow(): void {
-  const target = queueRefRef.lastBrowseRoute || DEFAULT_ROUTE;
-  if (location.hash === '#/now') location.hash = target;
+  queueRefRef.pager.goTo(PANE_PLAYLIST, { animate: true });
 }
 
 /** The shell needs to be reachable from the module-level routing helpers. */
 let queueRefRef: Shell = null as unknown as Shell;
 
-/** Swipe left/right on an element; used on the now-playing screen. */
-function bindSwipe(element: HTMLElement, onSwipe: (direction: 'left' | 'right') => void): void {
-  let startX = 0;
-  let startY = 0;
-  let tracking = false;
-  element.addEventListener(
+/* ------------------------------------------------------------ the gesture */
+
+/**
+ * The finger that is down on the list, and whether it has moved far enough to be a drag.
+ *
+ * v1.6.1: one press for the whole list, not one per row. A row cannot be the authority on "was this a
+ * tap" — the touch sequence and the click it may or may not produce need not land on the same element
+ * once a finger drifts a little — and a per-row copy of the state also has to be reset on
+ * `touchcancel`, which v1.6 never did: a touch the engine cancelled left a row believing a press was
+ * still in flight.
+ */
+interface Press {
+  x: number;
+  y: number;
+  /** True once the finger travelled past {@link TAP_SLOP_PX}, or the list scrolled under it. */
+  moved: boolean;
+}
+let press: Press | null = null;
+/**
+ * The one-shot refusal: a timestamp until which the next click is refused, or 0 for "nothing armed".
+ *
+ * Consumed by the first click that arrives ({@link refuseClick}), so one drag can never refuse two
+ * clicks, and cleared when a new finger goes down, so it can never cross into the next gesture.
+ */
+let suppressClickUntil = 0;
+
+/** The gesture ended as a drag: the click it leaves behind is refused, once. */
+function refuseNextClick(): void {
+  suppressClickUntil = performance.now() + SUPPRESS_TTL_MS;
+}
+
+/**
+ * Is this click the one a drag left behind? Always consumes the refusal — armed or expired, it never
+ * survives this call.
+ */
+function refuseClick(now: number): boolean {
+  if (suppressClickUntil === 0) return false;
+  const refuse = now <= suppressClickUntil;
+  suppressClickUntil = 0;
+  return refuse;
+}
+
+/**
+ * Activate an element on a click, and on nothing else.
+ *
+ * The click is the browser's own, so a thumb, a keyboard Enter, a switch control, a VoiceOver
+ * double-tap and a script all arrive by the same door. Nothing is reconstructed from touch maths: that
+ * was v1.6's mistake — it rebuilt a tap out of `touchstart`/`touchmove`/`touchend`, and the two
+ * thresholds it invented (a press longer than 700 ms, and *any* `scroll` event during the press)
+ * refused taps that a synthetic one-pixel tap never produces but a real thumb produces constantly.
+ *
+ * What can be refused is the click a drag leaves behind, and that is decided once, on the surface the
+ * rows sit on — see {@link bindTapSurface}. A click with no drag in front of it cannot be refused: by
+ * construction nothing arms the refusal for it.
+ */
+function bindTap<T extends HTMLElement>(element: T, activate: () => void): T {
+  element.addEventListener('click', () => activate());
+  return element;
+}
+
+/**
+ * The tap surface: the scroll container every row lives in. It owns the only two facts a tap needs.
+ *
+ *   - where the finger went down, so {@link TAP_SLOP_PX} of travel can be told from a still finger;
+ *   - whether the list moved, which is a scroll however still the finger was.
+ *
+ * A gesture that did either arms {@link refuseNextClick} — a one-shot consumed by the very next click
+ * and expired by {@link SUPPRESS_TTL_MS}, so it can never eat a later tap. The click is read in the
+ * capture phase, so a refused one never reaches the row's own handler.
+ *
+ * Note what is deliberately *not* here: any judgement of a press by how long it lasted. v1.6 refused a
+ * click when the press had been down for more than 700 ms from `touchstart` — and WebKit delivers the
+ * click *after* `touchend` — so a deliberate tap, or a tap WebKit spent a moment deciding about, was
+ * refused for being slow rather than for being a drag. That is the plainest way "tapping does nothing"
+ * becomes *"i'm not even able to tap to go into my playlist"*.
+ */
+function bindTapSurface(surface: HTMLElement): void {
+  surface.addEventListener(
     'touchstart',
     (event) => {
       const touch = event.touches[0];
-      if (!touch) return;
-      startX = touch.clientX;
-      startY = touch.clientY;
-      tracking = true;
+      if (!touch || event.touches.length !== 1) {
+        press = null;
+        return;
+      }
+      // A new finger supersedes the last gesture: any click still to come belongs to this press.
+      suppressClickUntil = 0;
+      press = { x: touch.clientX, y: touch.clientY, moved: false };
     },
     { passive: true },
   );
-  element.addEventListener(
+  surface.addEventListener(
+    'touchmove',
+    (event) => {
+      const active = press;
+      if (!active) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      if (Math.hypot(touch.clientX - active.x, touch.clientY - active.y) > TAP_SLOP_PX) {
+        active.moved = true;
+      }
+    },
+    { passive: true },
+  );
+  /*
+   * The list moved under a finger that did not — momentum from a flick, or the scroller settling.
+   * That is a scroll, not a tap, and it is the case a movement threshold alone cannot see. Only a
+   * scroll *while a finger is down* counts: engines deliver scroll events coalesced and late, and a
+   * scroll from before this press must not be read as part of it.
+   */
+  surface.addEventListener(
+    'scroll',
+    () => {
+      if (press) press.moved = true;
+    },
+    { passive: true },
+  );
+  const release = (): void => {
+    const ended = press;
+    press = null;
+    if (ended?.moved) refuseNextClick();
+  };
+  surface.addEventListener('touchend', release, { passive: true });
+  // WebKit fires `touchcancel` the moment it claims a touch sequence for itself. v1.6 had no handler
+  // here at all, which left a row convinced that a press was still in flight.
+  surface.addEventListener('touchcancel', release, { passive: true });
+  surface.addEventListener(
+    'click',
+    (event) => {
+      /*
+       * Only a *user's* click can be the one a drag left behind, and only a user's click is refused.
+       *
+       * `isTrusted` is the whole distinction: a click the browser delivers — from a thumb, a mouse, a
+       * keyboard Enter, a switch control — is trusted, and WebKit's click at the end of a drag is one
+       * of those. A click a script synthesises (`element.click()`) is not a gesture at all, and
+       * refusing it would take the rows away from every diagnostic that drives them — measured here,
+       * not reasoned: an untrusted click arriving inside the refusal's 700 ms window was eaten, which
+       * is what `test/pager.test.ts` and `test/scroll-containment.test.ts` caught within a minute of
+       * this being written.
+       */
+      if (!event.isTrusted) return;
+      if (!refuseClick(performance.now())) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    true,
+  );
+}
+
+/** The route the app is on right now, by its first segment. */
+function currentHead(): string {
+  return routeParts()[0] ?? 'artists';
+}
+
+/** True when the screen on top is a stacked one (settings, the changelog, the connect form). */
+function onStackedRoute(): boolean {
+  return STACKED_ROUTES.has(currentHead());
+}
+
+/**
+ * v1.6: from a stacked screen, a right swipe is *back* — and it is the only horizontal gesture that
+ * does anything there, because settings is not a pane of the pager (see `renderRoute`, which gates
+ * `pager.setEnabled`). The owner's words: *"when im in settings, swiping left or right seems to bring
+ * me to the spectrum or lyrics. this should not be the case, i should only be able to swipe right to
+ * return to the previous screen which i accessed settings from."*
+ *
+ * It reads the recorded opener rather than `history.back()`, so it still works on the first screen
+ * after a cold start (where back would leave the app).
+ */
+function bindStackedBack(host: HTMLElement): void {
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+  host.addEventListener(
+    'touchstart',
+    (event) => {
+      const touch = event.touches[0];
+      tracking = Boolean(touch) && event.touches.length === 1 && onStackedRoute();
+      if (!touch || !tracking) return;
+      startX = touch.clientX;
+      startY = touch.clientY;
+    },
+    { passive: true },
+  );
+  host.addEventListener(
     'touchend',
     (event) => {
       if (!tracking) return;
@@ -468,14 +784,83 @@ function bindSwipe(element: HTMLElement, onSwipe: (direction: 'left' | 'right') 
       if (!touch) return;
       const dx = touch.clientX - startX;
       const dy = touch.clientY - startY;
-      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.4) return;
-      onSwipe(dx < 0 ? 'left' : 'right');
+      // Right, mostly horizontal, and far enough to be meant.
+      if (dx < 60 || dx < Math.abs(dy) * 1.4) return;
+      const target = queueRefRef?.stackedFrom;
+      if (target) location.hash = target;
     },
     { passive: true },
   );
 }
 
-function setNowMode(mode: NowMode): void {
+/* -------------------------------------------------------------- the pager */
+
+/**
+ * The pager came to rest on a pane: say so in the route.
+ *
+ * The URL is the pager's state (see `renderRoute`), and writing it here is what makes the browser's
+ * back and forward buttons walk the panes — the owner's optional nice-to-have, and free once the
+ * route and the pane are the same fact.
+ */
+function settlePane(position: number): void {
+  const shell = queueRefRef;
+  if (!shell) return;
+  const target =
+    position === PANE_PLAYLIST
+      ? shell.lastBrowseRoute || DEFAULT_ROUTE
+      : position === PANE_LYRICS
+        ? LYRICS_ROUTE
+        : NOW_ROUTE;
+  if (location.hash !== target) {
+    location.hash = target;
+    return;
+  }
+  // The route did not move — a drag that came back to where it started — so nothing will re-render
+  // for us: put the screen back by hand, or the overlay would stay over the list.
+  if (position === PANE_PLAYLIST) hideNowScreen(shell);
+}
+
+/**
+ * A drag has just been read as horizontal, heading for `target`: make that pane exist before it
+ * arrives. The overlay may still be hidden (a drag that starts on the playlist) and the lyrics are
+ * fetched on first need, so both are readied here rather than assumed.
+ */
+function preparePane(target: number): void {
+  const shell = queueRefRef;
+  if (!shell) return;
+  if (target === PANE_PLAYLIST) return;
+  shell.nowOverlay.classList.remove('hidden');
+  shell.playerBar.classList.add('hidden');
+  applyNowMode(target === PANE_LYRICS ? 'lyrics' : 'spectrum');
+}
+
+/** The now screen is showing on `pane`. */
+function showNowScreen(shell: Shell, pane: number): void {
+  shell.nowOverlay.classList.remove('hidden');
+  shell.playerBar.classList.add('hidden');
+  applyNowMode(pane === PANE_LYRICS ? 'lyrics' : 'spectrum');
+  shell.pager.show(pane);
+}
+
+/** The now screen is gone: the playlist is the screen, and the transport is back. */
+function hideNowScreen(shell: Shell): void {
+  shell.pager.hide();
+  shell.nowOverlay.classList.add('hidden');
+  shell.playerBar.classList.toggle('hidden', queueRef?.currentSong == null);
+}
+
+/** Which pane a route means. Anything that is not the now screen is the playlist. */
+function paneOfRoute(head: string, id: string | undefined): number {
+  if (head !== 'now') return PANE_PLAYLIST;
+  return id === 'lyrics' ? PANE_LYRICS : PANE_SPECTRUM;
+}
+
+/**
+ * Apply a mode to the screen — the pill, the class the dense text layout hangs off, and the lyrics
+ * themselves. It does not move the pager: `setNowMode` does that by writing the route, and the
+ * router animates.
+ */
+function applyNowMode(mode: NowMode): void {
   const shell = queueRefRef;
   shell.nowMode = mode;
   const lyrics = mode === 'lyrics';
@@ -483,35 +868,334 @@ function setNowMode(mode: NowMode): void {
   shell.pillLyrics.classList.toggle('active', lyrics);
   shell.pillSpectrum.setAttribute('aria-selected', String(!lyrics));
   shell.pillLyrics.setAttribute('aria-selected', String(lyrics));
-  shell.visualizerHost.classList.toggle('hidden', lyrics);
-  shell.lyricsHost.classList.toggle('hidden', !lyrics);
-  // v1.2: the class the stylesheet hangs the text-screen layout off — it hides the album art
-  // and gives the freed height to the lines instead of leaving the column at its 88 px minimum.
+  // v1.2/v1.5: the class the dense lyrics metrics hang off. The panes themselves are laid out side
+  // by side now, so nothing is hidden here — the pager decides what is on screen.
   shell.nowOverlay.classList.toggle('lyrics-mode', lyrics);
   // Load on first view rather than on every track change: fewer requests, same result.
   if (lyrics) shell.lyrics.show(queueRef?.currentSong ?? null);
 }
 
+/**
+ * The spectrum/lyrics pill. Both options are the *same pager* the finger drives — the route is what
+ * moves, so the switch slides the strip instead of cutting to the other pane.
+ */
+function setNowMode(mode: NowMode): void {
+  const target = mode === 'lyrics' ? LYRICS_ROUTE : NOW_ROUTE;
+  if (location.hash === target) return;
+  // A hashchange does not fire when the only difference is the trailing pane on the same screen and
+  // the app is already there, so apply the mode directly as well; the pager follows the route.
+  applyNowMode(mode);
+  queueRefRef.pager.goTo(mode === 'lyrics' ? PANE_LYRICS : PANE_SPECTRUM);
+  location.hash = target;
+}
+
+/**
+ * The seek bar, and the drag that seeks with it.
+ *
+ * v1.7.1 — three things, all of them the owner's report that *"i can't drag the seek bar because it
+ * registers as im trying to swipe to a different pane"*:
+ *
+ *   1. **The gesture belongs to the bar.** The row carries `data-pager="off"` and the pager asks by
+ *      hit-test as well as by element, so a drag that starts here can never turn a page
+ *      (`src/ui/pager.ts`, `ownsGesture`). The CSS gives the control its own `touch-action`, so the
+ *      platform does not read the horizontal movement as a pan either.
+ *   2. **The drag seeks, continuously.** v1.7 sought only on `change` — that is, on release — so
+ *      nothing happened while the thumb was being dragged. Every move now seeks, throttled to one
+ *      round trip per `SEEK_INTERVAL_MS`, with the last position always committed and the value on
+ *      release seeking exactly where the finger left it.
+ *   3. **The thumb is not pulled out from under the finger.** `scrubbing` is set on the way down (on
+ *      `pointerdown` and on `touchstart`, because audio controls are reached by touch) and cleared
+ *      when the gesture ends however it ends, so the engine's own position updates stop writing the
+ *      input's value while a finger is on it.
+ *
+ * v1.7.2 — *"can you make it so the timing changes dynamically as i drag the seek bar so i know to
+ * what time im seeking to if i release it?"*: the **label** follows the thumb now, not just the
+ * thumb's position. v1.7.1 sought continuously, but the clock beside the bar was still written from
+ * the player's own position and only when no finger was down, so the number under his thumb never
+ * moved — the seek was happening, and the screen said nothing about it. `shell.scrubMs` is the
+ * destination: written on every move, by whichever of the two bars is being dragged, and cleared on
+ * release (which commits it) or on cancel (which does not, and puts the real position back).
+ *
+ * v1.7.4 — *"seek bar doesn't work on drag nothing happens but tapping does let me seek"*, and v1.7.3
+ * shipped a bar whose drag was still the *platform's*. Everything v1.7.1 did made the gesture reach
+ * the control (the pager refuses it by name and by hit-test, `touch-action: none` keeps the platform
+ * from reading it as a pan) — and then the control's own slider behaviour was the only thing that
+ * could turn the movement into a value. In the installed app it evidently never ran: nothing was
+ * written, so nothing was seeked, while a tap still jumped the thumb because that is a `click` the
+ * control answers on its own. That is exactly the shape of his report, and a tap-vs-drag difference
+ * cannot be seen from a test that only taps.
+ *
+ * So the bar drives itself now. `pointerdown` on it captures the pointer and takes the value from
+ * the finger's own x over the bar's own box (`msAtX`), one write per `pointermove`, committing
+ * through the same throttle as before; `dragging` silences the `input` listener for the length of
+ * the gesture, so the platform's slider — if it also runs — cannot write a second, relative answer
+ * under us. Nothing that used to work is lost: with no pointer events at all, `dragging` never goes
+ * true and the `input`/`change` path below is still the whole implementation.
+ */
+const SEEK_INTERVAL_MS = 120;
+
 function bindSeek(input: HTMLInputElement, shell: Shell, getQueue: () => PlaybackQueue | null): void {
-  input.addEventListener('pointerdown', () => {
-    shell.scrubbing = true;
-  });
-  input.addEventListener('input', () => {
+  let lastSeekAt = 0;
+  let pendingMs: number | null = null;
+  let trailing: ReturnType<typeof setTimeout> | null = null;
+  /** True from the moment a finger lands on the bar until the gesture ends: we are the writer. */
+  let dragging = false;
+  let pointerId: number | null = null;
+  /**
+   * Which channel owns the gesture that is running.
+   *
+   * v1.8.0 — this is the fix. The two input channels are not interchangeable on iOS: a native
+   * `<input type=range>` is driven by WebKit's own recogniser, and the pointer stream that belongs
+   * to the touch it claims is *cancelled* as soon as that recogniser takes over, while the touch
+   * stream is delivered either way. v1.7.4 wrote the position from `pointermove` alone, so the only
+   * writer of the value was an event the platform stops sending — which is why the drag worked in
+   * the Chrome harness (whose synthetic touch feeds Chrome's input pipeline, which *does* synthesize
+   * pointer events) and did nothing at all on the phone, while a tap still worked, because a tap
+   * needs no move at all.
+   */
+  let owner: 'pointer' | 'touch' | null = null;
+
+  const durationOf = (): number => queueDurationMs(getQueue());
+  const valueMs = (): number => (Number(input.value) / 1000) * durationOf();
+
+  const commit = (ms: number): void => {
     const queue = getQueue();
-    if (!queue) return;
-    const duration = queueDurationMs(getQueue());
-    if (duration > 0) {
-      const seconds = (Number(input.value) / 1000) * (duration / 1000);
-      input.setAttribute('aria-valuetext', formatTime(seconds));
+    if (!queue || ms < 0) return;
+    void queue.seek(ms);
+  };
+
+  /**
+   * Where a finger at this x is, in ms: the bar's own box, measured where the finger is.
+   *
+   * Absolute, not relative to the grab point, because the thumb on a seek bar is a position and not
+   * a knob to push — the same reading a tap has always had, which is the one thing on this control
+   * that was already working.
+   */
+  const msAtX = (clientX: number): number => {
+    const duration = durationOf();
+    if (duration <= 0) return 0;
+    const rect = input.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    return fraction * duration;
+  };
+
+  /** The label, written from the finger: both bars show the same destination, wherever it was dragged. */
+  const showDestination = (ms: number): void => {
+    shell.scrubMs = ms;
+    const text = formatTime(ms / 1000);
+    shell.barPosition.textContent = text;
+    shell.nowPosition.textContent = text;
+    shell.barProgress.value = input.value;
+    shell.nowProgress.value = input.value;
+  };
+
+  const begin = (): void => {
+    shell.scrubbing = true;
+  };
+
+  /** Whatever ends the gesture: stop hiding the thumb, and seek to where the finger left it. */
+  const finish = (): void => {
+    const wasScrubbing = shell.scrubbing;
+    shell.scrubbing = false;
+    shell.scrubMs = null;
+    if (trailing !== null) clearTimeout(trailing);
+    trailing = null;
+    pendingMs = null;
+    if (!wasScrubbing) return;
+    if (durationOf() > 0) commit(valueMs());
+    // The bar goes back to the player's own clock — which is now the position that was just asked
+    // for, so the label stays where the finger left it rather than snapping back.
+    refreshSeekLabels();
+  };
+
+  /**
+   * A cancelled gesture commits nothing and puts the real position back.
+   *
+   * The thumb was dragged away by the platform (a call, a system gesture, the screen locking), so
+   * the track never went anywhere and the label must not keep claiming it did.
+   */
+  const cancel = (): void => {
+    if (!shell.scrubbing) return;
+    shell.scrubbing = false;
+    shell.scrubMs = null;
+    pendingMs = null;
+    if (trailing !== null) clearTimeout(trailing);
+    trailing = null;
+    refreshSeekLabels();
+  };
+
+  /** The label and the seek, from one number — whichever of the two paths produced it. */
+  const applyMs = (ms: number): void => {
+    input.setAttribute('aria-valuetext', formatTime(ms / 1000));
+    // The number under the thumb moves on every frame of the drag, whether or not a seek is sent.
+    showDestination(ms);
+    const now = performance.now();
+    if (now - lastSeekAt >= SEEK_INTERVAL_MS) {
+      lastSeekAt = now;
+      pendingMs = null;
+      commit(ms);
+      return;
     }
+    // Between round trips the finger keeps moving; the last position is what gets sent, so the
+    // seek lands where the finger stopped rather than where it was 120 ms ago.
+    pendingMs = ms;
+    if (trailing !== null) return;
+    trailing = setTimeout(() => {
+      trailing = null;
+      lastSeekAt = performance.now();
+      const queued = pendingMs;
+      pendingMs = null;
+      if (queued !== null) commit(queued);
+    }, SEEK_INTERVAL_MS);
+  };
+
+  /** The finger's own reading of the bar: write the position, then show it and commit it. */
+  const write = (clientX: number): void => {
+    const duration = durationOf();
+    if (duration <= 0) return;
+    const ms = msAtX(clientX);
+    input.value = String(Math.round((ms / duration) * 1000));
+    applyMs(ms);
+  };
+
+  const release = (id: number | null): void => {
+    if (id !== null && typeof input.releasePointerCapture === 'function') {
+      try {
+        input.releasePointerCapture(id);
+      } catch {
+        // The capture is already gone (the platform took the gesture back). Nothing to release.
+      }
+    }
+    dragging = false;
+    pointerId = null;
+    owner = null;
+  };
+
+  const onPointerDown = (event: PointerEvent): void => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    // A gesture the touch channel has already claimed is not this channel's to write (v1.8.0).
+    if (owner === 'touch') return;
+    /*
+     * The gesture is the bar's from here, and it is the bar that will write the value.
+     *
+     * Capture, so every move of this finger reaches the bar even after it travels off the bar's own
+     * box (a drag that leaves the control must keep seeking, not silently stop), and `preventDefault`
+     * so the platform's own slider does not begin a second, relative drag underneath ours. Both
+     * writers running is precisely the "nothing happens" this is fixing.
+     */
+    owner = 'pointer';
+    dragging = true;
+    pointerId = event.pointerId;
+    begin();
+    if (typeof input.setPointerCapture === 'function') {
+      try {
+        input.setPointerCapture(event.pointerId);
+      } catch {
+        // No capture available: moves inside the box still arrive, and the `input` path below is
+        // still armed for the ones that do not.
+      }
+    }
+    if (event.cancelable) event.preventDefault();
+    write(event.clientX);
+  };
+
+  const onPointerMove = (event: PointerEvent): void => {
+    if (owner !== 'pointer' || !dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
+    if (event.cancelable) event.preventDefault();
+    write(event.clientX);
+  };
+
+  const onPointerUp = (event: PointerEvent): void => {
+    if (owner !== 'pointer' || !dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
+    release(pointerId);
+    finish();
+  };
+
+  const onPointerCancel = (): void => {
+    if (owner !== 'pointer' || !dragging) return;
+    release(pointerId);
+    cancel();
+  };
+
+  /**
+   * The touch channel: the finger's own events, and the ones this control now owns the drag on.
+   *
+   * v1.8.0 — everything the owner reported as "i can only tap to seek" comes from the missing writer
+   * here. A real finger on a native `<input type=range>` produces no usable `pointermove` in WebKit
+   * (the control's own recogniser claims the touch and the pointer stream is cancelled), so the bar
+   * has to take the movement from `touchmove`, which iOS delivers for this control as for any other
+   * element. Two separate things are needed and neither is optional:
+   *
+   *   - `write(touches[0].clientX)` on the move — the value comes from where the finger *is*, over
+   *     the bar's own box, exactly the reading the tap already used;
+   *   - `preventDefault()` on a **non-passive** `touchmove` — `touch-action: none` stops the page
+   *     scrolling, it does not stop the range control's own drag, and letting both run is the
+   *     "nothing happens" of two writers again. A passive listener cannot call `preventDefault`, so
+   *     the option is part of the fix rather than a detail of it.
+   *
+   * The `touchstart` listener is deliberately passive and writes nothing but the value: it must not
+   * prevent the default there, because the browser needs it to see this as a touch sequence at all.
+   */
+  const onTouchStart = (event: TouchEvent): void => {
+    const touch = event.touches[0];
+    // A second finger is a pinch or a scroll, not a seek: give the gesture up rather than fight it.
+    if (event.touches.length > 1) {
+      if (owner === 'touch') {
+        owner = null;
+        dragging = false;
+        cancel();
+      }
+      return;
+    }
+    if (!touch) return;
+    owner = 'touch';
+    dragging = true;
+    begin();
+    write(touch.clientX);
+  };
+
+  const onTouchMove = (event: TouchEvent): void => {
+    if (owner !== 'touch' || !dragging) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    if (event.cancelable) event.preventDefault();
+    write(touch.clientX);
+  };
+
+  const onTouchEnd = (): void => {
+    if (owner !== 'touch') return;
+    owner = null;
+    dragging = false;
+    finish();
+  };
+
+  const onTouchCancel = (): void => {
+    if (owner !== 'touch') return;
+    owner = null;
+    dragging = false;
+    cancel();
+  };
+
+  input.addEventListener('pointerdown', onPointerDown);
+  input.addEventListener('pointermove', onPointerMove);
+  input.addEventListener('pointerup', onPointerUp);
+  input.addEventListener('pointercancel', onPointerCancel);
+  input.addEventListener('touchstart', onTouchStart, { passive: true });
+  // Non-passive by necessity: this listener's `preventDefault` is what keeps the native control
+  // from taking the movement the bar is measuring (see the note on `onTouchStart`).
+  input.addEventListener('touchmove', onTouchMove, { passive: false });
+  input.addEventListener('input', () => {
+    // Our own drag is the writer for the length of the gesture; a second writer is the bug.
+    if (dragging) return;
+    if (durationOf() <= 0) return;
+    applyMs(valueMs());
   });
   input.addEventListener('change', () => {
-    shell.scrubbing = false;
-    const queue = getQueue();
-    const duration = queueDurationMs(queue);
-    if (!queue || duration <= 0) return;
-    void queue.seek((Number(input.value) / 1000) * duration);
+    if (!dragging) finish();
   });
+  input.addEventListener('touchend', onTouchEnd, { passive: true });
+  input.addEventListener('touchcancel', onTouchCancel, { passive: true });
 }
 
 function queueDurationMs(queue: PlaybackQueue | null): number {
@@ -527,20 +1211,41 @@ function applyPaletteVars(shell: Shell, palette: Palette): void {
   document.documentElement.style.setProperty('--accent-primary', palette.primary);
   document.documentElement.style.setProperty('--accent-secondary', palette.secondary);
   document.documentElement.style.setProperty('--accent-tertiary', palette.accent);
+  /*
+   * v1.7.4 — the canvas is a consumer of the palette, right here, in the same call.
+   *
+   * The owner: *"the colors are also not matching the album art theme it seems to just be one blue
+   * color no matter what"*. There was one palette function (`syncPalette`) and it reached the
+   * visualiser through a path of its own (`applyPalette` in `boot`), while the palette the rest of
+   * the UI wears is written *here* — and this function is called from the cold start, from a fresh
+   * sign-in and from the settings screen, which is one path too many for the two to stay in step.
+   * Painting the bars from the same function that paints the variables makes the two the same
+   * palette by construction: there is no longer a route that can colour the UI and not the
+   * spectrum. `setPalette` rebuilds the bar colours once (never per frame), so a track change
+   * recolours the spectrum with nothing in the frame loop to recompute.
+   */
+  visualizerRef?.setPalette(palette);
 }
+
+/**
+ * The one visualiser this app has, so the palette above can reach it without threading a handle
+ * through every sign-in path.
+ */
+let visualizerRef: ReturnType<typeof attachVisualizer> | null = null;
 
 /* ------------------------------------------------------------------- state */
 
 /*
  * The palette hook is a plain callback, not an object with an `apply` method.
  *
- * It was `interface PaletteHooks { apply(palette: Palette): void }` until v1.4.1, and that shape is
- * a trap: **a function satisfies it structurally**, because `(palette: Palette) => void` already
- * has an `apply` — `Function.prototype.apply`. So `restoreSession(ctx, shell, applyPalette)` — the
- * cold-start path, i.e. every normal launch — type-checked fine, `hooks.apply(DEFAULT_PALETTE)`
+ * v1.4.1 fixed this on `main` and v1.5 branched away from it, so the bug came back with the pager:
+ * until v1.6 this file declared `interface PaletteHooks { apply(palette: Palette): void }`, and that
+ * shape is a trap — **a function satisfies it structurally**, because `(palette: Palette) => void`
+ * already has an `apply`: `Function.prototype.apply`. So `restoreSession(ctx, shell, applyPalette)` —
+ * the cold-start path, i.e. every normal launch — type-checked fine, `hooks.apply(DEFAULT_PALETTE)`
  * then ran `applyPalette(undefined)`, and `applyPaletteVars` threw on `palette.primary` inside a
- * floating promise: no theme, no error anyone could see, from v1.1 to v1.4. Passing the function
- * itself removes the shape that made the mistake possible, in both directions.
+ * floating promise: no theme, no error anyone could see. Passing the function itself removes the
+ * shape that made the mistake possible, in both directions.
  */
 type ApplyPalette = (palette: Palette) => void;
 
@@ -556,11 +1261,53 @@ async function restoreSession(ctx: AppContext, shell: Shell, applyPalette: Apply
 }
 
 /**
+ * Bring back exactly what was playing, without asking the server first.
+ *
+ * The device's own snapshot (`src/storage/session.ts`) is written every few seconds while a track
+ * plays and holds the play order as well as the position, so a relaunch lands on the same second of
+ * the same track in the same order. The server's `savePlayQueue` — which v1.6 restored from — is
+ * written debounced on a track change, so it knows the right *track* but only an approximate
+ * position; it stays as the fallback for a fresh install or a snapshot older than 12 hours.
+ *
+ * If the snapshot says it was playing, it is started again: that is what "the resume is exact" has
+ * to mean when the OS killed the app in the background. On the web the browser will refuse audio
+ * without a gesture — that is not an error, the queue simply stays restored and paused, which is
+ * what v1.1 promised.
+ */
+async function restorePlayQueue(ctx: AppContext): Promise<boolean> {
+  const queue = ctx.queue;
+  if (!queue) return false;
+  const snapshot = loadSnapshot();
+  if (snapshot) {
+    queue.restoreExact(
+      {
+        songs: snapshot.songs,
+        order: snapshot.order,
+        cursor: snapshot.cursor,
+        shuffle: snapshot.shuffle,
+        repeat: snapshot.repeat,
+        context: snapshot.context,
+      },
+      snapshot.positionMs,
+    );
+    if (snapshot.playing) {
+      try {
+        await queue.start();
+      } catch (error) {
+        console.warn('[navilite] could not start the restored track; leaving it paused', error);
+      }
+    }
+    return true;
+  }
+  return restoreServerQueue(ctx);
+}
+
+/**
  * The queue the server saved for us (`savePlayQueue` on every track change), put back
  * without starting playback. This is what makes a cold start land on the spectrum screen
  * for the track that was playing, as the owner asked.
  */
-async function restorePlayQueue(ctx: AppContext): Promise<boolean> {
+async function restoreServerQueue(ctx: AppContext): Promise<boolean> {
   const client = ctx.library?.client;
   const queue = ctx.queue;
   if (!client || !queue) return false;
@@ -611,6 +1358,16 @@ async function syncPalette(ctx: AppContext, applyPalette: ApplyPalette): Promise
   if (!song || song.id === currentPaletteSong) return;
   currentPaletteSong = song.id;
   const url = ctx.library?.coverUrl(song.coverArt ?? song.albumId, 256) ?? null;
+  /*
+   * v1.9.0 — the reset is deferred past the task that asked for it, and the *reason* is measured
+   * rather than assumed: the first tap of a session paints in ~55 ms, and every tap after it in
+   * under a millisecond (Chrome at 393 x 852, against the mock — `test/slow-link-browser.test.ts`
+   * quotes both). A deferred write cannot be more than a small part of a burst that size, but a
+   * full-document style recalculation has no business inside the task that owes the finger a
+   * highlight: the reset only exists so the previous track's colours do not sit under the new one
+   * for the length of the artwork read, and nothing is lost by paying for it one macrotask later.
+   */
+  await new Promise((resolve) => setTimeout(resolve, 0));
   applyPalette(DEFAULT_PALETTE);
   const palette = await paletteFromArtwork(url);
   if (ctx.queue?.currentSong?.id === song.id) applyPalette(palette);
@@ -662,10 +1419,35 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
   const [head = 'artists', id, extra] = routeParts();
   setActiveTab(shell, head);
   const nowOpen = head === 'now';
-  shell.nowOverlay.classList.toggle('hidden', !nowOpen);
+  const stacked = STACKED_ROUTES.has(head);
+  /*
+   * v1.6: the pager's surface is the panes and the list behind them — never a stacked screen.
+   *
+   * Settings and the changelog are pushed on top of a screen, not beside one, so a horizontal drag
+   * there has nothing to page to and must be inert (the owner: *"when im in settings, swiping left
+   * or right seems to bring me to the spectrum or lyrics"*). The pager's own `setEnabled` also drops
+   * any drag that was in flight, so the gate cannot be crossed mid-gesture.
+   */
+  shell.pager.setEnabled(!stacked);
+  // v1.5: the route *is* the pager's position — `#/now` is the spectrum pane and `#/now/lyrics` the
+  // lyrics, so the router is what moves the pager (and the back button walks the panes).
+  if (nowOpen) showNowScreen(shell, paneOfRoute(head, id));
+  else hideNowScreen(shell);
   // v1.4: the overlay freezes what is under it, and closing it puts that view back where it was.
   setScrollLock(shell, nowOpen);
-  if (!nowOpen && head !== 'connect') shell.lastBrowseRoute = location.hash || DEFAULT_ROUTE;
+  if (stacked) {
+    /*
+     * Remember what was on screen when the stacked screen was pushed, for its right swipe back.
+     * `viewRoute` still holds the previous screen at this point (it is reassigned below), and a
+     * stacked screen opened *from* another stacked screen keeps the original opener.
+     */
+    const previousHead = (shell.viewRoute ?? '').replace(/^#\/?/, '').split('/')[0] ?? '';
+    if (!STACKED_ROUTES.has(previousHead)) {
+      shell.stackedFrom = shell.viewRoute || shell.lastBrowseRoute || DEFAULT_ROUTE;
+    }
+  } else if (!nowOpen) {
+    shell.lastBrowseRoute = location.hash || DEFAULT_ROUTE;
+  }
   // The view behind the now screen is only rendered when it is not covered: it saves a
   // network round trip on a cold start that lands straight on the spectrum.
   if (nowOpen && ctx.queue?.currentSong) {
@@ -899,15 +1681,7 @@ async function renderArtists(ctx: AppContext, shell: Shell): Promise<void> {
   }
   replace(
     listHost,
-    ...artists.map((artist) =>
-      h('button', { class: 'row', onclick: () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`) }, [
-        cover(ctx.library!.coverUrl(artist.coverArt ?? artist.id, 128), 'thumb', artist.name),
-        h('div', { class: 'row-text' }, [
-          h('span', { class: 'row-title', text: artist.name }),
-          h('span', { class: 'row-sub', text: `${artist.albumCount ?? 0} album${artist.albumCount === 1 ? '' : 's'}` }),
-        ]),
-      ]),
-    ),
+    ...artists.map((artist) => artistRow(ctx, artist)),
   );
 }
 
@@ -936,11 +1710,28 @@ async function renderAlbums(ctx: AppContext, shell: Shell): Promise<void> {
 }
 
 function albumCard(ctx: AppContext, album: Album): HTMLElement {
-  return h('button', { class: 'card', onclick: () => (location.hash = `#/album/${encodeURIComponent(album.id)}`) }, [
-    cover(ctx.library!.coverUrl(album.coverArt ?? album.id, 256), 'card-cover', album.name),
-    h('span', { class: 'card-title', text: album.name }),
-    h('span', { class: 'card-sub', text: album.artist ?? '' }),
-  ]);
+  return bindTap(
+    h('button', { class: 'card', 'aria-label': `Open ${album.name}` }, [
+      cover(ctx.library!.coverUrl(album.coverArt ?? album.id, 256), 'card-cover', album.name),
+      h('span', { class: 'card-title', text: album.name }),
+      h('span', { class: 'card-sub', text: album.artist ?? '' }),
+    ]),
+    () => (location.hash = `#/album/${encodeURIComponent(album.id)}`),
+  );
+}
+
+/** An artist in a list: a tap opens the artist, a drag that scrolls the list does not. */
+function artistRow(ctx: AppContext, artist: Artist): HTMLElement {
+  return bindTap(
+    h('button', { class: 'row', 'aria-label': `Open ${artist.name}` }, [
+      cover(ctx.library!.coverUrl(artist.coverArt ?? artist.id, 128), 'thumb', artist.name),
+      h('div', { class: 'row-text' }, [
+        h('span', { class: 'row-title', text: artist.name }),
+        h('span', { class: 'row-sub', text: `${artist.albumCount ?? 0} album${artist.albumCount === 1 ? '' : 's'}` }),
+      ]),
+    ]),
+    () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`),
+  );
 }
 
 async function renderArtist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
@@ -1037,13 +1828,17 @@ async function renderPlaylists(ctx: AppContext, shell: Shell): Promise<void> {
 }
 
 function playlistRow(ctx: AppContext, playlist: Playlist): HTMLElement {
-  return h('button', { class: 'row', onclick: () => (location.hash = `#/playlist/${encodeURIComponent(playlist.id)}`) }, [
-    cover(ctx.library!.coverUrl(playlist.coverArt ?? playlist.id, 128), 'thumb', playlist.name),
-    h('div', { class: 'row-text' }, [
-      h('span', { class: 'row-title', text: playlist.name }),
-      h('span', { class: 'row-sub', text: `${playlist.songCount ?? 0} tracks · ${formatDuration(playlist.duration)}` }),
+  const row = bindTap(
+    h('button', { class: 'row', 'aria-label': `Open ${playlist.name}` }, [
+      cover(ctx.library!.coverUrl(playlist.coverArt ?? playlist.id, 128), 'thumb', playlist.name),
+      h('div', { class: 'row-text' }, [
+        h('span', { class: 'row-title', text: playlist.name }),
+        h('span', { class: 'row-sub', text: `${playlist.songCount ?? 0} tracks · ${formatDuration(playlist.duration)}` }),
+      ]),
     ]),
-  ]);
+    () => (location.hash = `#/playlist/${encodeURIComponent(playlist.id)}`),
+  );
+  return row;
 }
 
 async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
@@ -1091,7 +1886,7 @@ async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {
   pageTitle(shell, 'Favourites', `${songs.length} tracks · ${albums.length} albums · ${artists.length} artists`, [playAll]);
 
   if (songs.length === 0 && albums.length === 0 && artists.length === 0) {
-    shell.view.append(h('p', { class: 'muted', text: 'Nothing starred yet. Use the star on any album or track.' }));
+    shell.view.append(h('p', { class: 'muted', text: 'Nothing starred yet. Use the star on an album — its tracks come along.' }));
     return;
   }
 
@@ -1102,10 +1897,13 @@ async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {
         'div',
         { class: 'grid' },
         ...artists.map((artist: Artist) =>
-          h('button', { class: 'card', onclick: () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`) }, [
-            cover(ctx.library!.coverUrl(artist.coverArt ?? artist.id, 256), 'card-cover', artist.name),
-            h('span', { class: 'card-title', text: artist.name }),
-          ]),
+          bindTap(
+            h('button', { class: 'card', 'aria-label': `Open ${artist.name}` }, [
+              cover(ctx.library!.coverUrl(artist.coverArt ?? artist.id, 256), 'card-cover', artist.name),
+              h('span', { class: 'card-title', text: artist.name }),
+            ]),
+            () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`),
+          ),
         ),
       ),
     );
@@ -1151,9 +1949,12 @@ async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promis
           ...albums.map((album) => albumCard(ctx, album)),
           artists.length > 0 ? h('h2', { class: 'section', text: 'Artists' }) : null,
           ...artists.map((artist: Artist) =>
-            h('button', { class: 'row', onclick: () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`) }, [
-              h('div', { class: 'row-text' }, [h('span', { class: 'row-title', text: artist.name })]),
-            ]),
+            bindTap(
+              h('button', { class: 'row', 'aria-label': `Open ${artist.name}` }, [
+                h('div', { class: 'row-text' }, [h('span', { class: 'row-title', text: artist.name })]),
+              ]),
+              () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`),
+            ),
           ),
           songs.length + albums.length + artists.length === 0 ? h('p', { class: 'muted', text: 'Nothing found.' }) : null,
         );
@@ -1176,27 +1977,6 @@ async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promis
 }
 
 function renderSettings(ctx: AppContext, shell: Shell): void {
-  const preferenceSelect = h('select', { class: 'field inline' }, [
-    ...(
-      [
-        ['auto', 'Automatic — real spectrum in the foreground, native engine in the background'],
-        ['web', 'Web Audio only — always the real spectrum (background playback depends on the platform)'],
-        ['native', 'Native engine only — background and lock screen first, visualiser is the album-art theme'],
-      ] as Array<[PlaybackPreference, string]>
-    ).map(([value, label]) => {
-      const option = h('option', { value, text: label });
-      if (ctx.settings.playback === value) option.selected = true;
-      return option;
-    }),
-  ]);
-  preferenceSelect.addEventListener('change', () => {
-    const preference = preferenceSelect.value as PlaybackPreference;
-    ctx.settings = { ...ctx.settings, playback: preference };
-    saveSettings(ctx.settings);
-    ctx.engine.setPreference(preference);
-    ctx.toast('Playback preference saved');
-  });
-
   const whatsNew = h('button', { class: 'button', text: "What's new" }, [icon(ICONS.changelog, 16)]);
   whatsNew.addEventListener('click', () => (location.hash = '#/changelog'));
 
@@ -1236,8 +2016,7 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
         ? 'Stored by the operating system (Keychain / Android Keystore), not in web storage.'
         : 'Plain web storage. That is the honest limit of an installable PWA on iOS and Android — the wrapped builds avoid it.' }),
       h('h2', { class: 'section', text: 'Playback and visualiser' }),
-      preferenceSelect,
-      h('p', { class: 'muted small', text: 'Web Audio does not survive backgrounding on iOS, so the real spectrum is a foreground feature there. Android keeps Web Audio alive while playing.' }),
+      h('p', { class: 'muted small', text: 'One audio engine, chosen by the app rather than by a setting: the phone\'s own player in the installed app, the page itself in a browser. The spectrum reads the same player the sound comes from, so the bars are always in step with what you hear.' }),
       h('h2', { class: 'section', text: 'Lyrics' }),
       h('p', { class: 'muted small', text: `Lyrics come from your own library — the lyrics file that sits next to the song — and are cached on this device only (${ctx.lyrics.cachedTracks} track${ctx.lyrics.cachedTracks === 1 ? '' : 's'} right now). Nothing is bundled with the app and nothing is fetched from anyone else.` }),
       h('div', { class: 'row' }, [clearLyrics]),
@@ -1276,58 +2055,58 @@ function songRow(
   showAlbum: boolean,
   onRemove?: () => void,
 ): HTMLElement {
-  const row = h('div', { class: 'row song' }, [
+  /*
+   * v1.5: the whole row is the tap target — "tapping anywhere on a song row must play that song".
+   * The play mark is the row's own affordance (`span.row-play`) rather than a second control inside
+   * a control, and the favourite star is gone from rows: the album screen still stars albums, the
+   * Favourites screen still lists what is starred, and the row's own highlight is untouched.
+   */
+  const row = bindTap(
     h(
       'button',
       {
-        class: 'row-play',
+        class: 'row song',
         'aria-label': `Play ${song.title}`,
-        onclick: () => {
-          void ctx.queue!.play(items, index, context);
-          openNow();
-        },
       },
-      [icon(ICONS.play, 18)],
+      [
+        h('span', { class: 'row-play' }, [icon(ICONS.play, 18)]),
+        h('div', { class: 'row-text' }, [
+          h('span', { class: 'row-title', text: song.title }),
+          h('span', { class: 'row-sub', text: [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ') }),
+        ]),
+        h('span', { class: 'row-time', text: formatDuration(song.duration) }),
+      ],
     ),
-    h('div', { class: 'row-text' }, [
-      h('span', { class: 'row-title', text: song.title }),
-      h('span', { class: 'row-sub', text: [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ') }),
-    ]),
-    h('span', { class: 'row-time', text: formatDuration(song.duration) }),
-    h(
-      'button',
-      {
-        class: 'row-star',
-        'aria-label': song.starred ? 'Remove from favourites' : 'Add to favourites',
-        onclick: () => {
-          void (async () => {
-            try {
-              await ctx.library!.setStarred(song.id, 'song', !song.starred);
-              song.starred = song.starred ? undefined : new Date().toISOString();
-              replace(starHost, starIcon(Boolean(song.starred)));
-            } catch (error) {
-              ctx.toast(errorText(error), 'error');
-            }
-          })();
-        },
-      },
-      [],
-    ),
-  ]);
-  const starHost = row.querySelector('button.row-star') as HTMLButtonElement;
-  starHost.append(starIcon(Boolean(song.starred)));
-  if (onRemove) {
-    row.append(
-      h('button', { class: 'row-remove', 'aria-label': 'Remove from playlist', onclick: onRemove }, [icon(ICONS.close, 16)]),
-    );
-  }
+    () => {
+      /*
+       * v1.9.0 — the tap paints first, and the network comes second.
+       *
+       * The order here is the whole fix: `select` is synchronous (no await, no fetch, no I/O) and
+       * it is what draws the row highlight, the title, the artist, the artwork and the loading
+       * state; only then does `start` reach for the stream. The old line went straight into
+       * `queue.play`, so on a slow link every one of those things sat on the *previous* track while
+       * the player resolved a URL through the relay, and the screen looked dead.
+       */
+      ctx.queue!.select(items, index, context);
+      openNow();
+      void ctx.queue!.start();
+    },
+  );
   let rows = ctx.rows.get(song.id);
   if (!rows) {
     rows = new Set();
     ctx.rows.set(song.id, rows);
   }
   rows.add(row);
-  return row;
+  if (!onRemove) return row;
+  // Remove-from-playlist cannot live inside the row any more — the row is one button — so it sits
+  // beside it, in a wrapper that keeps the two on one line.
+  return h('div', { class: 'row-shell' }, [
+    row,
+    h('button', { class: 'row-remove', 'aria-label': `Remove ${song.title} from this playlist`, onclick: onRemove }, [
+      icon(ICONS.close, 16),
+    ]),
+  ]);
 }
 
 /**
@@ -1336,12 +2115,25 @@ function songRow(
  */
 function updateRowHighlight(ctx: AppContext, shell: Shell): void {
   const current = ctx.queue?.currentSong?.id ?? null;
-  if (current === shell.highlighted) {
+  /*
+   * v1.9.0: while a tap is being answered, the row it landed on says so. The loading state has to
+   * be visible *in the paint the tap produces* — a tap that shows nothing for seconds reads as a
+   * dead screen — and `queue.isLoading` is true from that same synchronous paint until the engine
+   * has the stream.
+   */
+  const loading = (ctx.queue?.isLoading ?? false) || ctx.engine.status().state === 'loading';
+  if (current === shell.highlighted && loading === shell.highlightedLoading) {
     if (current !== null) markRows(ctx, current);
     return;
   }
-  for (const [id, rows] of ctx.rows) for (const row of rows) row.classList.toggle('playing', id === current);
+  for (const [id, rows] of ctx.rows) {
+    for (const row of rows) {
+      row.classList.toggle('playing', id === current);
+      row.classList.toggle('loading', id === current && loading);
+    }
+  }
   shell.highlighted = current;
+  shell.highlightedLoading = loading;
 }
 
 function markRows(ctx: AppContext, id: string): void {
@@ -1353,6 +2145,23 @@ function markRows(ctx: AppContext, id: string): void {
 function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): void {
   const song = ctx.queue?.currentSong ?? null;
   const visible = song != null;
+  /*
+   * v1.9.0: the loading state is a thing the screen shows, not a thing that is inferred from a
+   * stalled transport. `queue.isLoading` is set by the tap's own synchronous paint, so the row,
+   * the bar and the now screen carry it from the instant of the tap until the engine has the
+   * stream. Nothing here waits on the network: this function reads state and writes classes.
+   */
+  const loading = (ctx.queue?.isLoading ?? false) || status.state === 'loading';
+  /**
+   * v1.9.0 — the cap, where the owner can see it.
+   *
+   * *"never silently cap quality"*: when the app is asking Navidrome for a smaller stream (because
+   * the link measured slow) the bar says so, next to the mode. On a fast link this is `null` and
+   * nothing is shown because nothing is capped — the original file plays.
+   */
+  const cap = ctx.queue?.streamKbps ?? null;
+  shell.playerBar.classList.toggle('loading', loading);
+  shell.nowOverlay.classList.toggle('loading', loading);
   shell.playerBar.classList.toggle('hidden', !visible);
   updateRowHighlight(ctx, shell);
   if (!visible) return;
@@ -1391,7 +2200,16 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
     replace(shell.nowRepeat, icon(repeat === 'one' ? ICONS.repeatOne : ICONS.repeat, 20));
   }
 
-  if (!shell.scrubbing) {
+  if (shell.scrubbing && shell.scrubMs !== null) {
+    /*
+     * A finger is on a seek bar: the label is the *destination*, not the position (v1.7.2). Written
+     * here as well as on every move, so a status event that lands mid-drag cannot pull the number
+     * back out from under the thumb.
+     */
+    const text = formatTime(shell.scrubMs / 1000);
+    shell.barPosition.textContent = text;
+    shell.nowPosition.textContent = text;
+  } else if (!shell.scrubbing) {
     const ratio = durationMs > 0 ? Math.min(1, positionMs / durationMs) : 0;
     shell.barProgress.value = String(Math.round(ratio * 1000));
     shell.nowProgress.value = String(Math.round(ratio * 1000));
@@ -1401,8 +2219,8 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   shell.barDuration.textContent = formatTime((durationMs || 0) / 1000);
   shell.nowDuration.textContent = formatTime((durationMs || 0) / 1000);
 
-  shell.barChip.textContent = status.spectrum ? 'spectrum' : status.backend === 'native' ? 'native audio' : 'theme';
-  shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : 'fallback'}`;
+  shell.barChip.textContent = loading ? 'loading…' : `${status.spectrum ? 'spectrum' : status.backend === 'native' ? 'native audio' : 'theme'}${cap === null ? '' : ` · ${cap} kbps`}`;
+  shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : 'fallback'}${cap === null ? '' : ' capped'}`;
 
   shell.lyrics.position(positionMs);
 }

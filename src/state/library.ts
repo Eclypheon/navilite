@@ -1,8 +1,18 @@
 /** Library reads, with a small cache so navigating back and forth stays instant. */
 import { SubsonicClient } from '../api/subsonic.ts';
 import type { Album, AlbumWithSongs, Artist, ArtistWithAlbums, Playlist, PlaylistWithEntries, SearchResult3, Song, StarKind, Starred2 } from '../api/types.ts';
+import type { ThroughputSample } from './bitrate.ts';
 
 export type AlbumListType = 'alphabeticalByName' | 'newest' | 'recent' | 'frequent' | 'starred';
+
+/**
+ * How much of the *next* track is pulled ahead of time (v1.9.0, queue-ahead).
+ *
+ * Half a megabyte is roughly 30 s of a 128 kbps stream and a handful of seconds of a 320 — far
+ * more than the "token few KB" the ask rules out. The transfer is measured as it goes, which is
+ * where the app's only honest reading of the link comes from (`src/state/bitrate.ts`).
+ */
+export const PREFETCH_BYTES = 512 * 1024;
 
 export class Library {
   client: SubsonicClient;
@@ -25,8 +35,62 @@ export class Library {
     return coverArtId ? this.client.coverArtUrl(coverArtId, size) : null;
   }
 
-  streamUrl(song: Song): string {
-    return this.client.streamUrl(song.id);
+  /**
+   * The audio URL for a track — with the bitrate cap, when there is one (v1.9.0).
+   *
+   * `maxBitRate` is the whole of the slow-link fix: Navidrome transcodes to that rate on demand,
+   * the parameter is per request, and nothing about the server changes. `undefined` means the
+   * original file, which is what a link that has been measured as fast gets.
+   */
+  streamUrl(song: Song, maxBitRate?: number | null): string {
+    return this.client.streamUrl(song.id, maxBitRate == null ? {} : { maxBitRate });
+  }
+
+  /**
+   * Pull the head of the next track while the current one plays (v1.9.0, queue-ahead).
+   *
+   * What this buys on the link the owner actually has — a phone off wifi, reaching the house
+   * through a relay:
+   *   - the TCP/TLS connection to the server is opened and warmed *now*, so the stream that
+   *     follows does not pay a full round trip through the relay before its first byte arrives;
+   *   - Navidrome has already started transcoding the next track, so the request that matters
+   *     answers from work that is already done;
+   *   - and the bytes that come back are the app's only real measurement of the link, which is
+   *     what the bitrate decision is built on.
+   *
+   * What it deliberately does *not* do: touch the queue, change what is playing, or re-order
+   * anything. It reads `url` and reports one sample. `signal` is the cancellation — a prefetch the
+   * listener has moved on from is aborted, so exactly one of these is ever in flight.
+   */
+  async prefetch(url: string, signal: AbortSignal, onSample: (sample: ThroughputSample) => void): Promise<void> {
+    const started = Date.now();
+    let bytes = 0;
+    try {
+      const response = await fetch(url, {
+        signal,
+        // The head of the file, not the whole of it: the buffer is for the start of the next track.
+        headers: { Range: `bytes=0-${PREFETCH_BYTES - 1}` },
+      });
+      if (!response.ok || !response.body) return;
+      const reader = response.body.getReader();
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value?.byteLength ?? 0;
+        if (bytes >= PREFETCH_BYTES) {
+          // Enough is enough: the rest of the track belongs to the player, later.
+          await reader.cancel();
+          break;
+        }
+      }
+      onSample({ bytes, ms: Date.now() - started });
+    } catch {
+      /*
+       * A cancelled prefetch is not an error and must not reach the console as one, and a failed
+       * one is not worth a warning either: it is an optimisation, and the player's own load is
+       * what has to work. Nothing is reported and nothing is retried.
+       */
+    }
   }
 
   invalidate(): void {

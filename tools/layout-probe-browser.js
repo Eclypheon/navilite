@@ -156,6 +156,274 @@
     };
   }
 
+  /**
+   * The visual viewport, which is where an iOS focus-zoom shows up and *nowhere else*.
+   *
+   * v1.5. The owner reported "when i'm in the settings screen i still seem to be able to scroll
+   * horizontally i think the dropdown option could be causing some overflow" — and there is no
+   * layout overflow on that screen at 393 px (measured, in both engines). What there *is*: iOS
+   * Safari zooms the page in when a form control smaller than 16 px takes focus, which makes the
+   * layout wider than the screen and pannable sideways. The zoom lives in `visualViewport.scale`,
+   * so that is what a run has to read; `documentElement.scrollWidth` stays clean throughout, which
+   * is why a width-only audit can call the screen clean while the owner is panning it.
+   */
+  function viewportState() {
+    var vv = window.visualViewport;
+    return {
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      vvWidth: vv ? round2(vv.width) : null,
+      vvHeight: vv ? round2(vv.height) : null,
+      vvScale: vv ? round2(vv.scale) : null,
+      docClientWidth: document.documentElement.clientWidth,
+      docScrollWidth: document.documentElement.scrollWidth,
+    };
+  }
+
+  /**
+   * Both surfaces the audit measures, kept apart.
+   *
+   * A single maximum hides which one moved, and the two mean different things: a *document* wider
+   * than the screen is a page the owner can pan, while a *scroll surface* wider than its box is the
+   * screen he is on being draggable sideways inside its own frame. Only naming them separately says
+   * which fix the reading asks for.
+   */
+  function overflowSurfaces() {
+    var surface = scrollSurfaces().scroller;
+    return {
+      surface: surface ? selectorFor(surface) : null,
+      surfaceClientWidth: surface ? surface.clientWidth : null,
+      surfaceScrollWidth: surface ? surface.scrollWidth : null,
+      surfaceOverflow: horizontalOverflowOf(surface),
+      documentOverflow: horizontalOverflowOf(document.documentElement),
+    };
+  }
+
+  /**
+   * The element inside the scroller with the most to scroll sideways.
+   *
+   * `actualOffenders` only names boxes whose *rectangle* leaves the screen, and a control with a long
+   * option in it is not one of those: its box fits, its content does not. That is the shape that
+   * widens a scroller without any element being visibly off-screen.
+   */
+  function widestInsideSurface() {
+    var surface = scrollSurfaces().scroller;
+    if (!surface) return null;
+    var best = null;
+    var all = surface.querySelectorAll('*');
+    for (var i = 0; i < all.length; i += 1) {
+      var over = horizontalOverflowOf(all[i]);
+      if (over > 0 && (!best || over > best.overflow)) {
+        best = {
+          overflow: over,
+          selector: selectorFor(all[i]),
+          clientWidth: all[i].clientWidth,
+          scrollWidth: all[i].scrollWidth,
+          rectWidth: round2(all[i].getBoundingClientRect().width),
+        };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Focus a form control the way a finger does, and report what the viewport did about it.
+   *
+   * `value` is optional: a long value is how "a long value in the field" gets measured rather than
+   * assumed. The control is blurred again afterwards so the next step starts from a clean state.
+   */
+  function focusProbe(selector, value) {
+    var el = document.querySelector(selector);
+    if (!el) return Promise.reject(new Error('no element for ' + selector));
+    if (typeof value === 'string') {
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    var before = viewportState();
+    var surfacesBefore = overflowSurfaces();
+    var fontSize = getComputedStyle(el).fontSize;
+    el.focus();
+    return new Promise(function (resolve) {
+      setTimeout(resolve, 700);
+    }).then(function () {
+      var after = viewportState();
+      var surfacesAfter = overflowSurfaces();
+      var detail = measure();
+      el.blur();
+      return {
+        selector: selector,
+        value: typeof value === 'string' ? value.slice(0, 80) : null,
+        fontSize: fontSize,
+        before: before,
+        after: after,
+        /** A ratio, not a boolean: 1.07 is an iOS focus-zoom, 1 is not. */
+        zoom: Math.round(((after.vvScale || 1) / (before.vvScale || 1)) * 1000) / 1000,
+        surfaceBeforeFocus: surfacesBefore,
+        surfaceWhileFocused: surfacesAfter,
+        /** The focused control's own box: a native control fits, its content may not. */
+        control: {
+          tag: el.tagName,
+          className: String(el.className || ''),
+          clientWidth: el.clientWidth,
+          scrollWidth: el.scrollWidth,
+          rectWidth: round2(el.getBoundingClientRect().width),
+        },
+        widestWhileFocused: widestInsideSurface(),
+        overflowWhileFocused: detail.horizontalOverflow,
+        offendersWhileFocused: detail.actualOffenders.map(function (item) {
+          return item.selector;
+        }),
+      };
+    });
+  }
+
+  /**
+   * Can the surface actually be dragged sideways, and by how much?
+   *
+   * v1.5 follow-up. A `scrollWidth` larger than a `clientWidth` is a *claim* that there is
+   * something to scroll; what the owner can do with his finger is the test. An element with a
+   * scrollable overflow region is scrollable by pointer, by touch and by script, so pushing it and
+   * reading where it landed is the reading that says "draggable" without an assumption. `overflowX`
+   * comes with it, because `hidden` and `clip` are the two values that put a box out of a finger's
+   * reach, and only the second one also takes it out of a script's.
+   */
+  function surfaceSideScroll(surface) {
+    var box = surface || scrollSurfaces().scroller;
+    if (!box) return null;
+    var style = getComputedStyle(box);
+    var before = box.scrollLeft;
+    box.scrollLeft = 9999;
+    var reached = box.scrollLeft;
+    box.scrollLeft = before;
+    return {
+      selector: selectorFor(box),
+      overflowX: style.overflowX,
+      overflowY: style.overflowY,
+      clientWidth: box.clientWidth,
+      scrollWidth: box.scrollWidth,
+      /** How far a push actually moved it, in px: 0 means there is nothing to scroll. */
+      sideScroll: round2(reached),
+      restoredTo: round2(box.scrollLeft),
+    };
+  }
+
+  /**
+   * The settings screen's 301 px, taken apart.
+   *
+   * The v1.5 run measured the settings scroll surface at `393 -> 694 px` with the playback dropdown
+   * focused, named no element, and left it open. `widestWhileFocused` names the element the width
+   * comes from; this goes one step further and *tests candidates in the shipping engine, in one
+   * run*: each rule is applied to the live page, the surface is re-measured and pushed sideways, and
+   * the rule is removed again — so the answer is a measurement rather than a belief about what
+   * WebKit does with a `<select>` whose content is wider than its box.
+   *
+   * The option labels are measured with a hidden ruler at the select's own font, because "the
+   * longest option is 671 px of text" is the other half of the story and it is checkable.
+   */
+  function settingsOverflowProbe(candidates) {
+    var select = document.querySelector('select.field');
+    var surface = scrollSurfaces().scroller;
+    if (!select || !surface) {
+      return Promise.reject(new Error('no playback select or no scroll surface to measure'));
+    }
+    var style = document.createElement('style');
+    style.setAttribute('data-probe', 'settings-overflow');
+    document.head.appendChild(style);
+
+    var sample = function () {
+      // Force layout, then read the surface, its widest descendant, and its real side-scroll.
+      void surface.offsetWidth;
+      return {
+        surfaceOverflow: horizontalOverflowOf(surface),
+        widest: widestInsideSurface(),
+        sideScroll: surfaceSideScroll(surface),
+      };
+    };
+
+    var baseline = sample();
+    var rules = candidates || [
+      { label: 'baseline (the shipping CSS)', css: '' },
+      {
+        label: 'the pre-fix control: select.field { overflow: visible }',
+        css: 'select.field { overflow: visible; }',
+        control: true,
+      },
+      { label: 'select.field { overflow: hidden }', css: 'select.field { overflow: hidden; }' },
+      { label: 'select.field { overflow-x: hidden }', css: 'select.field { overflow-x: hidden; }' },
+      {
+        label: 'select.field { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }',
+        css: 'select.field { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
+      },
+      { label: 'select.field { contain: inline-size }', css: 'select.field { contain: inline-size; }' },
+      { label: 'select.field { appearance: none }', css: 'select.field { appearance: none; }' },
+      { label: '.field.inline { width: 100% }', css: '.field.inline { width: 100%; }' },
+      { label: '.view-scroll { overflow-x: hidden }', css: '.view-scroll { overflow-x: hidden; }' },
+      { label: '.view-scroll { overflow-x: clip }', css: '.view-scroll { overflow-x: clip; }' },
+      {
+        label: 'the two together: select.field { overflow: hidden } + .view-scroll { overflow-x: hidden }',
+        css: 'select.field { overflow: hidden; } .view-scroll { overflow-x: hidden; }',
+      },
+    ];
+    var results = [];
+    for (var i = 0; i < rules.length; i += 1) {
+      style.textContent = rules[i].css;
+      var reading = sample();
+      results.push({
+        label: rules[i].label,
+        css: rules[i].css || null,
+        control: rules[i].control === true,
+        surfaceOverflow: reading.surfaceOverflow,
+        widest: reading.widest ? reading.widest.selector + ' (+' + reading.widest.overflow + ' px)' : null,
+        sideScroll: reading.sideScroll,
+      });
+    }
+    style.textContent = '';
+    var restored = sample();
+    style.remove();
+
+    /* The labels themselves: a ruler at the select's own font, so the widest option is a number. */
+    var computed = getComputedStyle(select);
+    var ruler = document.createElement('span');
+    ruler.setAttribute('aria-hidden', 'true');
+    ruler.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;';
+    ruler.style.fontFamily = computed.fontFamily;
+    ruler.style.fontSize = computed.fontSize;
+    ruler.style.fontWeight = computed.fontWeight;
+    ruler.style.fontStyle = computed.fontStyle;
+    ruler.style.letterSpacing = computed.letterSpacing;
+    document.body.appendChild(ruler);
+    var options = [];
+    for (var oi = 0; oi < select.options.length; oi += 1) {
+      ruler.textContent = select.options[oi].textContent || '';
+      options.push({
+        index: oi,
+        selected: select.options[oi].selected,
+        width: round2(ruler.getBoundingClientRect().width),
+        text: (select.options[oi].textContent || '').slice(0, 60),
+      });
+    }
+    ruler.remove();
+
+    return Promise.resolve({
+      fontSize: computed.fontSize,
+      select: {
+        selector: 'select.field',
+        clientWidth: select.clientWidth,
+        scrollWidth: select.scrollWidth,
+        rectWidth: round2(select.getBoundingClientRect().width),
+        overflow: horizontalOverflowOf(select),
+      },
+      options: options,
+      baseline: baseline,
+      candidates: results,
+      /** The same reading with every rule removed: a candidate that only "worked" because the page
+       * was left in a changed state shows up here. */
+      restored: restored,
+      restoredMatchesBaseline: restored.surfaceOverflow === baseline.surfaceOverflow,
+    });
+  }
+
   /** Is the document wider than the viewport, and if so, which element did it? */
   function measure() {
     var vw = window.innerWidth;
@@ -180,6 +448,13 @@
       if (style.display === 'none' || style.visibility === 'hidden') continue;
       var rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) continue;
+      /*
+       * v1.5: an element entirely to the left of the viewport cannot make the page wider — it can
+       * only be a pane the pager has slid off the screen. Counting those as "offenders at left < 0"
+       * would bury the real ones in noise, so they are skipped by position: a box that has no
+       * pixels right of 0 has nothing to say about horizontal width.
+       */
+      if (rect.right <= 0.5) continue;
       if (rect.right > vw + 0.5 || rect.left < -0.5) {
         overflowers.push({
           selector: selectorFor(el),
@@ -243,6 +518,7 @@
       route: location.hash,
       innerWidth: vw,
       innerHeight: vh,
+      viewport: viewportState(),
       documentClientWidth: doc.clientWidth,
       documentScrollWidth: doc.scrollWidth,
       bodyScrollWidth: document.body.scrollWidth,
@@ -282,14 +558,164 @@
       if (lineHeight === 0) lineHeight = rect.height;
       if (rect.top >= box.top - 0.5 && rect.bottom <= box.bottom + 0.5) visible += 1;
     }
+    /*
+     * v1.5: the first line, measured against the panel's own top edge rather than eyeballed.
+     *
+     * The owner reported "the first lyric line is clipped by the top bar". Two things can do that:
+     * the line sitting above the panel, or the panel's own fade — `.lyrics` carries a mask that is
+     * transparent over its top 16 px, so a line whose box starts inside that band is drawn faded
+     * (which reads as clipped). `firstLineTop` is the gap between the panel's top and the first
+     * line's top, so both are one number; `firstLineInFade` is the mask's opaque start.
+     */
+    var firstBox = lines.length > 0 ? lines[0].getBoundingClientRect() : null;
     return {
       lines: lines.length,
       visibleLines: visible,
       lineHeight: Math.round(lineHeight * 100) / 100,
       fontSize: lines[0] ? getComputedStyle(lines[0]).fontSize : null,
       panelHeight: Math.round(box.height * 100) / 100,
+      panelTop: round2(box.top),
+      // The element that clips it, if any (the scroll container's own box top).
+      hostTop: round2(host.getBoundingClientRect().top),
+      firstLineTop: firstBox ? round2(firstBox.top) : null,
+      firstLineBottom: firstBox ? round2(firstBox.bottom) : null,
+      /** The mask is transparent for the first 16 px: a line starting inside it is drawn faded. */
+      firstLineInFade: firstBox ? firstBox.top - box.top < 16 : null,
+      firstLineFullyInside: firstBox ? firstBox.top >= box.top - 0.5 && firstBox.bottom <= box.bottom + 0.5 : null,
       coverVisible: coverBox ? coverBox.height > 0 : false,
       coverHeight: coverBox ? Math.round(coverBox.height * 100) / 100 : 0,
+    };
+  }
+
+  /**
+   * The v1.5 pager's own geometry, mid-gesture included.
+   *
+   * The panes are the evidence: a drag that only *ends* somewhere can be a post-hoc animation, so
+   * the harness reads these boxes while the finger is still down and checks that the incoming pane
+   * moved by the distance the finger did — and that the two layers still tile, edge to edge, so no
+   * empty space is ever exposed between them.
+   */
+  function nowGeometry() {
+    var box = function (selector) {
+      var el = document.querySelector(selector);
+      if (!el) return null;
+      var r = el.getBoundingClientRect();
+      var style = getComputedStyle(el);
+      return {
+        selector: selector,
+        left: round2(r.left),
+        top: round2(r.top),
+        right: round2(r.right),
+        bottom: round2(r.bottom),
+        width: round2(r.width),
+        height: round2(r.height),
+        translate: style.transform,
+        overflow: style.overflow,
+        scrollTop: round2(el.scrollTop),
+        scrollHeight: Math.round(el.scrollHeight),
+        clientHeight: Math.round(el.clientHeight),
+      };
+    };
+    var now = document.querySelector('.now');
+    return {
+      route: location.hash,
+      nowHidden: now ? now.classList.contains('hidden') : null,
+      pager: pagerState(),
+      now: box('.now'),
+      pages: box('.now-pages'),
+      spectrum: box('.now-page-spectrum'),
+      lyricsPane: box('.now-page-lyrics'),
+      panel: box('.lyrics'),
+      list: box('.view-scroll'),
+      activePill: (document.querySelector('.pill-option.active') || {}).textContent || null,
+      context: (document.querySelector('.now-context') || {}).textContent || null,
+      transport: document.querySelectorAll('.now-bar .transport').length,
+      /**
+       * v1.7.1: the seek bar's own box, so a harness can put a finger on it by geometry rather than
+       * by selector — a slider is dragged, not clicked, and where the drag starts is what decides
+       * whether the pager gets the gesture.
+       */
+      progress: box('.now-progress .progress'),
+    };
+  }
+
+  /**
+   * What a finger would land on, at the centre of every control that has to keep working mid-drag.
+   *
+   * The (x/y) line, the transport and the pill sit *outside* the strip the panes slide in, which is
+   * the whole reason they are still usable while a screen is arriving. Hit-testing them with the
+   * finger still down is the honest form of that claim.
+   */
+  function controlHitTest() {
+    var selectors = ['.now-context', '.now-bar .transport.big', '.pill-option.active', '.now-progress'];
+    var out = [];
+    for (var i = 0; i < selectors.length; i += 1) {
+      var el = document.querySelector(selectors[i]);
+      if (!el) {
+        out.push({ selector: selectors[i], found: false });
+        continue;
+      }
+      var r = el.getBoundingClientRect();
+      var x = Math.round(r.left + r.width / 2);
+      var y = Math.round(r.top + r.height / 2);
+      var hit = document.elementFromPoint(x, y);
+      out.push({
+        selector: selectors[i],
+        found: true,
+        x: x,
+        y: y,
+        hit: hit ? selectorFor(hit) : null,
+        insideControl: !!(hit && (hit === el || el.contains(hit))),
+        insideNow: !!(hit && hit.closest && hit.closest('.now')),
+        text: (el.textContent || '').slice(0, 60),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The lyrics panel's own scroll, the line that is lit, and where the *next* line is.
+   *
+   * v1.5 asks the follow to lead by one line — the upcoming line should be readable before the song
+   * reaches it — so the upcoming line's box is what gets checked, not the active one's.
+   */
+  function lyricsFollowState() {
+    var host = document.querySelector('.lyrics');
+    if (!host) return null;
+    var box = host.getBoundingClientRect();
+    var nodes = Array.prototype.slice.call(host.querySelectorAll('.lyric-line'));
+    var active = host.querySelector('.lyric-line.active');
+    var activeIndex = active ? nodes.indexOf(active) : -1;
+    var upcoming = activeIndex >= 0 ? nodes[activeIndex + 1] : null;
+    var relative = function (node) {
+      if (!node) return null;
+      var r = node.getBoundingClientRect();
+      return {
+        top: round2(r.top - box.top),
+        bottom: round2(r.bottom - box.top),
+        fullyVisible: r.top >= box.top - 0.5 && r.bottom <= box.bottom + 0.5,
+        text: (node.textContent || '').slice(0, 24),
+      };
+    };
+    return {
+      scrollTop: round2(host.scrollTop),
+      maxScroll: Math.max(0, Math.round(host.scrollHeight - box.height)),
+      height: Math.round(box.height),
+      lines: nodes.length,
+      activeIndex: activeIndex,
+      upcoming: upcoming ? Object.assign({ index: activeIndex + 1 }, relative(upcoming)) : null,
+      active: relative(active),
+      visible: nodes
+        .map(function (node, index) {
+          var r = node.getBoundingClientRect();
+          return { index: index, visible: r.bottom <= box.bottom + 0.5 && r.top >= box.top - 0.5 };
+        })
+        .filter(function (item) {
+          return item.visible;
+        })
+        .map(function (item) {
+          return item.index;
+        }),
     };
   }
 
@@ -370,6 +796,390 @@
     return true;
   }
 
+  /**
+   * The pager, as the app reports it (v1.5). `null` on a build that has no pager — the older
+   * payloads the same harness is run against for a before/after comparison.
+   */
+  function pagerState() {
+    if (!window.__navilite || typeof window.__navilite.pager !== 'function') return null;
+    try {
+      return window.__navilite.pager();
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * Wait for the pager to stop moving, so a reading is of a screen at rest.
+   *
+   * With `expected` it also waits for that pane. That is not belt-and-braces: the app's route and
+   * its pager are the same fact, but the *hashchange* that moves the pager arrives as its own task,
+   * so a caller that has only just set `location.hash` finds the pager still resting on the old
+   * pane with `settled: true` — and a "settle" check would return immediately and hand the next
+   * reading a half-open screen. Measured: that is what made the first v1.5 run report 0 of 25
+   * hit-test points inside the now screen.
+   */
+  function settlePager(expected) {
+    if (!pagerState()) return Promise.resolve(null);
+    if (typeof expected === 'number') return waitForPane(expected);
+    return waitFor(
+      "(function(){var p = window.__navilite.pager(); return Boolean(p) && p.settled === true;})()",
+      'the pager to settle',
+      8000,
+    ).then(pagerState);
+  }
+
+  /** Wait until the pager is resting on a pane. Pane 0 is the playlist, 1 spectrum, 2 lyrics. */
+  function waitForPane(index) {
+    if (!pagerState()) return Promise.resolve(null);
+    return waitFor(
+      "(function(){var p = window.__navilite.pager(); return Boolean(p) && p.position === " +
+        index +
+        ' && p.settled === true;})()',
+      'pane ' + index,
+      8000,
+    ).then(pagerState);
+  }
+
+  /**
+   * Wait until a mode is showing, on either shape of the app: v1.5 asks the pager which pane it is
+   * on, older builds are read from the `hidden` class the mode switch used to toggle.
+   */
+  function waitForMode(mode) {
+    if (pagerState()) return waitForPane(mode === 'lyrics' ? 2 : 1);
+    var selector = mode === 'lyrics' ? '.now-lyrics' : '.now-visualizer';
+    return waitFor("!document.querySelector('" + selector + "').classList.contains('hidden')", mode + ' mode');
+  }
+
+  /** How many song rows are on screen — the "the list is loaded" signal. */
+  function songRowCount() {
+    return document.querySelectorAll('.row.song').length;
+  }
+
+  /**
+   * Tap a song row the way a person does.
+   *
+   * v1.5 made the *whole row* the tap target and dropped the favourite button, so `.row-play` is a
+   * decorative icon now rather than a control. The harness keeps working across both shapes: a real
+   * `button.row-play` is clicked where it exists (v1.4 and earlier), otherwise the row itself is —
+   * which is the thing v1.5 is claiming, so it gets exercised rather than assumed.
+   */
+  function playRow(index) {
+    var rows = document.querySelectorAll('.row.song');
+    if (rows.length === 0) throw new Error('no song rows on this screen');
+    var row = rows[index || 0];
+    var button = row.querySelector('button.row-play');
+    if (button) {
+      button.click();
+      return 'button.row-play';
+    }
+    row.click();
+    return 'the row itself';
+  }
+
+  /**
+   * The native spectrum and the clock, in the shipping engine, on the device (v1.7.2).
+   *
+   * Everything else in this file runs in a browser, where the audio engine is the `<audio>` element
+   * and the analyser. The paths that matter for the owner's report — the native player, the tap on
+   * it, and the return from the background — only exist in the wrapped build, so this scenario is
+   * run from the *app* in the simulator (`tools/device-probe.mjs --app … --native-audio …`).
+   *
+   * What it reads, in the order the owner described it:
+   *
+   *   (a) select a song, then read the position 250 ms later — the clock must have moved (his
+   *       complaint was *"when initially selecting the song, it is stuck at 0:00"*);
+   *   (b) the bands while that track plays — how many of the 64 are non-zero, how they move from
+   *       frame to frame, whether any is pinned at maximum (his *"the spectrum seems to go crazy"*)
+   *       and whether quiet frames read quieter;
+   *   (c) a foreground round trip: the readings are taken before the app leaves the screen, the
+   *       harness backgrounds and relaunches it, and the readings are taken again afterwards —
+   *       from the *player's own* state, not from the UI. If no real event arrives (a run without a
+   *       harness behind it) the same round trip is driven in-page, and the report says which one
+   *       it was rather than implying the stronger reading.
+   */
+  function nativeSpectrumProbe(options) {
+    var opts = options || {};
+    var roundTripTimeoutMs = opts.roundTripTimeoutMs || 30000;
+    var result = { startedAt: new Date().toISOString(), selection: {}, frames: [], roundTrip: {} };
+    /*
+     * Published as soon as it exists, and mutated in place: a probe that hangs on the platform still
+     * has everything it read up to that point, and the caller can post it rather than losing the run
+     * (see the watchdog in tools/device-probe.mjs's bootstrap).
+     */
+    nativeSpectrumProbe.lastResult = result;
+
+    function api() {
+      return window.__navilite || null;
+    }
+
+    function status() {
+      var seam = api();
+      return seam ? seam.status() : null;
+    }
+
+    function sleep(ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    }
+
+    function frameStats(frame) {
+      if (!frame || typeof frame.length !== 'number') return null;
+      var nonZero = 0;
+      var pinned = 0;
+      var min = Infinity;
+      var max = -Infinity;
+      var total = 0;
+      for (var i = 0; i < frame.length; i += 1) {
+        var value = frame[i];
+        if (value > 0) nonZero += 1;
+        if (value >= 255) pinned += 1;
+        if (value < min) min = value;
+        if (value > max) max = value;
+        total += value;
+      }
+      return {
+        length: frame.length,
+        nonZero: nonZero,
+        pinned: pinned,
+        min: min === Infinity ? 0 : min,
+        max: max === -Infinity ? 0 : max,
+        mean: Math.round(total / frame.length),
+        checksum: Math.round(total * 1000 + nonZero * 7 + max * 31),
+      };
+    }
+
+    /** Never let a native call hold the report hostage: a call that never settles reads as null. */
+    function withTimeout(promise, ms, fallback) {
+      return new Promise(function (resolve) {
+        var settled = false;
+        var timer = setTimeout(function () {
+          if (settled) return;
+          settled = true;
+          resolve(fallback);
+        }, ms);
+        Promise.resolve(promise).then(function (value) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }).catch(function () {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        });
+      });
+    }
+
+    /** One reading: the app's own view, the canvas's own bands, and the tap's own counters. */
+    function reading(label) {
+      var state = status();
+      var bands = api() && api().spectrumBands ? api().spectrumBands() : null;
+      var tapCall = api() && api().nativeSpectrum ? api().nativeSpectrum() : null;
+      /*
+       * And the bars as drawn, off the canvas itself — the pixels, not the numbers the app says it
+       * is feeding them. If the two ever disagree, the canvas is the one the owner is looking at.
+       * The PNG is dropped: 10 frames of it would be megabytes of base64 through a measurement
+       * channel, and the lit-pixel count plus the checksum is what compares frame to frame.
+       */
+      var drawn = typeof spectrumSnapshot === 'function' ? spectrumSnapshot() : null;
+      return withTimeout(tapCall, 4000, null).then(function (tap) {
+        return {
+          label: label,
+          at: Date.now(),
+          state: state ? state.state : null,
+          backend: state ? state.backend : null,
+          reportedSpectrum: state ? state.spectrum : null,
+          modeReason: state ? state.modeReason : null,
+          positionMs: state ? Math.round(state.positionMs) : null,
+          durationMs: state ? Math.round(state.durationMs) : null,
+          bands: frameStats(bands),
+          canvas: drawn ? { lit: drawn.lit, checksum: drawn.checksum, size: drawn.canvas } : null,
+          tap: tap
+            ? {
+                live: tap.live,
+                frames: tap.frames,
+                silentFrames: tap.silentFrames,
+                positionMs: Math.round(tap.positionMs),
+                playing: tap.playing,
+                readable: tap.readable,
+                sampleRate: tap.sampleRate,
+              }
+            : null,
+          tapBands: tap && tap.bands ? frameStats(tap.bands) : null,
+        };
+      });
+    }
+
+    var realEvents = [];
+    function onVisibility() {
+      realEvents.push({ hidden: document.hidden, at: Date.now() });
+    }
+    document.addEventListener('visibilitychange', onVisibility);
+
+    function waitForRoundTrip() {
+      var started = Date.now();
+      return new Promise(function (resolve) {
+        var timer = setInterval(function () {
+          var hidden = realEvents.some(function (event) {
+            return event.hidden;
+          });
+          var shownAgain = hidden && realEvents[realEvents.length - 1].hidden === false;
+          if (shownAgain) {
+            clearInterval(timer);
+            resolve({ real: true, events: realEvents.slice(), waitedMs: Date.now() - started });
+            return;
+          }
+          if (Date.now() - started > roundTripTimeoutMs) {
+            clearInterval(timer);
+            resolve({ real: false, events: realEvents.slice(), waitedMs: Date.now() - started });
+          }
+        }, 250);
+      });
+    }
+
+    /** The in-page stand-in, for a run with no harness behind it. Reported as such. */
+    function syntheticRoundTrip() {
+      var descriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+      function setHidden(value) {
+        Object.defineProperty(document, 'hidden', { configurable: true, get: function () { return value; } });
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+      setHidden(true);
+      return sleep(2000).then(function () {
+        setHidden(false);
+        return sleep(600);
+      }).then(function () {
+        if (descriptor) Object.defineProperty(Document.prototype, 'hidden', descriptor);
+        return { real: false, events: realEvents.slice(), waitedMs: 2600 };
+      });
+    }
+
+    return waitFor("Boolean(window.__navilite && window.__navilite.libraryReady())", 'the library to be connected', 20000)
+      .then(function () {
+        // Play a stress track the way a person does: open a list, tap a row.
+        location.hash = '#/album/album-ja-1';
+        return waitFor("document.querySelectorAll('.row.song').length > 0", 'the stress album', 20000);
+      })
+      .then(function () {
+        result.selection.tappedAt = Date.now();
+        result.selection.target = playRow(0);
+        return sleep(250);
+      })
+      .then(function () {
+        /*
+         * (a) The clock 250 ms after the selection — and the bands from the moment the engine is
+         * asked, which is *before* the plugin's `start` promise can have come back. The first frame
+         * that is live is the moment the bars stop being the theme, and the offset from the tap is
+         * the honest number for "how long are they flat at the start of a track".
+         */
+        var early = [];
+        return (function nextEarly(index) {
+          if (index >= 5) return Promise.resolve(early);
+          return reading('early-' + index).then(function (one) {
+            early.push(one);
+            return sleep(80).then(function () {
+              return nextEarly(index + 1);
+            });
+          });
+        })(0).then(function (taken) {
+          result.early = taken;
+        });
+      })
+      .then(function () {
+        var state = status();
+        result.selection.positionAfter250ms = state ? Math.round(state.positionMs) : null;
+        result.selection.stateAfter250ms = state ? state.state : null;
+        result.selection.backendAfter250ms = state ? state.backend : null;
+        return sleep(900);
+      })
+      .then(function () {
+        // (b) The bands, frame by frame, as the visualiser reads them.
+        var reads = [];
+        function next(index) {
+          if (index >= 10) return Promise.resolve(reads);
+          return reading('frame-' + index).then(function (one) {
+            reads.push(one);
+            return sleep(45).then(function () {
+              return next(index + 1);
+            });
+          });
+        }
+        return next(0).then(function (frames) {
+          result.frames = frames;
+        });
+      })
+      .then(function () {
+        // (c) The foreground round trip.
+        return reading('before-hide').then(function (before) {
+          result.roundTrip.before = before;
+          result.roundTrip.readyForHarnessAt = new Date().toISOString();
+          /*
+           * Tell the harness on the host, through the same channel as everything else, that the
+           * "before" reading is held and the gap should start now. Without this the two ends would
+           * be racing: tools/spectrum-roundtrip.mjs backgrounds the app, and it has to do it *after*
+           * this reading and not before it.
+           */
+          try {
+            fetch('/__report', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ progress: 'ready for the foreground round trip', at: new Date().toISOString() }),
+            });
+          } catch (error) {
+            void error;
+          }
+          return waitForRoundTrip();
+        });
+      })
+      .then(function (events) {
+        if (!events.real) return syntheticRoundTrip().then(function (synthetic) {
+          result.roundTrip.driver = 'the probe itself (no harness behind this run)';
+          result.roundTrip.events = synthetic.events;
+          return true;
+        });
+        result.roundTrip.driver = 'the harness, with the app really backgrounded and relaunched';
+        result.roundTrip.events = events.events;
+        return true;
+      })
+      .then(function () {
+        return sleep(1200);
+      })
+      .then(function () {
+        return reading('after-show').then(function (after) {
+          result.roundTrip.after = after;
+          result.roundTrip.gapMs = after.at - result.roundTrip.before.at;
+          result.roundTrip.positionAdvancedMs = after.positionMs - result.roundTrip.before.positionMs;
+          document.removeEventListener('visibilitychange', onVisibility);
+          return result;
+        });
+      })
+      .then(function () {
+        /*
+         * (d) No audio, no bars.
+         *
+         * A pause is the one silence this library can produce on the device: every fixture in the
+         * stress library is a continuous tone (tools/audio.mjs), so there is no quiet passage to seek
+         * into and no silent track to play. What this does prove is the other half of the owner's
+         * complaint — that the bars are a reading and not a decoration, and that the app stops
+         * claiming it is drawing one when nothing is playing: the engine must drop the live frame,
+         * say why, and the canvas must stop showing bars it is not measuring.
+         */
+        var play = document.querySelector('.now-bar .transport.big');
+        if (!play) return null;
+        play.click();
+        return sleep(700).then(function () {
+          return reading('paused');
+        });
+      })
+      .then(function (paused) {
+        if (paused) result.paused = paused;
+        return result;
+      });
+  }
+
   /** A gesture in progress: finger down, moved sideways, not yet lifted. */
   function beginSwipe(selector) {
     var target = document.querySelector(selector);
@@ -410,17 +1220,40 @@
 
     var step = function (label, run, detail) {
       list.push(
-        run().then(function () {
-          var state = Object.assign({ label: label, environment: environment() }, measure());
-          if (typeof detail === 'function') {
+        run()
+          .then(function () {
+            var state = Object.assign({ label: label, environment: environment() }, measure());
+            if (typeof detail !== 'function') return state;
+            /*
+             * A detail may be async since v1.5: the focus-zoom reading needs a frame or two of
+             * settling after the control takes focus, so a detail that returns a promise is
+             * awaited rather than dropped on the floor.
+             */
+            var value;
             try {
-              state.detail = detail();
+              value = detail();
             } catch (error) {
               state.detail = { error: String(error) };
+              return state;
             }
-          }
-          results.push(state);
-        }),
+            if (value && typeof value.then === 'function') {
+              return value.then(
+                function (resolved) {
+                  state.detail = resolved;
+                  return state;
+                },
+                function (error) {
+                  state.detail = { error: String((error && error.message) || error) };
+                  return state;
+                },
+              );
+            }
+            state.detail = value;
+            return state;
+          })
+          .then(function (state) {
+            results.push(state);
+          }),
       );
       return list[list.length - 1];
     };
@@ -443,18 +1276,16 @@
     queue('Library (#/artists) — long Japanese artist name in the list', function () {
       return setHash('#/artists', "document.querySelectorAll('.row').length > 0", 'the artist list');
     });
-    // The iOS focus-zoom check. iOS zooms the page in when a form field smaller than 16 px gets
-    // focus, which makes the app wider than the screen and pannable sideways — the exact shape
-    // of "slightly too wide … horizontal scroll". Measuring it is the only way to know whether
-    // it happens on a given build and engine, so it is one of the audited states.
-    queue('Library — search field focused (iOS focus-zoom check)', function () {
-      return setHash('#/artists', "document.querySelectorAll('.row').length > 0", 'the artist list').then(function () {
-        var input = document.querySelector('.page-head .field');
-        if (input) input.focus();
-        return new Promise(function (resolve) {
-          setTimeout(resolve, 500);
-        });
-      });
+    // The iOS focus-zoom. iOS zooms the page in when a form control smaller than 16 px takes
+    // focus, which makes the layout wider than the screen and pannable sideways — the exact shape
+    // of "slightly too wide … horizontal scroll", and the one the owner reported on the settings
+    // screen ("i think the dropdown option could be causing some overflow"). The zoom lives in
+    // `visualViewport.scale` and leaves `documentElement.scrollWidth` untouched, so a width-only
+    // audit reports that screen clean while the owner is panning it. Hence a *focus* reading.
+    queue('Library — the search field focused, holding a long unbroken query', function () {
+      return setHash('#/artists', "document.querySelectorAll('.row').length > 0", 'the artist list');
+    }, function () {
+      return focusProbe('.page-head .field', 'バラードのなかのいちばん長いタイトルをここに入れる'.repeat(2));
     });
     queue('Artist (#/artist/artist-ja) — long Japanese album names in the grid', function () {
       return setHash('#/artist/artist-ja', "document.querySelectorAll('.card').length > 0", 'the stress artist');
@@ -462,27 +1293,49 @@
     queue('Album (#/album/album-ja-1) — long Japanese and unbroken-Latin track titles', function () {
       return setHash('#/album/album-ja-1', "document.querySelectorAll('.row.song').length > 0", 'the stress album');
     });
+    queue('Album — the "Add to playlist" dropdown focused', function () {
+      return setHash('#/album/album-ja-1', "document.querySelectorAll('.row.song').length > 0", 'the stress album');
+    }, function () {
+      return focusProbe('.detail-text select');
+    });
     queue('Playlists (#/playlists) — two very long playlist names', function () {
       return setHash('#/playlists', "document.querySelectorAll('.row').length > 2", 'the playlist list');
+    });
+    queue('Playlists — a very long playlist name typed into the field and focused', function () {
+      return setHash('#/playlists', "document.querySelectorAll('.row').length > 2", 'the playlist list');
+    }, function () {
+      return focusProbe('.page-head .field', 'A playlist name long enough to push any field wider than the screen'.repeat(2));
     });
     queue('Playlist (#/playlist/pl-stress-ja) — long Japanese playlist name', function () {
       return setHash('#/playlist/pl-stress-ja', "document.querySelectorAll('.row.song').length > 0", 'the stress playlist');
     });
-    queue('Settings (#/settings) — the long playback-preference select', function () {
-      return setHash('#/settings', "document.querySelector('select') !== null", 'settings');
+    queue('Settings (#/settings)', function () {
+      return setHash('#/settings', "document.querySelector('.settings') !== null", 'settings');
     });
+    /*
+     * The two entries that used to sit here both keyed off the playback preference dropdown — the
+     * one whose own text was wider than its box (v1.5.1) and the one that took focus at 15 px and
+     * zoomed the screen in (v1.5). v1.7.3 deleted that dropdown along with the second audio engine
+     * it selected, so neither state can recur and there is nothing left on this route to walk.
+     */
     queue('Changelog (#/changelog)', function () {
       return setHash('#/changelog', "document.querySelector('.release') !== null", 'the changelog');
     });
+    // The connect screen is a route, so it is walked like one. It used to be missing from this
+    // walk: `#/connect` is reachable while a session is live (the queue keeps playing), and it is
+    // the screen with the longest text in a field (the server address).
+    queue('Connect (#/connect) — the server address field holding a long address, focused', function () {
+      return setHash('#/connect', "document.querySelector('.connect .field') !== null", 'the connect form');
+    }, function () {
+      return focusProbe('.connect .field', 'https://alienlab.tailbed832.ts.net:9443/navidrome/very/long/path');
+    });
     queue('Now (#/now, spectrum) — long title, long "Playing from" line', function () {
       return setHash('#/playlist/pl-stress-ja', "document.querySelectorAll('.row.song').length > 0", 'the stress playlist again').then(function () {
-        // A real tap on the row's play button: the app's own handler, not a debug hook.
-        var rows = document.querySelectorAll('.row.song .row-play');
-        if (rows.length > 0) rows[0].click();
-        else throw new Error('no playable row in the stress playlist');
+        // The app's own tap target. v1.5 made the whole row one, so `playRow` uses the row.
+        playRow(0);
         return waitFor("location.hash === '#/now'", 'the now-playing screen').then(function () {
           return waitFor("Boolean(document.querySelector('.now-canvas'))", 'the spectrum canvas');
-        }).then(function () {
+        }).then(settlePager).then(function () {
           return new Promise(function (resolve) {
             setTimeout(resolve, 600); // let a frame or two of the visualiser land
           });
@@ -490,11 +1343,16 @@
       });
     });
     queue('Now (#/now, lyrics) — long unbroken Japanese lyric lines', function () {
-      return setHash('#/now', 'true', 'nothing').then(function () {
+      return setHash('#/playlist/pl-stress-ja', "document.querySelectorAll('.row.song').length > 0", 'the stress playlist again').then(function () {
+        playRow(0);
+        return waitFor("location.hash === '#/now'", 'the now-playing screen').then(settlePager);
+      }).then(function () {
         var pills = document.querySelectorAll('.pill-option');
         if (pills.length < 2) throw new Error('no lyrics pill');
         pills[1].click();
-        return waitFor("document.querySelectorAll('.lyric-line').length > 0", 'the lyric lines').then(function () {
+        return waitForMode('lyrics').then(function () {
+          return waitFor("document.querySelectorAll('.lyric-line').length > 0", 'the lyric lines');
+        }).then(function () {
           return new Promise(function (resolve) {
             setTimeout(resolve, 250);
           });
@@ -503,12 +1361,14 @@
     }, lyricsDensity);
     queue('Now (#/now, lyrics) — mid-swipe, finger down and moved', function () {
       beginSwipe('.now');
-      return Promise.resolve();
+      return new Promise(function (resolve) {
+        setTimeout(resolve, 120);
+      });
     }, lyricsDensity);
     queue('Now (#/now, lyrics) — after the swipe completes', function () {
       endSwipe('.now');
       return new Promise(function (resolve) {
-        setTimeout(resolve, 400);
+        setTimeout(resolve, 500);
       });
     }, lyricsDensity);
     /*
@@ -562,6 +1422,155 @@
       paused: element.paused,
       currentTime: Math.round(element.currentTime * 1000) / 1000,
     };
+  }
+
+  /**
+   * Seek the real media element — what the owner does by dragging the progress bar.
+   *
+   * This is the only honest way to make the app light a given lyric line: the highlight is driven by
+   * the app's own progress path (`renderProgress` calls `lyrics.position()`), so a line that lights
+   * here is a line that lights for him, whether the position came from playing or from seeking.
+   */
+  function seekAudio(seconds) {
+    var element = window.__naviliteMediaElement;
+    if (!element || !isFinite(element.duration)) return null;
+    element.currentTime = Math.max(0, Math.min(element.duration - 0.05, Number(seconds)));
+    return audioState();
+  }
+
+  /** Where the real element is: the harness derives the sidecar's own timings from this. */
+  function audioState() {
+    var element = window.__naviliteMediaElement;
+    if (!element) return null;
+    return {
+      currentTime: element.currentTime,
+      duration: element.duration,
+      paused: element.paused,
+      readyState: element.readyState,
+    };
+  }
+
+  /**
+   * Pause the real element.
+   *
+   * A track that is left to run to its end has the app roll onto the next one, which re-renders the
+   * now screen and disturbs whatever the check was in the middle of. Pausing first keeps a seek to
+   * the last line a seek to the last line.
+   */
+  function pauseAudio() {
+    var element = window.__naviliteMediaElement;
+    if (!element) return null;
+    element.pause();
+    return audioState();
+  }
+
+  /**
+   * A finger inside the page, at a cadence this file sets — because the pager's release velocity *is*
+   * the `performance.now()` gap between its last two `touchmove`s, so a gesture driven from outside the
+   * page is clocked by the driver and not by the check.
+   *
+   * Through the input pipeline each move costs a round trip: measured on this box, a
+   * `stepDelayMs: 6` CDP drag hands the pager gaps of 212–330 ms per move, and on a quiet one under
+   * 80 ms. At 393 px wide, 26 px of travel per step and a 140 ms projection (`src/ui/pager.ts`:
+   * `PROJECTION_MS`, `COMMIT`), a 0.2-pane drag commits unless that gap is longer than ~78 ms — so a
+   * check that means "released slowly" is deciding on a number it does not control. This drives the
+   * same listeners with `TouchEvent`s at `gapMs` between moves and records what the page clock saw.
+   *
+   * Returns `{ ms, offsets, events }`: the offsets under the finger after each move, and one entry per
+   * event (`type`, `x`, the timestamp the listener itself saw — same task, same clock — and the gap
+   * back to the previous event), which is what a check about velocity has to report.
+   *
+   * `sameTaskRelease: true` lands the **final move in the same task as the one before it** instead of
+   * after another timer. A timer can only be late, never early: asked for `gapMs: 8`, the pager's own
+   * clock has seen 9–47 ms, and a gap longer than ~78 ms at this distance snaps the pane back — so a
+   * check whose claim is "released *fast*" would go red on a correct app whenever the timer slipped.
+   * In one task the gap is the synchronous work between two `dispatchEvent`s (well under a
+   * millisecond), which is a *faster* finger, so the claim still holds and now holds by construction.
+   * Gestures whose claim is "released *slowly*" must not set it — there the timer's lateness is the
+   * thing being asked for.
+   */
+  function pagerGesture(options) {
+    var target = document.querySelector(options.selector || '.now-visualizer');
+    if (!target || typeof Touch !== 'function' || typeof TouchEvent !== 'function') return Promise.resolve(null);
+    var fromX = options.fromX;
+    var toX = options.toX;
+    var steps = options.steps || 3;
+    var gapMs = options.gapMs || 8;
+    var y = options.y || Math.round(window.innerHeight / 2);
+    var identifier = 7;
+    var make = function (x) {
+      return new Touch({ identifier: identifier, target: target, clientX: Math.round(x), clientY: y });
+    };
+    var events = [];
+    var fire = function (type, x) {
+      var point = make(x);
+      var at = performance.now();
+      target.dispatchEvent(
+        new TouchEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          touches: type === 'touchend' ? [] : [point],
+          targetTouches: type === 'touchend' ? [] : [point],
+          changedTouches: [point],
+        }),
+      );
+      var previous = events[events.length - 1];
+      events.push({ type: type, x: Math.round(x), t: at, gapMs: previous ? at - previous.t : null });
+    };
+    var offsets = [];
+    return new Promise(function (resolve) {
+      var started = performance.now();
+      fire('touchstart', fromX);
+      var send = function (index) {
+        if (index > steps) {
+          fire('touchend', toX);
+          resolve({
+            ms: Math.round(performance.now() - started),
+            offsets: offsets,
+            sameTaskRelease: options.sameTaskRelease === true,
+            events: events.map(function (event) {
+              return {
+                type: event.type,
+                x: event.x,
+                t: Math.round(event.t * 10) / 10,
+                gapMs: event.gapMs === null ? null : Math.round(event.gapMs * 10) / 10,
+              };
+            }),
+          });
+          return;
+        }
+        var x = fromX + ((toX - fromX) * index) / steps;
+        var emit = function () {
+          fire('touchmove', x);
+          var state = pagerState();
+          if (state) offsets.push(state.offset);
+          send(index + 1);
+        };
+        // The *release* move goes out in this same task, so the pager's clock measures the synchronous
+        // work between its last two moves rather than how late a timer ran (see above). Both events
+        // still reach the listener and the offsets still advance: the same finger, a faster last step.
+        // Every other move keeps the original spacing, so a gesture that asks for slow still gets slow.
+        if (index > 1 && index === steps && options.sameTaskRelease === true) emit();
+        else setTimeout(emit, gapMs);
+      };
+      send(1);
+    });
+  }
+
+  /**
+   * A flick: `pagerGesture` at a finger's cadence (26 px every 8 ms), with the release move dispatched
+   * in the same task as the one before it — a flick's claim is that it is released *fast*, and a timer
+   * can only be late, so the deterministic release is the only one that keeps the claim about the app
+   * rather than about the box. A commit from here at the same shallow distance the slow release snaps
+   * back from cannot be anything but the velocity projection.
+   */
+  function flickPager(options) {
+    var merged = {};
+    for (var key in options) if (Object.prototype.hasOwnProperty.call(options, key)) merged[key] = options[key];
+    // A caller may opt out by passing `sameTaskRelease: false` — that is the negative control, a flick
+    // paced by a timer, which releases slowly and must snap back.
+    if (typeof merged.sameTaskRelease !== 'boolean') merged.sameTaskRelease = true;
+    return pagerGesture(merged);
   }
 
   function captureMediaElement() {
@@ -730,7 +1739,7 @@
     var settings = options || {};
     var hash = settings.hash || '#/playlist/pl-stress-long';
     var offset = typeof settings.offset === 'number' ? settings.offset : 400;
-    return setHash(hash, "document.querySelectorAll('.row.song .row-play').length > 4", 'the long playlist')
+    return setHash(hash, "document.querySelectorAll('.row.song').length > 4", 'the long playlist')
       .then(function () {
         var scroller = scrollSurfaces().scroller;
         var room = scrollableBy(scroller);
@@ -747,12 +1756,17 @@
       });
   }
 
-  /** The app's own route onto the now screen: tap play on a row, as a person does. */
+  /** The app's own route onto the now screen: tap a row, as a person does. */
   function openNowFromList() {
-    var play = document.querySelector('.row.song .row-play');
-    if (!play) return Promise.reject(new Error('no playable row on this screen'));
-    play.click();
+    var rows = document.querySelectorAll('.row.song');
+    if (rows.length === 0) return Promise.reject(new Error('no playable row on this screen'));
+    playRow(0);
     return waitFor("location.hash === '#/now'", 'the now screen')
+      // The spectrum pane, not merely "the pager has stopped": the hashchange that opens it is a
+      // later task, so this is the wait that makes the reading a screen at rest (see settlePager).
+      .then(function () {
+        return settlePager(1);
+      })
       .then(function () {
         return nextFrames(2);
       })
@@ -802,7 +1816,10 @@
     close.click();
     return waitFor("location.hash !== '#/now'", 'the browse screen')
       .then(function () {
-        return waitFor("document.querySelectorAll('.row.song .row-play').length > 4", 'the list again');
+        return settlePager(0);
+      })
+      .then(function () {
+        return waitFor("document.querySelectorAll('.row.song').length > 4", 'the list again');
       })
       .then(function () {
         return nextFrames(3);
@@ -810,16 +1827,73 @@
       .then(scrollState);
   }
 
-  /** The swipe left off the spectrum, as the app implements it: touch, not wheel. */
+  /**
+   * One finger swipe across the now screen, at real geometry: down near one edge, moved across,
+   * lifted near the other. Each move is dispatched separately, so the pager sees a drag with a
+   * direction and a velocity rather than a single jump.
+   */
+  function swipePager(direction) {
+    var target = document.querySelector('.now');
+    if (!target || typeof Touch !== 'function') {
+      // No now screen to swipe (a build that has closed it already, say).
+      return Promise.resolve(null);
+    }
+    var width = window.innerWidth || DEVICE.width;
+    var y = Math.round((window.innerHeight || DEVICE.height) / 2);
+    var from = direction === 'left' ? width - 40 : 40;
+    var to = direction === 'left' ? 40 : width - 40;
+    var point = function (x) {
+      return new Touch({ identifier: 7, target: target, clientX: Math.round(x), clientY: y });
+    };
+    var fire = function (type, x, touches) {
+      target.dispatchEvent(
+        new TouchEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          touches: touches,
+          targetTouches: touches,
+          changedTouches: [point(x)],
+        }),
+      );
+    };
+    fire('touchstart', from, [point(from)]);
+    for (var step = 1; step <= 5; step += 1) {
+      var x = from + ((to - from) * step) / 5;
+      fire('touchmove', x, [point(x)]);
+    }
+    fire('touchend', to, []);
+    return settlePager();
+  }
+
+  /**
+   * Swipe left until the playlist is on screen.
+   *
+   * v1.5 made the now screen a three-pane pager — playlist | spectrum | lyrics — so one left swipe
+   * from the spectrum lands on the lyrics and a second one lands on the playlist. This walks that
+   * route with real swipes and reports how many it took, which is the transition the owner asked
+   * for stated as a measurement rather than as an intention.
+   */
   function swipeLeftToPlaylists() {
-    if (!beginSwipe('.now')) return Promise.reject(new Error('the now screen did not accept a touch'));
-    endSwipe('.now');
-    return waitFor("location.hash === '#/playlists'", 'the playlists route')
+    var attempts = 0;
+    var firstPane = null;
+    var panes = [];
+    var advance = function () {
+      if (attempts >= 3) return Promise.resolve();
+      attempts += 1;
+      return swipePager('left').then(function (state) {
+        var pane = state ? state.position : null;
+        panes.push(pane);
+        if (firstPane === null) firstPane = pane;
+        if (location.hash.indexOf('#/playlist') === 0) return;
+        return advance();
+      });
+    };
+    return advance()
       .then(function () {
         return nextFrames(2);
       })
       .then(function () {
-        return { route: location.hash, state: scrollState() };
+        return { route: location.hash, swipes: attempts, panes: panes, firstPane: firstPane, state: scrollState() };
       });
   }
 
@@ -832,19 +1906,21 @@
     result.context = empty.context;
     result.engineState = empty.engineState;
     result.transport = document.querySelectorAll('.now-bar .transport').length;
+    result.pagerBefore = pagerState();
     pills[1].click();
-    return waitFor("!document.querySelector('.now-lyrics').classList.contains('hidden')", 'lyrics mode')
+    return waitForMode('lyrics')
       .then(function () {
         result.lyricsMode = true;
         return nextFrames(2);
       })
       .then(function () {
         pills[0].click();
-        return waitFor("!document.querySelector('.now-visualizer').classList.contains('hidden')", 'spectrum mode');
+        return waitForMode('spectrum');
       })
       .then(function () {
         result.spectrumMode = true;
         result.mode = window.__navilite ? window.__navilite.nowMode() : null;
+        result.pagerAfter = pagerState();
         return result;
       });
   }
@@ -854,7 +1930,11 @@
     var pills = document.querySelectorAll('.pill-option');
     if (pills.length < 2) return Promise.reject(new Error('no pill to click'));
     pills[index].click();
-    return nextFrames(2).then(scrollState);
+    return waitForMode(index === 1 ? 'lyrics' : 'spectrum')
+      .then(function () {
+        return nextFrames(2);
+      })
+      .then(scrollState);
   }
 
   /**
@@ -939,6 +2019,7 @@
         report.swipe = swiped;
       })
       .then(function () {
+        report.pager = pagerState();
         report.checks = {
           documentFrozen: report.documentFrozen,
           documentNeverScrolled: report.documentNeverScrolled,
@@ -946,9 +2027,16 @@
           listNeverMoved: report.listNeverMoved,
           listRestored: report.listRestored,
           overlayIsTheOnlyHitTarget: report.hitTest.allInsideNow,
-          swipeStillWorks: report.swipe.route === '#/playlists',
+          /*
+           * v1.5. The swipe no longer closes the screen outright: it moves the pager one pane, so
+           * the same gesture now walks spectrum -> lyrics -> the playlist he was on. Both halves are
+           * checked, because "the swipe does something" would be satisfied by the old behaviour too.
+           */
+          swipeLandsOnThePlaylist: String(report.swipe.route).indexOf('#/playlist') === 0,
+          swipeStepsThroughThePanes: report.swipe.firstPane === null || report.swipe.firstPane === 2,
           controlsStillWork: report.controls.transport === 5 && report.controls.mode === 'spectrum'
             && /^Playing from .+\(\d+\/\d+\)$/.test(String(report.controls.context)),
+          pagerSettledOnTheSpectrum: report.pager === null || report.pager.position === 1,
         };
         report.passed = Object.keys(report.checks).every(function (key) {
           return report.checks[key] === true;
@@ -957,13 +2045,359 @@
       });
   }
 
+  /* ------------------------------------------- the gestures, in the shipping engine (v1.5 follow-up) */
+
+  /**
+   * The owner's two v1.5 reports are about a *finger*, and every number in `docs/verification.md`
+   * §13.3 comes from Chrome's `Input.dispatchTouchEvent` at 393x852. A simulator has no CDP, so
+   * between "Chrome says the axis lock holds" and "Safari on the phone does" there was an engine
+   * and an input path nobody had run. This is that path: the same gestures, dispatched as real
+   * `TouchEvent`s inside Safari in the simulator, with the geometry read between the moves.
+   *
+   * What it can and cannot see, stated rather than implied. The events go straight to the page's
+   * listeners, so what is measured is the *app's* behaviour in the shipping engine: the axis lock,
+   * the finger-following transform, the tiling, the snap and the route. What an untrusted event
+   * cannot do is have a default action, so the browser's own half — the scroll a vertical drag
+   * would produce, and Safari's edge-swipe on a gesture that starts at the screen edge — is not
+   * reproduced here and is still Chrome's (and the owner's thumb's) to confirm. The one thing this
+   * can say about the axis lock's other half is `defaultPrevented`: the claim is that a vertical
+   * gesture is handed back *untouched*, and an untouched gesture is exactly what `false` here means.
+   */
+
+  /**
+   * Which input constructors this engine actually has — the precondition of the in-page path.
+   *
+   * `new Touch(...)` and `new TouchEvent(...)` are the two the sweep needs, and they are not
+   * universal: WebKit exposes them from Safari 14 on, and a page that finds them missing has no
+   * in-page gesture path at all. Reported once per run so a failure says *why*.
+   */
+  function inputSupport() {
+    return {
+      Touch: typeof Touch,
+      TouchEvent: typeof TouchEvent,
+      PointerEvent: typeof PointerEvent,
+      touchPoints: typeof navigator.maxTouchPoints === 'number' ? navigator.maxTouchPoints : null,
+      canConstructTouch: (function () {
+        try {
+          return typeof Touch === 'function' && typeof TouchEvent === 'function' && !!new TouchEvent('touchstart', { bubbles: true });
+        } catch (error) {
+          return 'throws: ' + error.message;
+        }
+      })(),
+    };
+  }
+
+  function delay(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  /**
+   * The x of a `matrix(1, 0, 0, 1, x, 0)` transform, or 0 for `none`.
+   *
+   * Takes an element *or* the box `nowGeometry()` returns for one — the boxes carry the computed
+   * transform already, and reading it from the box is what keeps `getComputedStyle` out of a loop
+   * that runs once per move of every gesture.
+   */
+  function translateXOf(target) {
+    var value = '';
+    if (target && target.nodeType === 1) value = getComputedStyle(target).transform;
+    else if (target && typeof target.translate === 'string') value = target.translate;
+    var match = /matrix\(1, 0, 0, 1, (-?[\d.]+), 0\)/.exec(String(value));
+    return match ? Number(match[1]) : 0;
+  }
+
+  /**
+   * One finger, inside the page: down, `steps` even moves, up — sampling as it goes.
+   *
+   * `target` is what is under the finger, resolved with `elementFromPoint` so the event travels the
+   * path it really would (and lands on a `<select>` or a range input if the coordinates are wrong,
+   * which the report then shows instead of hiding).
+   */
+  function fingerDrag(options) {
+    var from = options.from;
+    var to = options.to;
+    var steps = options.steps || 5;
+    var gapMs = typeof options.gapMs === 'number' ? options.gapMs : 20;
+    var sampleEvery = typeof options.sampleEvery === 'number' ? options.sampleEvery : 1;
+    var target = document.elementFromPoint(Math.round(from.x), Math.round(from.y)) || document.querySelector('#app');
+    if (!target || typeof Touch !== 'function' || typeof TouchEvent !== 'function') {
+      /*
+       * Reported, not swallowed. A build whose engine cannot construct a `Touch` has no in-page
+       * gesture path at all, and a null here used to surface as "undefined is not an object" three
+       * frames later — which says nothing about which constructor was missing.
+       */
+      return Promise.resolve({
+        unavailable: inputSupport(),
+        target: target ? selectorFor(target) : null,
+      });
+    }
+    var identifier = 11;
+    var point = function (x, y) {
+      return new Touch({ identifier: identifier, target: target, clientX: Math.round(x), clientY: Math.round(y) });
+    };
+    var fire = function (type, x, y, touches) {
+      var event = new TouchEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        touches: touches,
+        targetTouches: touches,
+        changedTouches: [point(x, y)],
+      });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    var samples = [];
+    var prevented = [];
+    return new Promise(function (resolve) {
+      var started = performance.now();
+      fire('touchstart', from.x, from.y, [point(from.x, from.y)]);
+      var send = function (index) {
+        if (index > steps) {
+          fire('touchend', to.x, to.y, []);
+          resolve({
+            target: selectorFor(target),
+            from: { x: Math.round(from.x), y: Math.round(from.y) },
+            to: { x: Math.round(to.x), y: Math.round(to.y) },
+            ms: Math.round(performance.now() - started),
+            /** Whether anything called `preventDefault` on a move: the axis lock's own claim. */
+            prevented: prevented,
+            samples: samples,
+          });
+          return;
+        }
+        var x = from.x + ((to.x - from.x) * index) / steps;
+        var y = from.y + ((to.y - from.y) * index) / steps;
+        setTimeout(function () {
+          prevented.push(fire('touchmove', x, y, [point(x, y)]));
+          if (sampleEvery === 0 ? index === steps : index % sampleEvery === 0) {
+            samples.push({
+              x: Math.round(x),
+              y: Math.round(y),
+              pager: pagerState(),
+              geometry: nowGeometry(),
+            });
+          }
+          send(index + 1);
+        }, gapMs);
+      };
+      send(1);
+    });
+  }
+
+  /** The centre of a box, kept clear of the very top and the very bottom of the screen. */
+  function centreOf(selector, fromTop) {
+    var el = document.querySelector(selector);
+    var rect = el ? el.getBoundingClientRect() : null;
+    var height = window.innerHeight;
+    var middle = rect ? rect.top + rect.height / 2 : height / 2;
+    var y = typeof fromTop === 'number' ? rect.top + rect.height * fromTop : middle;
+    return Math.max(60, Math.min(height - 60, Math.round(y)));
+  }
+
+  /**
+   * The whole sweep, self-driven, so the device harness has nothing to do but wait for the report.
+   *
+   * The order is the ring's, and each step waits for the pager to settle before the next gesture, so
+   * every sample belongs to the gesture it is under.
+   */
+  function deviceGestureSweep() {
+    if (!pagerState()) {
+      // A build with no pager (the v1.4 payload the same harness is run against) has no gestures to
+      // measure; saying so beats reporting zeroes as if they were readings.
+      return Promise.resolve({ unsupported: 'this build has no pager' });
+    }
+    var width = window.innerWidth;
+    var height = window.innerHeight;
+    var out = {
+      device: { width: width, height: height, devicePixelRatio: window.devicePixelRatio },
+      input: 'TouchEvent dispatched in the page (see the note above fingerDrag)',
+      inputSupport: inputSupport(),
+      steps: {},
+    };
+    /*
+     * "Settled" has to mean *at rest on a pane*, not "some frames have passed".
+     *
+     * The pager's own `settled` goes true the moment a gesture ends, and its snap animation then
+     * runs for up to 340 ms — so a reading taken three frames later measures the animation, not the
+     * screen. The first device run did exactly that: it caught the opening drag mid-flight at
+     * offset 1.09 and every reading after it inherited the moving pager. The offset being an
+     * integer is what a pane at rest looks like from outside.
+     */
+    var settle = function () {
+      return waitFor(
+        "(function(){var p=window.__navilite.pager();return Boolean(p)&&p.settled===true&&Math.abs(p.offset-Math.round(p.offset))<0.01;})()",
+        'the pager to come to rest on a pane',
+        5000,
+      ).then(function () {
+        return nextFrames(2);
+      });
+    };
+
+    /* 1. The axis lock on the playlist: 200 px across, 240 px up. Mostly vertical. */
+    return prepareScroll()
+      .then(function (before) {
+        var pagerBefore = pagerState();
+        out.steps.diagonalOnList = { scrollTopBefore: round2(before.scrollTop), pagerBefore: pagerBefore };
+        return fingerDrag({ from: { x: 300, y: 600 }, to: { x: 100, y: 360 }, steps: 4, gapMs: 20 });
+      })
+      .then(function (drag) {
+        return settle().then(function () {
+          var state = scrollState();
+          out.steps.diagonalOnList.drag = drag;
+          out.steps.diagonalOnList.scrollTopAfter = round2(state.scrollTop);
+          out.steps.diagonalOnList.pagerAfter = pagerState();
+          out.steps.diagonalOnList.listTranslate = translateXOf(scrollSurfaces().scroller);
+        });
+      })
+      /* 2. Onto the now screen, on the spectrum pane, through the app's own tap. */
+      .then(function () {
+        return openNowFromList();
+      })
+      .then(function () {
+        /* 3. Spectrum -> lyrics: does the pane follow the finger, and do the two tile? */
+        var travelled = 0.45 * width;
+        var y = centreOf('.now-page-spectrum');
+        return fingerDrag({ from: { x: Math.round(width * 0.84), y: y }, to: { x: Math.round(width * 0.84 - travelled), y: y }, steps: 5, gapMs: 24 }).then(function (drag) {
+          out.steps.follow = { y: y, travelled: Math.round(travelled), drag: drag };
+          var samples = drag.samples || [];
+          var expected = samples.map(function (sample) {
+            return 1 + (Math.round(width * 0.84) - sample.x) / width;
+          });
+          out.steps.follow.expected = expected;
+          out.steps.follow.offsetErrorPx = samples.reduce(function (worst, sample, index) {
+            return Math.max(worst, Math.abs((sample.pager ? sample.pager.offset : 0) - expected[index]) * width);
+          }, 0);
+          out.steps.follow.stripErrorPx = samples.reduce(function (worst, sample, index) {
+            var stripX = translateXOf(sample.geometry.pages);
+            return Math.max(worst, Math.abs(stripX + (expected[index] - 1) * width));
+          }, 0);
+          out.steps.follow.tilingWorstPx = samples.reduce(function (worst, sample) {
+            var g = sample.geometry;
+            return Math.max(
+              worst,
+              Math.abs(g.spectrum.right - g.lyricsPane.left),
+              Math.abs(g.now.left),
+              Math.abs(g.now.right - width),
+            );
+          }, 0);
+          out.steps.follow.monotonic = samples.every(function (sample, index) {
+            return index === 0 || (sample.pager ? sample.pager.offset : 0) > (samples[index - 1].pager ? samples[index - 1].pager.offset : 0);
+          });
+          return settle().then(function () {
+            var rest = nowGeometry();
+            out.steps.follow.rest = { position: rest.pager ? rest.pager.position : null, route: rest.route, strip: translateXOf(rest.pages) };
+          });
+        });
+      })
+      /* 4. A short drag moves the pane under the finger and snaps back to the one it started on.
+       *
+       *    Deliberately slow, and slower than the Chrome harness has to be. That harness drives the
+       *    input pipeline, which costs a round trip per move, so its "fast" gesture is already slow;
+       *    this one drives the listeners at a real finger's cadence, where the same 0.12 panes at
+       *    30 ms would be a flick — and a flick that commits is correct behaviour, not a failure. So
+       *    the gesture is slowed until distance is all there is, and the check is about distance. */
+      .then(function () {
+        var y = centreOf('.now-page-lyrics');
+        return fingerDrag({ from: { x: Math.round(width * 0.84), y: y }, to: { x: Math.round(width * 0.84 - 0.12 * width), y: y }, steps: 6, gapMs: 60 }).then(function (drag) {
+          return settle().then(function () {
+            var rest = nowGeometry();
+            out.steps.shortDrag = {
+              offsets: drag.samples.map(function (sample) {
+                return sample.pager ? sample.pager.offset : null;
+              }),
+              ms: drag.ms,
+              rest: { position: rest.pager ? rest.pager.position : null, route: rest.route },
+            };
+          });
+        });
+      })
+      /* 5. The same shape, over the lyrics: a scroll must not turn the page here either. */
+      .then(function () {
+        var y = centreOf('.now-page-lyrics');
+        var before = pagerState();
+        return fingerDrag({ from: { x: 300, y: Math.min(height - 60, y + 120) }, to: { x: 100, y: Math.max(60, y - 120) }, steps: 4, gapMs: 20 }).then(function (drag) {
+          return settle().then(function () {
+            out.steps.diagonalOnLyrics = {
+              drag: drag,
+              paneFound: Boolean(document.querySelector('.now-page-lyrics')),
+              pagerBefore: before,
+              pagerAfter: pagerState(),
+            };
+          });
+        });
+      })
+      /* 6. A flick commits on velocity, not on distance. */
+      .then(function () {
+        return flickPager({ selector: '.now-page-lyrics', fromX: Math.round(width * 0.84), toX: Math.round(width * 0.84 - 0.2 * width), steps: 3, gapMs: 8 }).then(function (flick) {
+          return delay(600).then(function () {
+            var rest = nowGeometry();
+            out.steps.flick = { flick: flick, rest: { position: rest.pager ? rest.pager.position : null, route: rest.route } };
+          });
+        });
+      })
+      /* 7. The ring: left from the playlist is the spectrum, left again the lyrics, and right from
+       *    the lyrics the playlist again — every transition the owner named. */
+      .then(function () {
+        var ring = [];
+        var step = function (from, to) {
+          return fingerDrag({ from: { x: from, y: 300 }, to: { x: to, y: 300 }, steps: 5, gapMs: 20 })
+            .then(settle)
+            .then(function (drag) {
+              var geometry = nowGeometry();
+              ring.push({
+                from: from,
+                to: to,
+                position: geometry.pager ? geometry.pager.position : null,
+                route: geometry.route,
+                tilingWorstPx: (drag.samples || []).reduce(function (worst, sample) {
+                  return Math.max(worst, Math.abs(sample.geometry.list.right - sample.geometry.now.left));
+                }, 0),
+                listTranslate: (drag.samples || []).map(function (sample) {
+                  return translateXOf(sample.geometry.list);
+                }),
+                offsets: (drag.samples || []).map(function (sample) {
+                  return sample.pager ? sample.pager.offset : null;
+                }),
+                unavailable: drag.unavailable || null,
+              });
+              return null;
+            });
+        };
+        return step(340, 40)
+          .then(function () {
+            return step(340, 40);
+          })
+          .then(function () {
+            return step(340, 40);
+          })
+          .then(function () {
+            return step(40, 340);
+          })
+          .then(function () {
+            out.steps.ring = ring;
+          });
+      })
+      .then(function () {
+        return { out: out, final: nowGeometry() };
+      })
+      .then(function (result) {
+        result.out.finalRoute = result.final.route;
+        return result.out;
+      });
+  }
+
   window.__naviliteLayoutAudit = {
     DEVICE: DEVICE,
     environment: environment,
     measure: measure,
+    viewportState: viewportState,
+    focusProbe: focusProbe,
     lyricsDensity: lyricsDensity,
     spectrumSnapshot: spectrumSnapshot,
     silenceAudio: silenceAudio,
+    nativeSpectrumProbe: nativeSpectrumProbe,
     waitFor: waitFor,
     walk: walk,
     // v1.4: the scroll-containment readings and the self-driven scenario.
@@ -980,5 +2414,28 @@
     attemptViewerScroll: attemptViewerScroll,
     pokeFrozenList: pokeFrozenList,
     scrollContainment: scrollContainment,
+    // v1.5: the pager, and the app's own tap target for a row.
+    pagerState: pagerState,
+    settlePager: settlePager,
+    waitForPane: waitForPane,
+    waitForMode: waitForMode,
+    swipePager: swipePager,
+    playRow: playRow,
+    songRowCount: songRowCount,
+    // v1.5: the pager's own geometry and the two readings its checks are made of.
+    nowGeometry: nowGeometry,
+    controlHitTest: controlHitTest,
+    lyricsFollowState: lyricsFollowState,
+    seekAudio: seekAudio,
+    audioState: audioState,
+    pauseAudio: pauseAudio,
+    flickPager: flickPager,
+    pagerGesture: pagerGesture,
+    // v1.5 follow-up: the settings overflow, taken apart in the shipping engine, and the gestures.
+    surfaceSideScroll: surfaceSideScroll,
+    settingsOverflowProbe: settingsOverflowProbe,
+    fingerDrag: fingerDrag,
+    inputSupport: inputSupport,
+    deviceGestureSweep: deviceGestureSweep,
   };
 })();

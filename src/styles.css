@@ -269,7 +269,61 @@ button {
   cursor: pointer;
 }
 
-.row:hover,
+/*
+ * v1.6.1. Every tap target says so, in CSS, and this is half of why taps work again.
+ *
+ * A row is a `<button>` with text in it, and by default that text is *selectable*: iOS is free to read
+ * a press that lasts a moment as a text-selection (or callout) gesture rather than a tap, and when it
+ * does it drops the click the row is waiting for. `user-select: none` and `touch-callout: none` are
+ * what every native-feeling list sets for exactly this reason, and they cost nothing on a row you were
+ * never meant to select.
+ *
+ * `touch-action: pan-y pinch-zoom` says the same thing to the gesture layer: vertical panning belongs
+ * to the list, pinch-zoom is worth keeping, and a horizontal drag starting on a row is the pager's
+ * gesture rather than the browser's — which also means WebKit does not spend its double-tap-to-zoom
+ * window deciding what a single tap was meant to be. The now screen already declares this for itself
+ * (see `.now`); the rows never did.
+ */
+.row,
+.card,
+.tab,
+.icon-button,
+.button,
+.pill-option,
+.transport,
+.brand {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: pan-y pinch-zoom;
+  /* The system's own flash-on-touch-down, which WKWebView paints before any CSS of ours applies. */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/*
+ * v1.6.2: the hover paint on a *row* — the background at the top of this block, and the accent the
+ * play mark takes here — is a pointer's state, not a finger's.
+ *
+ * On iOS a tap makes WebKit match `:hover` on what it landed on and then *keep* matching it (there is
+ * no pointer to leave and unset it), so a row stayed painted the moment it was touched and stayed that
+ * way until the next tap somewhere else: the same complaint as a press highlight, one gesture later.
+ * Both rules live in here, where `hover: hover` and `pointer: fine` say a real cursor is present. A
+ * finger is neither, so on the phone there is no hover state at all; the PWA on a desktop still gets
+ * one. (`:focus-visible` is deliberately not in here — it is not a press: WebKit does not match it for
+ * a tap, it is how a keyboard and a switch control find the row they are on, and moving it behind a
+ * hover query would take the row away from them on an iPhone with a keyboard attached.)
+ */
+@media (hover: hover) and (pointer: fine) {
+  .row:hover {
+    background: var(--bg-raised);
+  }
+
+  .row:hover .row-play {
+    color: var(--accent-primary);
+    border-color: var(--accent-primary);
+  }
+}
+
 .row:focus-visible {
   background: var(--bg-raised);
 }
@@ -303,8 +357,11 @@ button {
   font-size: 13px;
 }
 
+/*
+ * v1.5: the play mark is the row's own affordance, not a button of its own — the whole row plays the
+ * song now — so it keeps the pill shape and loses the parts that made it read as a separate control.
+ */
 .row-play,
-.row-star,
 .row-remove,
 .icon-button {
   display: grid;
@@ -319,20 +376,53 @@ button {
   flex: none;
 }
 
-.row:hover .row-play,
-.row-play:focus-visible {
-  color: var(--accent-primary);
-  border-color: var(--accent-primary);
-}
-
-.row-star[aria-label^='Remove'] {
-  color: var(--accent-tertiary);
-  border-color: var(--accent-tertiary);
+/*
+ * The row is the target now: the mark inside it never swallows the tap. Its hover accent is up in the
+ * `@media (hover: hover)` block with the row's own, so a finger never leaves it lit either.
+ */
+.row .row-play {
+  cursor: inherit;
+  pointer-events: none;
 }
 
 .row-remove:hover {
   color: var(--danger);
   border-color: var(--danger);
+}
+
+/*
+ * v1.6.2: **no row paints anything on touch-down.** This is where the highlight he kept seeing came
+ * from — `.row.song:active`, a CSS rule that paints a plate and a ring for as long as the finger is
+ * on the row. `:active` begins at `touchstart` and lasts until `touchend`, so it fired on *every*
+ * contact, whether or not the gesture ever turned into anything: press a track to start a scroll and
+ * the row you happened to land on lit up before your thumb had moved a pixel.
+ *
+ * It was never a threshold, which is what the report guessed at ("the threshold for how long before
+ * it registers it as a swipe and not a tap and hold needs to be increased"): no duration or distance
+ * was consulted, so no value of either could have changed it. He offered the alternative — "or just
+ * remove the fact that tapping without releasing highlights the track at all" — and that is what this
+ * is. The row's own feedback is now the *result* of the activation: a song row that starts playing
+ * gets `.playing` below, a playlist row leaves the screen. There is no press state left to remove,
+ * and nothing flashes at the moment of the tap either, so no feedback exists while a finger is down.
+ *
+ * `.row.song.playing` (line ~1080) is a different thing — it says which track is playing — and is
+ * untouched.
+ */
+.row.song {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* A song row with a remove control beside it: the row keeps the width, the control sits at the end. */
+.row-shell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.row-shell > .row {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .thumb {
@@ -429,14 +519,43 @@ button {
 }
 
 /*
+ * v1.5. iOS Safari zooms the whole page in when a form control smaller than 16 px takes focus, and a
+ * zoomed page is pannable sideways — the owner's report: *"when i'm in the settings screen i still
+ * seem to be able to scroll horizontally i think the dropdown option could be causing some
+ * overflow"*. Measured on the iPhone 15 Pro simulator against the v1.4 build: focusing the playback
+ * dropdown took the visual viewport to **×1.07** while `documentElement.scrollWidth` stayed at the
+ * viewport width, which is exactly why a width-only audit called that screen clean. 16 px is the
+ * size iOS stops zooming at, so every focusable control is set to it. Nothing else about the
+ * layout changes; this is the one property that decides it.
+ */
+.field,
+input.field,
+select.field,
+textarea.field {
+  font-size: 16px;
+}
+
+/*
  * A <select> is as wide as its longest option unless it is told otherwise, and the playback
  * preference options are a sentence long. Left alone it measured 671 CSS px inside a 360 px
  * screen — the whole document then had a sideways scroll on the settings screen, which is
  * exactly what the owner reported. Constrain it and let the browser clip the option text.
+ *
+ * v1.5 follow-up: constraining the *box* was only half of it. In WebKit the control's **content**
+ * still overflows it — measured in Safari on the iPhone 15 Pro simulator, `.field.inline` is a
+ * 365 px box whose content is 679 px, the widest option being 669 px of text — and an unclipped
+ * overflow inside the app's scroll container is scrollable overflow: it took `.view-scroll` from
+ * 393 to 694 px and a push moved it the whole 301 px, i.e. the settings screen was still
+ * draggable sideways with the dropdown focused, which is the owner's original complaint.
+ * Chrome never showed it (the same select reports `scrollWidth === clientWidth`, and Chrome's
+ * audit at 393 px has been clean throughout), so this is a WebKit-specific reading and it is held
+ * by `tools/device-probe.mjs --scenario settings-overflow`, which fails while it is non-zero.
+ * Clipping the control is the whole fix: the container goes back to 393 px and a push moves it 0.
  */
 select.field {
   width: 100%;
   max-width: 100%;
+  overflow: hidden;
   text-overflow: ellipsis;
 }
 
@@ -616,6 +735,17 @@ img {
   border-radius: 999px;
   background: var(--line);
   cursor: pointer;
+  /*
+   * v1.7.1: the seek bar owns a horizontal drag that starts on it.
+   *
+   * The screen around it is `touch-action: pan-y ...` (see `.now`), which is right for the panes —
+   * and which the platform also applies to a gesture on the slider, so a horizontal drag could be
+   * read as a pan/swipe instead of turning the thumb. `none` on the control itself says the opposite
+   * for this subtree only: the browser claims no scroll or zoom here, the platform's own slider drag
+   * is free to run, and the pager has already refused the gesture by name (`data-pager="off"` on the
+   * row) and by hit-test (`src/ui/pager.ts`).
+   */
+  touch-action: none;
 }
 
 .progress::-webkit-slider-thumb {
@@ -669,7 +799,17 @@ img {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  /*
+   * The window the pager slides is clipped here, where the box is the whole screen — not on the
+   * strip, whose own box is one pane wide and would clip the *incoming* pane away (measured: the
+   * lyrics pane stopped hit-testing entirely).
+   *
+   * `clip` rather than `hidden` alone, because `hidden` leaves this box scrollable: anything that
+   * scrolls an ancestor into view drags it, and the lyrics panel used to call `scrollIntoView` on
+   * every highlighted line. `hidden` stays as the fallback for an engine without `clip`.
+   */
   overflow: hidden;
+  overflow: clip;
   padding-top: env(safe-area-inset-top);
   /*
    * v1.4. `overscroll-behavior: none` keeps a scroll inside this screen from chaining out of it —
@@ -688,7 +828,13 @@ img {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 10px max(14px, env(safe-area-inset-right)) 8px max(14px, env(safe-area-inset-left));
+  /*
+   * v1.8.1. The empty band the owner circled sat between the status bar and the pills, and it was
+   * this padding: the inset above it is the platform's (`env(safe-area-inset-top)` on `.now`), so
+   * anything stacked on top of it is dead screen. 10 px became 2 px at the top and 8 px became 6 px
+   * under the pills.
+   */
+  padding: 2px max(14px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left));
   flex: none;
 }
 
@@ -750,13 +896,49 @@ img {
 .now-lyrics {
   flex: 1 1 auto;
   min-height: 88px;
-  margin-top: 8px;
+  /* v1.8.1: 8 px of gap above the spectrum became 4 — the spectrum is what should gain the space. */
+  margin-top: 4px;
+  /* v1.5: clipped, not scrollable — see `.now-pages`. The lyrics panel inside is the scroller. */
   overflow: hidden;
+  overflow: clip;
 }
 
-.now-visualizer.hidden,
-.now-lyrics.hidden {
-  display: none;
+/*
+ * v1.5: the two panes of the now screen, side by side, one screen wide each, moved as a single
+ * strip by `src/ui/pager.ts`. Both are always laid out — the pager has to have the incoming pane
+ * on screen *before* the finger arrives, which is what makes the transition a pull rather than a
+ * swap — so neither pane is ever `display: none` any more; the strip's transform decides what is
+ * visible. The (x/y) line, the title and the transport bar live outside this box, which is why
+ * they keep working mid-drag.
+ *
+ * The strip itself is not clipped: its own box is one pane wide, so clipping here would clip the
+ * *incoming* pane away (measured — the lyrics pane stopped hit-testing at all). The clip belongs to
+ * `.now` above, whose box is the whole screen.
+ */
+.now-pages {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  /* The transform is rewritten every frame of a drag: its own layer keeps the screen from
+     repainting around it. */
+  will-change: transform;
+}
+
+.now-page {
+  display: flex;
+  flex: 0 0 100%;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  overflow: clip;
+}
+
+.now-page-lyrics .now-lyrics {
+  flex: 1 1 0;
+  min-height: 0;
+  margin-top: 0;
 }
 
 .now-canvas {
@@ -767,7 +949,7 @@ img {
 
 .now-title {
   flex: none;
-  margin: 8px 0 0;
+  margin: 4px 0 0;
   padding: 0 16px;
   font-size: 19px;
   text-align: center;
@@ -777,7 +959,7 @@ img {
 .now-sub,
 .now-context {
   flex: none;
-  margin: 2px 0 0;
+  margin: 1px 0 0;
   padding: 0 16px;
   color: var(--text-dim);
   font-size: 14px;
@@ -785,10 +967,42 @@ img {
   overflow-wrap: anywhere;
 }
 
+/*
+ * v1.8.1 — the seek row's *housing*, and the fix for "i can only drag a few pixels above the bar".
+ *
+ * The row is a fixed 18 px, so the touch target inside it can be 44 pt tall without the row (and
+ * therefore the whole screen below it) growing by 26 px: a taller flex item than its row overflows
+ * it symmetrically, the row's own height is what the labels need, and nothing below moves. The row
+ * is `position: relative` so the overflowing target still stacks inside it rather than behind it.
+ */
 .now-progress {
+  position: relative;
   flex: none;
-  margin-top: 6px;
+  height: 18px;
+  margin-top: 2px;
   padding: 0 14px;
+}
+
+/*
+ * The seek bar's own box *is* the hit region, and v1.8.1 makes it 44 px tall centred on the visible
+ * track — 11 × the 4 px line it used to be.
+ *
+ * v1.8.0's box was 4 px tall: exactly the line it painted, so the only part of the control a finger
+ * could start a drag on was WebKit's own 14 px thumb, whose box is positioned by the engine and not
+ * by this file — which is why the owner found the drag working "a few pixels above the seek bar"
+ * and the bar itself feeling dead. The visible 4 px line is now painted as a centred band inside
+ * the tall box, so what he aims at and what the finger lands on are the same thing: the element's
+ * centre and the rendered bar's centre are the same pixel, and the transparent padding above and
+ * below it is symmetrical.
+ *
+ * The `height` is the touch target; the `background` is the bar. Nothing else moves: the engine's
+ * own thumb is centred in this box (14 px on the same centre), `msAtX()` reads the same rect, and
+ * the drag/tap handlers are untouched.
+ */
+.now-progress .progress {
+  margin: 0;
+  height: 44px;
+  background: linear-gradient(var(--line), var(--line)) center / 100% 4px no-repeat;
 }
 
 /* One compact bar, at the bottom: shuffle, previous, play/pause, next, repeat. */
@@ -798,7 +1012,22 @@ img {
   align-items: center;
   justify-content: center;
   gap: 16px;
-  padding: 6px 14px calc(10px + env(safe-area-inset-bottom));
+  /*
+   * v1.8.1: the empty space the owner circled under the transport row was this padding — 10 px of
+   * it, stacked on top of `env(safe-area-inset-bottom)`, which is the home indicator's own space
+   * and stays. 2 px is what is left of the extra.
+   */
+  padding: 2px 14px calc(2px + env(safe-area-inset-bottom));
+  /*
+   * The container is transparent and holds no gesture of its own, so it must not swallow the part of
+   * the seek bar's 44 px target that overflows into it (the target's lower half reaches a few px
+   * below this row): `none` here, `auto` on the buttons, which keep every tap they had.
+   */
+  pointer-events: none;
+}
+
+.now-bar > * {
+  pointer-events: auto;
 }
 
 .now-bar .transport {
@@ -833,7 +1062,15 @@ img {
   /* v1.4: this one is above the overlay and is meant to scroll, but not to pass the gesture on
      to anything outside it — `contain` keeps its scroll its own. */
   overscroll-behavior: contain;
-  padding: 4px 18px 12px;
+  /*
+   * v1.5. The owner's report: "the first lyric line is clipped by the top bar". Measured, two
+   * things were behind it — the first line's box started 4 px below the panel's top edge, *inside*
+   * the faded band of the mask below (transparent over the first 16 px), so line one was drawn
+   * faded. 18 px of top padding puts the line's box past the fade, at the top of a panel that now
+   * starts below the pill row rather than under it, so line one is drawn whole. The harness reads
+   * the number back as `firstLineInFade` / `firstLineTop` instead of trusting the arithmetic.
+   */
+  padding: 18px max(14px, env(safe-area-inset-right)) 14px max(14px, env(safe-area-inset-left));
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
 }
@@ -856,11 +1093,13 @@ img {
 /* --------------------------------------------------------- lyrics mode (v1.2) */
 
 /*
- * Lyrics mode is the text screen: the album art goes away and every pixel it was holding goes
- * to the lines. This is not a cosmetic preference — measured on the 393 x 852 target with the
- * library's long Japanese titles, the art was a 357 px square sitting above the text, and the
- * text column had been squeezed to its 88 px `min-height`: **1 line of a 12-line song** fit on
- * screen.
+ * Lyrics mode is the text screen: the album art is on the other pane and every pixel goes to the
+ * lines. This is not a cosmetic preference — measured on the 393 x 852 target with the library's
+ * long Japanese titles, the art was a 357 px square sitting above the text, and the text column had
+ * been squeezed to its 88 px `min-height`: **1 line of a 12-line song** fit on screen.
+ *
+ * v1.5 moved these metrics from `.now.lyrics-mode` to the strip itself: the pane is set this way in
+ * both modes, so switching panes never reflows the text under the reader's eye mid-drag.
  *
  * 13 px on a 1.35 line box is the density choice. It is iOS's own caption size, it stays
  * comfortably legible for kanji and romaji at arm's length, and it fits roughly 37 lines where
@@ -868,29 +1107,15 @@ img {
  * out by colour and weight only, so following the highlight never reflows the column under the
  * reader's eye.
  */
-.now.lyrics-mode .now-cover {
-  display: none;
-}
-
-.now.lyrics-mode .now-lyrics {
-  /*
-   * `flex-basis: 0` instead of `auto`. With `auto` the column is sized by its (long) content
-   * first and then shrunk to `min-height` by the rows above it; with `0` it takes the whole
-   * leftover height, which is what "as much of the song as possible" means.
-   */
-  flex: 1 1 0;
-  min-height: 0;
-  margin-top: 4px;
-}
-
-.now.lyrics-mode .lyrics {
-  padding: 0 max(14px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left));
-}
-
-.now.lyrics-mode .lyric-line {
+.now-pages .lyric-line {
   padding: 1px 0;
   font-size: 13px;
   line-height: 1.35;
+}
+
+.now-pages .lyrics-empty,
+.now-pages .lyrics-note {
+  font-size: 13px;
 }
 
 .lyrics-empty {
@@ -954,6 +1179,46 @@ img {
 .row.song.playing .row-title {
   color: var(--accent-primary);
   font-weight: 600;
+}
+
+/*
+ * ------------------------------------------------ v1.9.0: the tap's loading state
+ *
+ * The tap paints before any request resolves, and this is the part of that paint that says *"on
+ * it"*: while the engine has not answered, the mark on the row he touched — and the transport on
+ * the bar and the now screen — turns. A screen that is waiting on a link through the relay has to
+ * read as busy; a screen that shows nothing for two seconds reads as dead, which is the report
+ * this release came from.
+ *
+ * The glyph turns rather than the button, because the buttons are pills: a spinning pill looks
+ * exactly like a still one.
+ */
+@keyframes navilite-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.row.song.loading .row-play svg,
+.playerbar.loading .transport svg,
+.now.loading .now-bar .transport svg {
+  animation: navilite-spin 900ms linear infinite;
+}
+
+.row.song.loading .row-play,
+.playerbar.loading .transport,
+.now.loading .now-bar .transport {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* A ring that spins is a ring that hurts some people. The border says the same thing, still. */
+  .row.song.loading .row-play svg,
+  .playerbar.loading .transport svg,
+  .now.loading .now-bar .transport svg {
+    animation: none;
+  }
 }
 
 /* For text that has no spaces to break at — a server URL, a long title in one word. */

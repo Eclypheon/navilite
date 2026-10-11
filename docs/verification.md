@@ -1126,3 +1126,326 @@ promise words), and the version list it pins now ends at `1.4.1`.
 - The check reads *the palette the app applied* and the CSS variables it set. It does not read the
   rendered pixels, so "the screen looks like the cover" is still an eye test.
 
+## 13. v1.5 — the swipe pager, the settings box, and the first lyric line (2026-10-11)
+
+What he asked for: the settings screen must stop moving under his finger, the first lyric line must
+stop hiding behind the top of the panel, and the now-playing screen should be three screens he can
+swipe between — playlist, spectrum, lyrics — with the next one *pulled* in rather than cut to.
+
+Two engines, and they answer different questions:
+
+- **Chrome at 393 x 852** (`tools/layout-audit.mjs`, every route, both now-playing modes) — where the
+  *cause* lives. It reports the computed `font-size` of every control it focuses, and it now reports
+  the focused state's own horizontal overflow.
+- **Safari, iPhone 15 Pro, iOS 18.7** (`tools/device-probe.mjs --scenario focus`, real WebKit, 393 x
+  852, dpr 3) — where the *effect* lives. Chrome never performs an iOS focus-zoom, so a Chrome run
+  can name the offending size but cannot show the zoom; that needs this engine.
+- **`tools/pager-check.mjs`** — the gestures, driven as real CDP touch events against the built app,
+  and the app's own state read back (never by calling an internal function to fake a result).
+
+### 13.1 The settings box that moved the screen
+
+| | v1.4 (before) | v1.5 (after) |
+| --- | --- | --- |
+| the playback dropdown's focus size (Chrome, 393) | `15px` | `16px` |
+| the (URL) box, the same | `15px` | `16px` |
+| visual viewport while focused (Safari, real device engine) | not run — see 13.5 | `393x695` scale `1` -> `393x695` scale `1`, **zoom x1** |
+
+iOS zooms a page in when a focused form control's text is under 16 px, and the zoom is the panning
+he reported: the page stays 393 px wide the whole time (`documentElement.scrollWidth` = 393 before
+and after focusing), which is why a width-only audit had been calling this screen clean. The fix is
+the size, and the measurement that proves it is the *computed size* plus the visual viewport in
+WebKit — a ratio of 1 is not a zoom, 1.07 would be.
+
+Found while doing this, **not fixed**: with the box focused, the settings *scroll surface* still
+carries `301 px` of horizontally scrollable content in WebKit (surface `393 -> 694 px`) while the
+page stays 393 px and no element's rectangle leaves the screen. The probe extension that names the
+element inside the scroller (`widestWhileFocused`) landed after this run, so the culprit is
+unidentified rather than exonerated. Follow-up card: `t_16a5dbe5`. **It was named, measured and
+fixed in §14.1** — it is the playback dropdown's own content, and the fix is one line of CSS.
+
+### 13.2 The first lyric line
+
+| | v1.4 (before) | v1.5 (after) |
+| --- | --- | --- |
+| first line's top vs the panel's top (Chrome, 393) | `+0.00 px` — in the 16 px faded band | `+18.00 px` — past it |
+| first line, Safari (real engine, 393) | not run — see 13.5 | panel top `56 px`, line top `74 px`, `firstLineInFade: false`, `firstLineFullyInside: true` |
+
+The fade at the top of the panel is where the words disappear; a line at `+0 px` is inside it, which
+is the "clipped" he saw. The panel's own scroll now opens with the first line clear of it.
+
+### 13.3 The pager — one run, 27 checks, nothing failed
+
+`node tools/pager-check.mjs --url http://127.0.0.1:4641 --json /tmp/v15-pager6.json` (393 x 852,
+dpr 3, real touch events). The two behaviours that carried the risk:
+
+- **The axis lock.** A mostly-vertical drag on the playlist, measured with 200 px of sideways travel
+  in it: the list scrolled and the pager stayed at `position 0, offset 0`, with **no transform
+  written at all** (`translate.list 0, overlay 0, strip 0`). Half a screen of sideways travel turns
+  no page.
+- **The pane follows the finger.** Over the drag's five samples the panes moved `1.09, 1.18, 1.27,
+  1.36, 1.45` pane-widths — the finger's own travel, monotonic — and the strip's transform matched
+  that travel to **0.00 px** (worst pane error `0.15 px`). The two panes always met edge to edge
+  while the finger was down (no gap, no overlap, the window still covering the screen).
+- **The swipe map.** From the spectrum, left is the lyrics (`#/now/lyrics`), left again is the
+  playlist he came from (`#/playlist/pl-stress-long`), right from the spectrum is the playlist,
+  right from the playlist is the lyrics — the ring turns both ways. The route follows the pane.
+- **Commit on velocity, not distance.** 0.2 pane-widths released slowly snaps back to the pane it
+  started on; the same 0.2 pane-widths released fast (34 ms, offsets `2.07 -> 2.13 -> 2.20`) turns
+  the page.
+- Also checked in the same run: the (x/y) line, the transport, the pill and the progress bar are all
+  hit-testable **mid-drag** (each lands on itself, not on the strip); the pill slides the strip
+  through the same pager instead of cutting; back from the lyrics is the spectrum and forward
+  returns to it; the lyric highlight keeps advancing while the finger is down (advanced by seeking
+  the real media element, not by calling a function in the app).
+
+### 13.4 The lyrics themselves — look and say
+
+From the same run, on a 36-line sidecar (16 lines fit the panel):
+
+- the highlight followed the song for all **36 of 36** lines, and the panel never scrolled past its
+  own end (worst `scrollTop - maxScroll` = `-38 px`, i.e. never overscrolled);
+- it **leads by one line**: for every lit line the upcoming one was already fully on screen, so the
+  line he is about to hear is visible when the current one lights up;
+- a hand scroll of `-49 px` was **left alone** — the auto-scroll did not pull it back while the
+  song played on — and the follow resumed once the grace ran out.
+
+### 13.5 Not verified — read this before trusting the numbers above
+
+- **The v1.4 side of the device pair was never run.** The before/after WebKit pair was abandoned
+  when the card was timeboxed, so the *device* readings above are v1.5-only; the v1.4 numbers in
+  13.1 and 13.2 are Chrome's, which is enough to name the cause but not to show the zoom.
+- **No device run of the pager at all.** Every gesture number above is Chrome-driven CDP touch
+  events at 393 x 852. Real-finger behaviour on iOS — particularly the axis lock against Safari's
+  own back-swipe — is reasoned about, not measured. Follow-up card: `t_16a5dbe5`.
+- **Landscape and the iPad are out of scope** of every run here.
+- One more honest note: the v1.4 device log on disk still shows the old failure
+  (`the layout probe did not load`), including one attempt that died on a backtick inside a comment
+  in the probe's own bootstrap. That is fixed (`--scenario focus` runs), but its re-run did not fit
+  this card.
+
+### 13.6 A note on the cost of proving this
+
+Most of this card's wall clock went into verification scaffolding rather than the release: a new
+409-line harness, a probe extension, and a device pair that was designed, debugged and then dropped.
+The lesson to carry: for a card of this shape the check budget is about **ten minutes using the
+harnesses that already exist** — `pager-check.mjs` already covered the axis lock and the swipe map,
+and its one run is what §13.3 quotes. New scaffolding is only worth it when an existing harness
+*cannot* express the risk.
+
+## 14. v1.5 follow-up — the 301 px named, and the gestures on a device (2026-10-11)
+
+The v1.5 card left three things: a measured 301 px with no element named, gestures that had never
+run in the shipping engine, and the v1.4 half of the WebKit pair dropped. All three are below, each
+with the command that produced it.
+
+### 14.1 The settings screen's 301 px — the element, and the fix
+
+The culprit is the playback dropdown itself:
+
+| | measured (Safari, iPhone 15 Pro simulator, real WebKit) |
+| --- | --- |
+| `select.field.inline` (the playback preference) | box `363 px`, content `679 px` — **the box fits, the content does not** |
+| its widest option | `669 px` of text — "Web Audio only — always the real spectrum (background playback depends on the platform)" |
+| the app's scroll container `div#app > .view-scroll` | `393 -> 694 px`, i.e. `301 px` of sideways content |
+| what a push actually does | `scrollLeft` reaches **`301 px`** — the settings screen really is draggable sideways |
+
+Mechanism: `select.field` clamps the *box* (`max-width: 100%`) but WebKit does not clip the control's
+*content*, and an unclipped overflow inside the scroll container is scrollable overflow. So the
+screen the owner said he could still drag sideways was draggable, at 301 px, by a `<select>` whose
+text is a sentence long.
+
+`tools/device-probe.mjs --scenario settings-overflow` now answers this by *testing rules on the live
+page in one run* (apply, re-measure, push, remove) instead of asking anyone to guess what WebKit
+does. Measured candidates, all in the same run:
+
+| rule applied to the live page | surface | push | verdict |
+| --- | --- | --- | --- |
+| **baseline, the shipping CSS before the fix** | `301 px` | `301 px` | the defect |
+| `select.field { overflow: hidden }` | `0 px` | `0 px` | **the fix** (`src/styles.css`) |
+| `select.field { overflow-x: hidden }` | `0 px` | `0 px` | also works; the one-directional form of the same rule |
+| `select.field { contain: inline-size }` | `301 px` | `301 px` | no effect |
+| `select.field { appearance: none }` | `301 px` | `301 px` | no effect — it is not the appearance |
+| `.field.inline { width: 100% }` | `301 px` | `301 px` | no effect — the box was never the problem |
+| `.view-scroll { overflow-x: hidden }` | `301 px` (geometry unchanged) | `301 px` by script | hides it from a finger, leaves the content overflowing. Not used: it fixes the symptom |
+| `select.field { overflow: visible }` (the pre-fix control) | `301 px` | `301 px` | the control, below |
+
+After the fix, the same run reports: surface `393 -> 393 px`, a push moves it **`0 px`**, and the
+pre-fix control in the same run still measures **`301 px`** — so the zero is a measurement of the
+settings screen, not a probe that has gone blind. `RESULT: the settings screen has nothing to drag
+sideways.` (exit 0).
+
+**Chrome cannot see this one.** The same `<select>` in Chrome reports `scrollWidth === clientWidth`
+(`363 px`), the surface stays `393/393`, and a push moves it 0 — measured with a scratch probe
+(`HeadlessChrome/154`, 393 x 852, dpr 3, safe-area insets). That is why the 393 px audit has been
+green throughout while the phone was not, and why the guard for this lives in the device run: the
+command above **fails** (exit 1, printout naming the element) while the surface carries sideways
+content.
+
+### 14.2 The gestures, in the engine that ships
+
+`node tools/pager-check.mjs --device A0DAA171-263B-48EC-99B6-FCA0BCD299EC` — one run, in Safari on
+the iPhone 15 Pro simulator, **9 checks, 0 failed** (`docs/layout-393-gesture-device-report.json`).
+
+There is no CDP against a simulator's Safari and no WebDriver for it either, so the harness drives
+the app's own listeners in the page: `TouchEvent`s dispatched at a finger's cadence
+(`device-probe.mjs --scenario gesture` → `deviceGestureSweep()`), geometry read between moves with
+the finger still down. `pager-check.mjs` judges the same readings with the same labels it uses for
+Chrome (`judgeDeviceGestures`), so the two drivers answer the same questions.
+
+| what was asked | measured on the device |
+| --- | --- |
+| a mostly-vertical drag turns no page | a **200 x 240 px** drag over the playlist: pager `position 0, offset 0`, the list transform **never written**, and `preventDefault` called on **0 of 4** moves — handed back untouched |
+| the same over the lyrics | pane `2 -> 2`, finger travel `0` panes, `0 of 4` moves prevented |
+| the pane follows the finger | offsets `1.089 -> 1.181 -> 1.270 -> 1.361 -> 1.450` (monotonic), worst error vs the finger's own travel **`0.2 px`** |
+| the strip is transformed by that travel | strip x vs expected: worst **`0.0 px`**; spectrum.right vs lyrics.left and the window edges: worst **`0.00 px`** |
+| the drag commits, route follows | rest pane `2` on `#/now/lyrics`, strip `-393 px` (one whole pane) |
+| a short drag snaps back | a slow `0.12` panes over `375 ms` moved the pane and returned to pane `2` |
+| a flick commits on velocity | the same `0.2` panes in `29 ms`, never past the 0.32 commit point, turned the page to pane `0` |
+| the swipe map is the ring | `340→40`: pane `1` on `#/now` → pane `2` on `#/now/lyrics` → pane `0` on `#/playlist/pl-stress-long`; `40→340` right from the playlist: pane `2` on `#/now/lyrics` |
+| the two screens tile while trading places | list.right vs now.left over all four ring drags: worst **`0.00 px`** |
+
+What this path cannot show, stated plainly: the events go straight to the listeners, so an untrusted
+gesture has **no default action**. The native scroll a real vertical drag produces is therefore not
+reproduced here (Chrome's `Input.dispatchTouchEvent` run in §13.3 is where that half is measured),
+and neither is Safari's own edge-swipe. `defaultPrevented: false` on every vertical move is the part
+of the axis-lock claim this path *can* prove: the gesture is handed back untouched.
+
+One measured difference between the two drivers, worth knowing before comparing numbers: the in-page
+path runs at a finger's real cadence, so the shallow `0.12`-pane drag that Chrome's round-trip-bound
+gesture releases slowly is here fast enough to commit on velocity. It is slowed down in the sweep
+(`steps: 6, gapMs: 60`) so the check is about distance, which is what that check is for.
+
+### 14.3 The v1.4 half of the WebKit pair, re-run (RED), and v1.5 beside it (GREEN)
+
+`--scenario focus` against the v1.4 dist (`670502c`, built separately) and against this build:
+
+| reading | v1.4 | v1.5 + this fix |
+| --- | --- | --- |
+| the playback dropdown's focus size | `15px` | `16px` |
+| visual viewport while focused | `393x695` scale `1` -> scale `1`, **zoom x1** | the same, **zoom x1** |
+| the settings scroll surface | `393 -> 657 px` (**264 px**) | `393 -> 393 px` (**0 px**) |
+| its widest content | `select.field.inline`, `+279 px` | `select.field.inline`, `0 px` of surface overflow |
+| the first lyric line | **`+0.0 px`** — in the faded band | **`+18.0 px`** — past it |
+
+Two honest notes. First, the v1.4 run is RED for the reasons the v1.5 card fixed (the first lyric
+line) and for the reason this card fixed (the surface), which is what a before/after pair is for.
+Second, **the focus-zoom itself did not reproduce in this runtime**: the simulator now runs iOS 26.1,
+where focusing a 15 px control left `visualViewport.scale` at 1 — so what is reproduced here is the
+*size* (`15px`, the documented cause) and not the zoom the v1.5 card measured at x1.07 on iOS 18.7.
+The 16 px change is unchanged by that; the zoom ratio is not re-confirmed on this runtime.
+
+### 14.4 Still unverified
+
+- **Safari's own edge-swipe on a real finger.** The in-page path cannot produce a default action, so
+  whether a horizontal drag that starts at the very left edge is taken by the browser's back gesture
+  before the pager sees it is still unmeasured. (§14.2 measures the app's half of the axis lock.)
+- **The native scroll a vertical drag produces** — Chrome-measured (§13.3), not device-measured.
+- **Landscape and the iPad**, as before.
+
+### 14.5 Two harness bugs found on the way
+
+Both in `tools/device-probe.mjs`, and both of the kind that make a measurement look absent rather
+than wrong:
+
+- The mock stores each post as `{ receivedAt, report }`; the driver read the wrapper as if it were
+  the report. Every device run ended in **"no report arrived"** *after* the page had posted a full
+  report — which is why §13.1's 301 px came with no element named: the field that names it was in a
+  report nothing printed.
+- Once that was fixed, the driver still read only the *newest* entry each time the count moved. The
+  page posts its report and its next progress beat in the same millisecond, so the driver read the
+  beat, stepped `seen` past the report, and waited out its whole timeout. It now walks every entry
+  posted since the last look, in order.
+
+## 15. v1.5.1 — the settings screen he could still drag sideways (2026-10-11)
+
+The release for §14.1. v1.5 fixed the focus size but the settings screen was still draggable
+sideways — 301 px of the playback dropdown's own content, which WebKit does not clip — so the owner
+was still running a build that moved under his finger. This section is the release: the version
+bump, the changelog entry, the two artifacts and the tag. It adds no measurement of its own; the one
+it stands on is §14.1, and the source it ships was already committed as `11b6bcf`.
+
+### 15.1 Tests, build, and the release payload measured in the engine that ships
+
+```
+$ npm run build      → dist/assets/index-UMqln3si.js   89.54 kB │ gzip: 31.08 kB
+                       dist/assets/index-9geUir_A.css   12.10 kB │ gzip:  3.18 kB
+$ npm run typecheck  (tsc --noEmit, clean)
+$ npm test           ℹ tests 76  ℹ pass 76  ℹ fail 0   (75 → 76: the new v1.5.1 changelog assertion)
+$ npm run test:layout ✔ the app has no horizontal overflow at 393 x 852 on any route, either mode
+```
+
+The pager flake was met twice and re-run three times: the first full run failed `test/pager.test.ts`
+on `and it leads by one line` (34 of 35 lit lines), the second full run on that same check (24 of 35)
+plus `a hand scroll is left alone`, and the isolated run **and** the third full run both passed — the
+third one being the 76/76 above. Nothing in this diff touches the lyrics scroll (changelog text, four
+version strings, and the CSS rule §14.1 had already fixed), and the same flake is recorded on v1.5's
+own card, before any of this existed.
+
+The release payload itself, in real WebKit — `node tools/device-probe.mjs --device A0DAA171-… 
+--scenario settings-overflow` against this build's `dist/` (iPhone 15 Pro simulator):
+
+```
+the shipping rule set: surface 393 -> 393 px, overflow-x auto, a push moves it 0 px
+the control (pre-fix rule, same run, same element): 301 px
+RESULT: the settings screen has nothing to drag sideways.            (exit 0)
+```
+
+That is §14.1's reading, taken again on the release build. The re-run wrote
+`docs/layout-393-settings-overflow-device-report.json` identically apart from the probe port and the
+timestamp, so the committed copy of that report is left as it was.
+
+### 15.2 What ships
+
+- `CHANGELOG.md` and `src/ui/changelog.ts`: one `## 1.5.1 — 2026-10-11` bullet, in his terms ("The
+  settings screen can no longer be dragged sideways … 301 px before, 0 px after"), free of the
+  internal vocabulary the other sections are checked against.
+- `test/changelog.test.ts`: the version list is now `['1.0' … '1.5.1']`, and a new test pins the 1.5.1
+  section — its sentence, its numbers, and a ban list — the way the v1.4 and v1.5 sections are
+  pinned. That is the +1 test.
+- `package.json` 1.5.0 → 1.5.1; `android/app/build.gradle` `versionName "1.5.1"` / `versionCode 7`;
+  `ios/App/App.xcodeproj/project.pbxproj` `MARKETING_VERSION = 1.5.1` / `CURRENT_PROJECT_VERSION = 7`
+  (Debug and Release), the same way v1.5 did it.
+- Branch `release/v1.5.1` off `release/v1.5`'s tip (fast-forwarded onto the fix, so the built commit
+  is `11b6bcf` plus this card's release commit), pushed, with the annotated tag `v1.5.1` on the built
+  commit. No existing tag was moved or force-pushed.
+
+### 15.3 Artifacts
+
+```
+artifacts/Navilite-1.5.1-debug.apk      8,785,271 bytes   (v1.4: 8,782,355 — +2,916, +0.03%)
+artifacts/Navilite-1.5.1-unsigned.ipa     869,342 bytes   (v1.4:   866,719 — +2,623, +0.30%)
+$ aapt2 dump badging …Navilite-1.5.1-debug.apk  →  versionCode='7' versionName='1.5.1'
+$ tools/build-ios-ipa.sh                        →  app version 1.5.1 (7), UIBackgroundModes[0]=audio
+```
+
+Every hashed asset in `dist/assets/` is byte-identical to its copy inside **both** archives (sha256 of
+each member read straight out of the zip, so nothing was extracted to disk):
+
+| asset | sha256 — the same in `dist/`, the APK and the IPA |
+| --- | --- |
+| `index-UMqln3si.js` (89,546 B) | `524ae08be2489d4131aac27b26f7d9f8969a6fb7c5d4602c970d7ba55e1e8534` |
+| `index-9geUir_A.css` (12,103 B) | `02f4872c03d9471184863f8d0650efffd82eab439d086567fe9881741ffdc4a3` |
+| `base-Ilm-LlNj.js`, `esm-B7L2JGfO.js`, `esm-vQC5DiGm.js`, `native-3kB3u6fK.js`, `web-CdZqwKzK.js`, `web-DFsRYH62.js` | `acf4a23f…`, `f6f45b77…`, `743acba7…`, `1aae361a…`, `10abf09e…`, `01f9c175…` |
+
+The fix is in the shipped stylesheet, not only on disk —
+`select.field{text-overflow:ellipsis;width:100%;max-width:100%;overflow:hidden}` is in
+`index-9geUir_A.css` inside both artifacts — and the shipped chunk carries the new changelog text
+(`can no longer be dragged sideways` is in `index-UMqln3si.js`), so the "What's new" page he opens
+under Settings says 1.5.1 rather than 1.5.
+
+Neither binary is in the repo (`artifacts/` is gitignored). Both were attached to the release card
+`t_0caf0353`.
+
+### 15.4 Still unverified
+
+- **The APK on an Android device.** There is no Android device run for this release, and none for the
+  ones before it: the Android half of this fix is the same stylesheet the simulator measured, and
+  §12.6's note holds — Android's web view does not drag its own content the way WKWebView does.
+- **The installed `.ipa` on the simulator.** The device run above loads the release `dist/` in
+  Safari, not the app bundle: `--app` needs a build with `server.url` pointing at the probe port, and
+  the release build deliberately has none. What ties the two together is §15.3's byte-identical
+  payload, not a run of the installed binary.
+- Everything else carries over from §14.4 unchanged: Safari's own edge-swipe on a real finger, the
+  native scroll a real vertical drag produces, landscape, and the iPad.
+

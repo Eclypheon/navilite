@@ -274,10 +274,18 @@ async function main() {
       await evaluate(cdp, `${IN_PAGE}openNowFromList()`);
       const swiped = await evaluate(cdp, `${IN_PAGE}swipeLeftToPlaylists()`);
       readings.states.swipe = swiped;
+      /*
+       * v1.5 turned the now screen into a three-pane pager — playlist | spectrum | lyrics — so the
+       * v1.4 expectation (“a left swipe from the spectrum goes to the playlists screen”) is no longer
+       * what the owner asked for: a left swipe from the spectrum now pages to the *lyrics*, and the
+       * playlist he is on is one more left swipe away. What v1.4 actually owned here is that a
+       * swipe is read as a swipe and not as a scroll, so that is what this checks — the panes it
+       * landed on, the route it ended at, and the list behind, which must not have moved.
+       */
       check(
-        'the swipe from the spectrum to the playlists is still a swipe, not a scroll',
-        swiped.route === '#/playlists',
-        `route after a leftward touch drag on the spectrum: ${swiped.route}`,
+        'a leftward swipe pages the screens (spectrum -> lyrics -> the playlist he is on) and never scrolls the list behind',
+        swiped.firstPane === 2 && String(swiped.route).indexOf('#/playlist') === 0 && swiped.state.scrollTop === beforeOpen.scrollTop,
+        `panes after each leftward touch drag: ${(swiped.panes ?? []).join(' -> ')}; landed on ${swiped.route}; the list behind stayed at ${swiped.state.scrollTop} (was ${beforeOpen.scrollTop})`,
       );
 
       /* ------------------------------- 6. the 393 px layout guard still bites */
