@@ -29,7 +29,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, cpSync } 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { formatReport } from './layout-audit.mjs';
+import { formatReport, formatScrollContainment } from './layout-audit.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -54,7 +54,19 @@ const MANUAL = argv.has('manual');
 const APP_PATH = argv.get('app');
 const BUNDLE_ID = argv.get('bundle-id') ?? 'app.navilite';
 const WAIT_SECONDS = Number(argv.get('wait') ?? 180);
-const DIST = join(root, 'dist');
+/**
+ * `walk-and-scroll` (default) runs the whole route walk and then the scroll scenario.
+ *
+ * `scroll` runs only the scroll scenario. Safari in the simulator freezes a tab it does not
+ * consider visible — and the Simulator window is behind the terminal for most of a headless run —
+ * so a four-minute walk can stop half way with no report at all. The short scenario finishes well
+ * inside that budget; the walk itself is covered by the 393 suite, which runs it in Chrome.
+ */
+const SCENARIO = argv.get('scenario') ?? 'walk-and-scroll';
+// Default: the workspace build. `--dist` points the probe at some other payload — an older
+// release's assets, say, so the same scenario can be run before and after a change without
+// swapping anything in and out of the tree.
+const DIST = argv.get('dist') ?? join(root, 'dist');
 
 function sh(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', ...options });
@@ -206,12 +218,31 @@ function buildProbeBundle() {
       return audit.waitFor('Boolean(window.__navilite && window.__navilite.libraryReady())', 'the library to connect', 45000);
     })
     .then(function () {
+      if (cfg.scenario === 'scroll') {
+        // See the --scenario scroll option: the scroll readings on their own, for a browser that
+        // freezes a tab it cannot see before a full walk would finish.
+        beat('connected; running the scroll-containment scenario on its own');
+        return { device: audit.DEVICE, environment: audit.environment(), states: {}, scrollOnly: true };
+      }
       beat('connected, walking the routes');
       return audit.walk({
         onStep: function (label) {
           beat('step: ' + label);
         },
       });
+    })
+    .then(function (report) {
+      beat('layout walk done; running the v1.4 scroll-containment scenario');
+      return audit.scrollContainment().then(
+        function (scroll) {
+          report.scroll = scroll;
+          return report;
+        },
+        function (error) {
+          report.scroll = { error: String((error && error.message) || error) };
+          return report;
+        },
+      );
     })
     .then(function (report) {
       report.probe = { source: 'page', href: location.href, at: new Date().toISOString() };
@@ -234,10 +265,14 @@ function buildProbeBundle() {
 
   const index = join(probeDir, 'index.html');
   const html = readFileSync(index, 'utf8');
-  const configLiteral = `{ username: 'navidrome', password: 'navidrome', hideNativeBridge: ${APP_PATH ? 'true' : 'false'} }`;
+  const configLiteral = `{ username: 'navidrome', password: 'navidrome', hideNativeBridge: ${APP_PATH ? 'true' : 'false'}, scenario: '${SCENARIO}' }`;
+  // The two probe scripts carry a query: Safari caches them by URL, and a stale probe is a silent
+  // failure — the page loads, the probe script parses an error into the console, and the run ends
+  // with "the layout probe did not load" while the code on disk is perfectly good.
+  const stamp = Date.now().toString(36);
   const injected = html.replace(
     '</body>',
-    `  <script>window.__naviliteProbeConfig = ${configLiteral};</script>\n    <script src="./__probe.js"></script>\n    <script src="./__probe-boot.js"></script>\n  </body>`,
+    `  <script>window.__naviliteProbeConfig = ${configLiteral};</script>\n    <script src="./__probe.js?v=${stamp}"></script>\n    <script src="./__probe-boot.js?v=${stamp}"></script>\n  </body>`,
   );
   if (injected === html) throw new Error('could not inject the probe into index.html');
   writeFileSync(index, injected);
@@ -353,12 +388,31 @@ async function main() {
       process.exitCode = 3;
       return;
     }
-    const { text, failures } = formatReport(report, 'real iOS WebKit — env() comes from the OS');
-    process.stdout.write(`${text}\n`);
-    const out = join(root, 'docs', 'layout-393-device-report.json');
+    if (!report || typeof report.device !== 'object' || report.device === null) {
+      // The bootstrap posts what it has, even when the walk never got going — show it as-is
+      // rather than dying inside the formatter with "cannot read properties of undefined".
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      throw new Error(`the probe posted no layout readings${report?.error ? `: ${report.error}` : ''}`);
+    }
+    const scrollOnly = report.scrollOnly === true;
+    let failures = 0;
+    if (!scrollOnly) {
+      const formatted = formatReport(report, 'real iOS WebKit — env() comes from the OS');
+      failures = formatted.failures;
+      process.stdout.write(`${formatted.text}\n`);
+    } else {
+      const env = report.environment ?? {};
+      process.stdout.write(`Device under test: ${report.device.name} — ${report.device.width}x${report.device.height} CSS px, dpr ${report.device.deviceScaleFactor}\n`);
+      process.stdout.write(`  innerWidth ${env.innerWidth} · innerHeight ${env.innerHeight} · dpr ${env.devicePixelRatio} · visualViewport ${env.visualViewportWidth} (scale ${env.visualViewportScale})\n`);
+      process.stdout.write('  (scroll scenario only — the route walk is covered by the 393 suite, which runs it in Chrome)\n\n');
+    }
+    const scrollLines = formatScrollContainment(report.scroll);
+    process.stdout.write(`${scrollLines.join('\n')}\n`);
+    const scrollFailed = Boolean(report.scroll) && (Boolean(report.scroll.error) || report.scroll.passed === false);
+    const out = join(root, 'docs', scrollOnly ? 'layout-393-scroll-device-report.json' : 'layout-393-device-report.json');
     writeFileSync(out, JSON.stringify(report, null, 2));
     process.stdout.write(`\nraw measurements: ${out}\n`);
-    process.exitCode = failures === 0 ? 0 : 1;
+    process.exitCode = failures === 0 && !scrollFailed ? 0 : 1;
   } finally {
     mock.kill('SIGTERM');
     rmSync(probeDir, { recursive: true, force: true });

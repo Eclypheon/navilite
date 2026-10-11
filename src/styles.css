@@ -42,12 +42,36 @@ body {
    */
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+  /*
+   * v1.4 — the document is not a scroll container at all any more.
+   *
+   * Before this, `html`/`body` were the scroll context: the content made the document taller than
+   * the screen, so every scroll was a document scroll. Two things followed from that, and both are
+   * what the owner reported: a gesture over the fixed now-playing screen chained into the document
+   * and scrolled the list behind it, and on iOS the document's elastic overscroll dragged the
+   * whole page — header included — so the top bar could be pulled into view and stretched.
+   *
+   * With the document pinned to the viewport and clipping, neither is possible: there is nothing
+   * for the gesture to chain into, and `overscroll-behavior: none` stops the document-level
+   * rubber-band and pull-to-refresh on the engines that implement it. The scrolling is done by
+   * `.view-scroll` below, one box inside a shell that never moves.
+   */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 #app {
   display: flex;
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   flex-direction: column;
+  /*
+   * The shell. Fixed height, and it clips: the header, the content area and the player bar are its
+   * three rows, so the header is a row of a box that cannot scroll rather than a sticky element
+   * riding on a scrolling document. There is no scroll position at which the header can take up
+   * more room or leave the screen.
+   */
+  overflow: hidden;
 }
 
 button {
@@ -80,6 +104,12 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
+  /*
+   * v1.4: `flex: none` — the header is a fixed row of the shell, not a size the content can
+   * influence. Its height is its own content plus its padding and nothing else, so no amount of
+   * scrolling can make it taller (and, being outside the scroll container, it cannot move either).
+   */
+  flex: none;
   padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(14px);
@@ -135,8 +165,31 @@ button {
 
 /* ------------------------------------------------------------------ view */
 
+/*
+ * v1.4: the app's one scroll container, and the whole reason the two defects go away.
+ *
+ * It sits between the header and the player bar inside the fixed shell, it is the only box with a
+ * scrollable overflow region, and it is per-view by construction: every list, grid, detail and
+ * settings page draws into `.view` inside it, so one scroller serves the screen that is on screen.
+ * `overscroll-behavior: contain` stops a scroll that reaches the end of this box from chaining
+ * anywhere else (the document cannot scroll anyway, but on iOS the chain is what produces the
+ * rubber-band that dragged the page), and `.scroll-locked` is what freezes it while the now-playing
+ * screen is over it.
+ */
+.view-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.view-scroll.scroll-locked {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 .view {
-  flex: 1;
   padding: 16px max(14px, env(safe-area-inset-right)) calc(var(--bar-height) + 28px) max(14px, env(safe-area-inset-left));
   max-width: 1100px;
   width: 100%;
@@ -618,6 +671,16 @@ img {
   background: var(--bg);
   overflow: hidden;
   padding-top: env(safe-area-inset-top);
+  /*
+   * v1.4. `overscroll-behavior: none` keeps a scroll inside this screen from chaining out of it —
+   * what the owner described as "when i scroll, it seems to scroll the playlist behind it".
+   * `touch-action: pan-y` (plus pinch-zoom, which is worth keeping) means a drag is only ever read
+   * as a vertical pan: the horizontal swipe between the spectrum and the playlists stays the app's
+   * gesture instead of being consumed as a scroll or as WebKit's own edge-swipe, and it cannot
+   * start a horizontal scroll inside the overlay either.
+   */
+  overscroll-behavior: none;
+  touch-action: pan-y pinch-zoom;
 }
 
 .now-top {
@@ -767,6 +830,9 @@ img {
   height: 100%;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  /* v1.4: this one is above the overlay and is meant to scroll, but not to pass the gesture on
+     to anything outside it — `contain` keeps its scroll its own. */
+  overscroll-behavior: contain;
   padding: 4px 18px 12px;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);

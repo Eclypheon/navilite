@@ -55,17 +55,60 @@
     return parts.join(' > ');
   }
 
-  /** The nearest ancestor that clips or scrolls sideways — an innocent parent, if any. */
+  /**
+   * The nearest ancestor that clips or scrolls sideways — an innocent parent, if any.
+   *
+   * v1.4 made the app one fixed shell with its own vertical scroll container, and a box with
+   * `overflow-y: auto` computes `overflow-x: auto` too — so *every* element in the app now has a
+   * horizontally-clipping ancestor. Treating that as an innocent parent would shield the next real
+   * offender from this audit, which is exactly what the owner's 393 px regression test exists to
+   * catch. So an ancestor only counts as a legitimate horizontal scroller when it can actually
+   * scroll in x (it overflows: `scrollWidth > clientWidth`), or when it clips deliberately
+   * (`hidden` / `clip`, where the page genuinely cannot grow sideways).
+   */
   function clippingAncestor(el) {
     var node = el.parentElement;
     while (node && node !== document.documentElement) {
-      var overflowX = getComputedStyle(node).overflowX;
-      if (overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'hidden' || overflowX === 'clip') {
+      var style = getComputedStyle(node);
+      var overflowX = style.overflowX;
+      if (overflowX === 'hidden' || overflowX === 'clip') return selectorFor(node);
+      if ((overflowX === 'auto' || overflowX === 'scroll') && node.scrollWidth > node.clientWidth + 1) {
         return selectorFor(node);
       }
       node = node.parentElement;
     }
     return null;
+  }
+
+  /**
+   * The thing a scroll gesture actually moves, and the header that must never move.
+   *
+   * v1.4 is the version that changed this: before it the document itself was the scroll context,
+   * so `document.documentElement` was the surface. Now it is the app's own scroll container
+   * (`.view-scroll`), and the document is deliberately frozen. A driver that measured only the
+   * document from this version on would be measuring a box that cannot overflow by construction —
+   * so the fallback here is the document, and it is reported, not guessed at.
+   */
+  function scrollSurfaces() {
+    var doc = document.scrollingElement;
+    return {
+      header: document.querySelector('.topbar'),
+      view: document.querySelector('.view'),
+      scroller: document.querySelector('.view-scroll') || doc,
+      document: doc,
+      now: document.querySelector('.now'),
+      lyrics: document.querySelector('.lyrics'),
+      playlists: document.querySelector('.playerbar'),
+    };
+  }
+
+  function horizontalOverflowOf(el) {
+    return el ? Math.max(0, el.scrollWidth - el.clientWidth) : 0;
+  }
+
+  /** An element has a real scroll distance when its content is taller than its box. */
+  function scrollableBy(el) {
+    return el ? Math.max(0, el.scrollHeight - el.clientHeight) : 0;
   }
 
   /**
@@ -120,6 +163,15 @@
     var doc = document.documentElement;
     var overflowers = [];
     var selfOverflow = [];
+    /*
+     * The surface the layout can actually push sideways. Since v1.4 that is the app's own scroll
+     * container, not the document: the document is a fixed shell that clips, so measuring it alone
+     * would report 0 px overflow for a layout built out of 600 px boxes. Both numbers are reported;
+     * the failure threshold is the larger of the two, so neither surface can hide an offender.
+     */
+    var surface = scrollSurfaces().scroller;
+    var surfaceOverflow = horizontalOverflowOf(surface);
+    var documentOverflow = horizontalOverflowOf(doc);
 
     var all = document.querySelectorAll('body *');
     for (var i = 0; i < all.length; i += 1) {
@@ -195,7 +247,13 @@
       documentScrollWidth: doc.scrollWidth,
       bodyScrollWidth: document.body.scrollWidth,
       scrollingElementScrollWidth: doc.scrollingElement ? doc.scrollingElement.scrollWidth : null,
-      horizontalOverflow: doc.scrollWidth - doc.clientWidth,
+      /** The box a scroll gesture moves, and its horizontal numbers. */
+      scrollSurface: selectorFor(surface),
+      scrollSurfaceClientWidth: surface.clientWidth,
+      scrollSurfaceScrollWidth: surface.scrollWidth,
+      scrollSurfaceOverflow: surfaceOverflow,
+      documentOverflow: documentOverflow,
+      horizontalOverflow: Math.max(surfaceOverflow, documentOverflow),
       actualOffenders: actual,
       overflowersInsideScrollers: inside,
       selfOverflow: selfOverflow.slice(0, 12),
@@ -520,6 +578,385 @@
 
   captureMediaElement();
 
+  /* ---------------------------------------------------- scroll containment (v1.4) */
+
+  /**
+   * The owner's two v1.4 reports are both about *what moves when he scrolls*:
+   *
+   *   "if i'm in my playlist then i go to my spectrum view, when i scroll, it seems to scroll the
+   *    playlist behind it."
+   *   "i should not be able to scroll the top bar of the main app such that it takes up more space"
+   *
+   * So the evidence has to be positions, not intentions: where the list is, where the document is,
+   * and where the top bar is — before a scroll gesture, while the spectrum covers the list, and
+   * after coming back. Everything below is a measurement; the comparing is the driver's job
+   * (tools/scroll-check.mjs for Chrome, the device-probe bootstrap for a real iPhone).
+   *
+   * `scrollContainment()` is the whole scenario self-driven, because the WebKit run has no CDP to
+   * fire a real gesture at it. Chrome's driver composes the same steps around real scroll gestures.
+   */
+
+  function round2(n) {
+    return Math.round(n * 100) / 100;
+  }
+
+  /**
+   * Frames, because a scroll is not applied in the same task it is asked for.
+   *
+   * Each frame carries a timer backstop. `requestAnimationFrame` stops for a tab Safari does not
+   * consider visible — the simulator's browser is in that state whenever the Simulator window is
+   * behind something else — and a probe that is *walking the app* must not hang for minutes on a
+   * window nobody is looking at. Layout and computed styles still update for an occluded tab;
+   * these readings only need the scroll to have been applied, which the timer guarantees.
+   */
+  function nextFrames(count) {
+    var left = count || 2;
+    return new Promise(function (resolve) {
+      var settled = false;
+      var settle = function () {
+        if (settled) return;
+        settled = true;
+        resolve(true);
+      };
+      var backstop = setTimeout(settle, 200 * left);
+      requestAnimationFrame(function tick() {
+        left -= 1;
+        if (left <= 0) {
+          clearTimeout(backstop);
+          settle();
+        } else requestAnimationFrame(tick);
+      });
+    });
+  }
+
+  function headerRect() {
+    var header = document.querySelector('.topbar');
+    if (!header) return null;
+    var rect = header.getBoundingClientRect();
+    return { top: round2(rect.top), height: round2(rect.height), bottom: round2(rect.bottom) };
+  }
+
+  /** One reading of everything the containment checks compare. */
+  function scrollState() {
+    var s = scrollSurfaces();
+    var scrollerStyle = s.scroller ? getComputedStyle(s.scroller) : null;
+    var nowStyle = s.now ? getComputedStyle(s.now) : null;
+    var lyricsStyle = s.lyrics ? getComputedStyle(s.lyrics) : null;
+    var status = null;
+    try {
+      status = window.__navilite ? window.__navilite.status() : null;
+    } catch (error) {
+      status = null;
+    }
+    return {
+      route: location.hash,
+      header: headerRect(),
+      headerPosition: s.header ? getComputedStyle(s.header).position : null,
+      // The document is not supposed to be a scroller at all any more.
+      documentScrollTop: s.document ? round2(s.document.scrollTop) : null,
+      windowScrollY: round2(window.scrollY),
+      documentScrollable: scrollableBy(s.document),
+      // The one box that scrolls the app's content.
+      scrollSurface: selectorFor(s.scroller),
+      scrollTop: round2(s.scroller.scrollTop),
+      scrollable: scrollableBy(s.scroller),
+      overflowY: scrollerStyle ? scrollerStyle.overflowY : null,
+      overscrollY: scrollerStyle ? scrollerStyle.overscrollBehaviorY : null,
+      nowOpen: s.now ? !s.now.classList.contains('hidden') : false,
+      nowOverscroll: nowStyle ? nowStyle.overscrollBehavior : null,
+      nowTouchAction: nowStyle ? nowStyle.touchAction : null,
+      lyricsScrollTop: s.lyrics ? round2(s.lyrics.scrollTop) : null,
+      lyricsScrollable: scrollableBy(s.lyrics),
+      lyricsOverscrollY: lyricsStyle ? lyricsStyle.overscrollBehaviorY : null,
+      // The (x/y) line and the transport, which have to keep working behind/on the overlay.
+      context: (document.querySelector('.now-context') || {}).textContent || null,
+      engineState: status ? status.state : null,
+      spectrumChip: (document.querySelector('.mode-chip') || {}).textContent || null,
+    };
+  }
+
+  /**
+   * Which element a finger would actually land on, over a grid of the screen. This is the
+   * engine-honest way to say "the list underneath cannot be reached": not "the CSS looks right",
+   * but "hit-testing the whole screen returns the overlay".
+   *
+   * The grid is laid out from the *live* viewport, not from the device constant: Safari on a phone
+   * gives the page a shorter layout viewport than the screen (the URL bar), and a point below it
+   * has no element at all — `elementFromPoint` answers null, which is not evidence that anything
+   * leaked through. Those points are reported as `outsideViewport` and left out of the verdict.
+   */
+  function hitTest() {
+    var width = window.innerWidth || DEVICE.width;
+    var height = window.innerHeight || DEVICE.height;
+    var fractions = [0.11, 0.29, 0.49, 0.7, 0.93];
+    var columns = [0.1, 0.31, 0.51, 0.71, 0.92];
+    var points = [];
+    for (var r = 0; r < fractions.length; r += 1) {
+      for (var c = 0; c < columns.length; c += 1) {
+        var x = Math.round(width * columns[c]);
+        var y = Math.round(height * fractions[r]);
+        var el = document.elementFromPoint(x, y);
+        var inside = !!(el && el.closest && el.closest('.now'));
+        points.push({
+          x: x,
+          y: y,
+          selector: el ? selectorFor(el) : null,
+          insideNow: inside,
+          outsideViewport: !el,
+        });
+      }
+    }
+    var insideViewport = points.filter(function (point) {
+      return !point.outsideViewport;
+    });
+    return {
+      points: points,
+      width: width,
+      height: height,
+      allInsideNow: insideViewport.every(function (point) {
+        return point.insideNow;
+      }),
+    };
+  }
+
+  /**
+   * Open a list that really scrolls, and put it at a known offset.
+   *
+   * The offset is set on whatever box scrolls the app's content. Before v1.4 that box was the
+   * document itself — which is the defect this measures, so the reading is taken wherever the
+   * scroll actually goes rather than where it ought to.
+   */
+  function prepareScroll(options) {
+    var settings = options || {};
+    var hash = settings.hash || '#/playlist/pl-stress-long';
+    var offset = typeof settings.offset === 'number' ? settings.offset : 400;
+    return setHash(hash, "document.querySelectorAll('.row.song .row-play').length > 4", 'the long playlist')
+      .then(function () {
+        var scroller = scrollSurfaces().scroller;
+        var room = scrollableBy(scroller);
+        if (room < 100) {
+          throw new Error('nothing to scroll: ' + selectorFor(scroller) + ' has only ' + room + ' px of scrollable content');
+        }
+        scroller.scrollTop = Math.min(room, offset);
+        return nextFrames(2);
+      })
+      .then(function () {
+        var state = scrollState();
+        if (state.scrollTop < 1) throw new Error('the list would not scroll (scrollTop ' + state.scrollTop + ')');
+        return state;
+      });
+  }
+
+  /** The app's own route onto the now screen: tap play on a row, as a person does. */
+  function openNowFromList() {
+    var play = document.querySelector('.row.song .row-play');
+    if (!play) return Promise.reject(new Error('no playable row on this screen'));
+    play.click();
+    return waitFor("location.hash === '#/now'", 'the now screen')
+      .then(function () {
+        return nextFrames(2);
+      })
+      .then(scrollState);
+  }
+
+  /**
+   * Everything a *viewer* can reach while the spectrum is up: the window, and the document. The
+   * list behind the overlay is not in that set — the overlay covers the screen and the box
+   * underneath is frozen — which is exactly what the Chrome driver's real gestures confirm, and
+   * what `hitTest()` measures on a device where no gesture can be synthesised.
+   */
+  function attemptViewerScroll() {
+    var s = scrollSurfaces();
+    var before = round2(s.scroller.scrollTop);
+    window.scrollTo(0, 600);
+    if (s.document) s.document.scrollTop = 600;
+    if (s.view) s.view.scrollTop = s.view.scrollTop + 600;
+    if (s.lyrics) s.lyrics.scrollTop = s.lyrics.scrollTop + 400;
+    return nextFrames(3).then(function () {
+      var state = scrollState();
+      return { moved: round2(s.scroller.scrollTop) - before, state: state };
+    });
+  }
+
+  /**
+   * A programmatic poke at the frozen container itself.
+   *
+   * Not something a finger can do — the overlay is over it — but an `overflow: hidden` box is still
+   * scrollable programmatically, so this is the harshest form of "the list underneath was moved
+   * while the spectrum was open": the offset has to come back exactly when the spectrum closes, and
+   * that is what the last step of the scenario checks.
+   */
+  function pokeFrozenList(by) {
+    var scroller = scrollSurfaces().scroller;
+    var before = round2(scroller.scrollTop);
+    scroller.scrollTop = scroller.scrollTop + (typeof by === 'number' ? by : 600);
+    return nextFrames(2).then(function () {
+      return { moved: round2(scroller.scrollTop) - before, state: scrollState() };
+    });
+  }
+
+  /** `#/playlists` through the app's own close button, which is the "going back" he described. */
+  function closeNow() {
+    var close = document.querySelector('.now-close');
+    if (!close) return Promise.reject(new Error('no close button on the now screen'));
+    close.click();
+    return waitFor("location.hash !== '#/now'", 'the browse screen')
+      .then(function () {
+        return waitFor("document.querySelectorAll('.row.song .row-play').length > 4", 'the list again');
+      })
+      .then(function () {
+        return nextFrames(3);
+      })
+      .then(scrollState);
+  }
+
+  /** The swipe left off the spectrum, as the app implements it: touch, not wheel. */
+  function swipeLeftToPlaylists() {
+    if (!beginSwipe('.now')) return Promise.reject(new Error('the now screen did not accept a touch'));
+    endSwipe('.now');
+    return waitFor("location.hash === '#/playlists'", 'the playlists route')
+      .then(function () {
+        return nextFrames(2);
+      })
+      .then(function () {
+        return { route: location.hash, state: scrollState() };
+      });
+  }
+
+  /** The (x/y) line, the transport and the Spectrum/Lyrics pill, while the overlay is up. */
+  function overlayControlsCheck() {
+    var result = {};
+    var pills = document.querySelectorAll('.pill-option');
+    if (pills.length < 2) return Promise.reject(new Error('the spectrum/lyrics pill is missing'));
+    var empty = scrollState();
+    result.context = empty.context;
+    result.engineState = empty.engineState;
+    result.transport = document.querySelectorAll('.now-bar .transport').length;
+    pills[1].click();
+    return waitFor("!document.querySelector('.now-lyrics').classList.contains('hidden')", 'lyrics mode')
+      .then(function () {
+        result.lyricsMode = true;
+        return nextFrames(2);
+      })
+      .then(function () {
+        pills[0].click();
+        return waitFor("!document.querySelector('.now-visualizer').classList.contains('hidden')", 'spectrum mode');
+      })
+      .then(function () {
+        result.spectrumMode = true;
+        result.mode = window.__navilite ? window.__navilite.nowMode() : null;
+        return result;
+      });
+  }
+
+  /** Set the Spectrum/Lyrics pill by index, without the mode-switch assertions. */
+  function setPillMode(index) {
+    var pills = document.querySelectorAll('.pill-option');
+    if (pills.length < 2) return Promise.reject(new Error('no pill to click'));
+    pills[index].click();
+    return nextFrames(2).then(scrollState);
+  }
+
+  /**
+   * The whole scenario, self-driven: list scrolled → spectrum open → everything a viewer can reach
+   * asked to scroll → the frozen container poked → close → the list is where it was. Returns the
+   * readings *and* the verdict, so the WebKit run can post one object and have it mean something.
+   */
+  function scrollContainment(options) {
+    var report = { steps: [] };
+    var opened = null;
+    var attempts = [];
+    var record = function (label, state) {
+      report.steps.push({ label: label, state: state });
+      return state;
+    };
+    return prepareScroll(options || {})
+      .then(function (state) {
+        opened = state;
+        record('the list, scrolled before the spectrum was opened', state);
+      })
+      .then(openNowFromList)
+      .then(function (state) {
+        record('the spectrum, opened over the list', state);
+      })
+      .then(function () {
+        report.hitTest = hitTest();
+        return attemptViewerScroll();
+      })
+      .then(function (attempt) {
+        attempts.push(attempt.state);
+        record('after asking the window and the document to scroll', attempt.state);
+      })
+      .then(overlayControlsCheck)
+      .then(function (controls) {
+        report.controls = controls;
+      })
+      .then(function () {
+        // In lyrics mode the overlay owns a scroller of its own; its chaining is the same question.
+        return setPillMode(1);
+      })
+      .then(function (state) {
+        record('lyrics mode, before asking it to scroll', state);
+        return attemptViewerScroll();
+      })
+      .then(function (attempt) {
+        attempts.push(attempt.state);
+        record('after asking the window and the document to scroll (lyrics mode)', attempt.state);
+      })
+      .then(function () {
+        return pokeFrozenList(600);
+      })
+      .then(function (poked) {
+        report.programmatic = { moved: poked.moved };
+        record('after scrolling the frozen container itself, programmatically', poked.state);
+      })
+      .then(function () {
+        return setPillMode(0);
+      })
+      .then(closeNow)
+      .then(function (state) {
+        record('the list, after closing the spectrum', state);
+        report.before = opened;
+        report.after = state;
+        report.headerUnchanged = JSON.stringify(state.header) === JSON.stringify(opened.header);
+        report.listRestored = state.scrollTop === opened.scrollTop;
+        report.documentNeverScrolled = report.steps.every(function (step) {
+          return step.state.documentScrollTop === 0 && step.state.windowScrollY === 0;
+        });
+        report.headerNeverMoved = report.steps.every(function (step) {
+          return JSON.stringify(step.state.header) === JSON.stringify(opened.header);
+        });
+        report.listNeverMoved = attempts.every(function (state) {
+          return state.scrollTop === opened.scrollTop;
+        });
+        report.documentFrozen = report.steps.every(function (step) {
+          return step.state.documentScrollable === 0;
+        });
+      })
+      .then(openNowFromList)
+      .then(swipeLeftToPlaylists)
+      .then(function (swiped) {
+        report.swipe = swiped;
+      })
+      .then(function () {
+        report.checks = {
+          documentFrozen: report.documentFrozen,
+          documentNeverScrolled: report.documentNeverScrolled,
+          headerNeverMoved: report.headerNeverMoved,
+          listNeverMoved: report.listNeverMoved,
+          listRestored: report.listRestored,
+          overlayIsTheOnlyHitTarget: report.hitTest.allInsideNow,
+          swipeStillWorks: report.swipe.route === '#/playlists',
+          controlsStillWork: report.controls.transport === 5 && report.controls.mode === 'spectrum'
+            && /^Playing from .+\(\d+\/\d+\)$/.test(String(report.controls.context)),
+        };
+        report.passed = Object.keys(report.checks).every(function (key) {
+          return report.checks[key] === true;
+        });
+        return report;
+      });
+  }
+
   window.__naviliteLayoutAudit = {
     DEVICE: DEVICE,
     environment: environment,
@@ -529,5 +966,19 @@
     silenceAudio: silenceAudio,
     waitFor: waitFor,
     walk: walk,
+    // v1.4: the scroll-containment readings and the self-driven scenario.
+    scrollState: scrollState,
+    scrollSurfaces: scrollSurfaces,
+    headerRect: headerRect,
+    hitTest: hitTest,
+    prepareScroll: prepareScroll,
+    openNowFromList: openNowFromList,
+    closeNow: closeNow,
+    swipeLeftToPlaylists: swipeLeftToPlaylists,
+    overlayControlsCheck: overlayControlsCheck,
+    setPillMode: setPillMode,
+    attemptViewerScroll: attemptViewerScroll,
+    pokeFrozenList: pokeFrozenList,
+    scrollContainment: scrollContainment,
   };
 })();

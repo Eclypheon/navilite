@@ -38,6 +38,8 @@ type NowMode = 'spectrum' | 'lyrics';
 
 interface Shell {
   header: HTMLElement;
+  /** The app's one scroll container; every view draws into `view` inside it. */
+  viewScroll: HTMLElement;
   view: HTMLElement;
   playerBar: HTMLElement;
   nowOverlay: HTMLElement;
@@ -73,6 +75,12 @@ interface Shell {
   /** The last non-now route, so closing the now screen returns where you were. */
   lastBrowseRoute: string;
   scrubbing: boolean;
+  /** The route whose content is in `view` right now — the key the scroll restore is filed under. */
+  viewRoute: string | null;
+  /** True while the now-playing screen covers `view` and its scroll container is frozen. */
+  scrollLocked: boolean;
+  /** Where the covered view was scrolled to, waiting for that view to be drawn again. */
+  pendingScroll: { route: string | null; top: number } | null;
 }
 
 interface AppContext {
@@ -252,6 +260,16 @@ function buildShell(root: HTMLElement): Shell {
   ]);
 
   const view = h('main', { class: 'view', id: 'view' });
+  /*
+   * v1.4: one fixed shell plus one inner scroll container per view.
+   *
+   * The document does not scroll any more (see styles.css), so this box is the only thing a scroll
+   * gesture can move: the header above it is a fixed row of the shell and the player bar is fixed
+   * to the bottom of the screen, which is what makes "the top bar cannot grow or scroll away" true
+   * by construction rather than by careful styling. Every view still draws into `.view` exactly as
+   * before — the wrapper is the scroll context, not a second layout.
+   */
+  const viewScroll = h('div', { class: 'view-scroll' }, [view]);
 
   const barCover = h('div', { class: 'pb-cover' });
   const barTitle = h('span', { class: 'pb-title', text: '—' });
@@ -350,6 +368,7 @@ function buildShell(root: HTMLElement): Shell {
 
   const shell: Shell = {
     header,
+    viewScroll,
     view,
     playerBar,
     nowOverlay,
@@ -383,6 +402,9 @@ function buildShell(root: HTMLElement): Shell {
     highlighted: null,
     lastBrowseRoute: DEFAULT_ROUTE,
     scrubbing: false,
+    viewRoute: null,
+    scrollLocked: false,
+    pendingScroll: null,
   };
 
   bindSeek(shell.barProgress, shell, () => queueRef);
@@ -395,7 +417,7 @@ function buildShell(root: HTMLElement): Shell {
     if (direction === 'left') location.hash = PLAYLISTS_ROUTE;
   });
 
-  root.replaceChildren(header, view, playerBar, nowOverlay, toastNode);
+  root.replaceChildren(header, viewScroll, playerBar, nowOverlay, toastNode);
   return shell;
 }
 
@@ -583,6 +605,41 @@ async function syncPalette(ctx: AppContext, hooks: PaletteHooks): Promise<void> 
   if (ctx.queue?.currentSong?.id === song.id) hooks.apply(palette);
 }
 
+/* ------------------------------------------------------------------ lock */
+
+/**
+ * Freeze the view behind the now-playing screen — and remember where it was.
+ *
+ * v1.4. Both halves are needed. Hiding the scroll container takes the list underneath out of the
+ * scroll pipeline entirely, so a wheel or touch gesture over the overlay has nothing to reach (the
+ * overlay covers the screen, and the box under it is not scrollable); and recording the offset is
+ * what makes closing the spectrum land on the row he was looking at instead of the top of the list.
+ *
+ * The offset is only *re-applied* once the view has been drawn again — see `restoreScroll`, which
+ * the router calls when a view's promise settles. Restoring it here would be pointless: the render
+ * that follows briefly collapses the list to "Loading…", and the browser clamps a scroll position
+ * it cannot reach to zero.
+ */
+function setScrollLock(shell: Shell, locked: boolean): void {
+  if (locked === shell.scrollLocked) return;
+  shell.scrollLocked = locked;
+  if (locked) {
+    shell.pendingScroll = { route: shell.viewRoute, top: shell.viewScroll.scrollTop };
+    shell.viewScroll.classList.add('scroll-locked');
+    return;
+  }
+  shell.viewScroll.classList.remove('scroll-locked');
+}
+
+/** Put the covered view back exactly where it was, once that view's content is on screen again. */
+function restoreScroll(shell: Shell, route: string): void {
+  const pending = shell.pendingScroll;
+  if (!pending) return;
+  shell.pendingScroll = null;
+  // Only the route it was recorded on gets it back; a different screen starts at the top.
+  if (pending.route === route) shell.viewScroll.scrollTop = pending.top;
+}
+
 /* ----------------------------------------------------------------- router */
 
 function routeParts(): string[] {
@@ -595,6 +652,8 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
   setActiveTab(shell, head);
   const nowOpen = head === 'now';
   shell.nowOverlay.classList.toggle('hidden', !nowOpen);
+  // v1.4: the overlay freezes what is under it, and closing it puts that view back where it was.
+  setScrollLock(shell, nowOpen);
   if (!nowOpen && head !== 'connect') shell.lastBrowseRoute = location.hash || DEFAULT_ROUTE;
   // The view behind the now screen is only rendered when it is not covered: it saves a
   // network round trip on a cold start that lands straight on the spectrum.
@@ -609,46 +668,60 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
   }
   ctx.rows.clear();
   shell.highlighted = null;
+  const routeKey = location.hash || DEFAULT_ROUTE;
+  shell.viewRoute = routeKey;
   const fail = (error: unknown) => {
     replace(shell.view, h('div', { class: 'empty' }, [h('p', { text: errorText(error) })]));
   };
+  /**
+   * Every view is drawn asynchronously (the library is a network away), so the scroll restore waits
+   * for the promise: the offset belongs to the finished view, not to the "Loading…" placeholder
+   * that stands in for it while the request is in flight.
+   */
+  const drawn = (promise: Promise<void>): void => {
+    void promise.then(() => restoreScroll(shell, routeKey)).catch(fail);
+  };
   switch (head) {
     case 'artists':
-      void renderArtists(ctx, shell).catch(fail);
+      drawn(renderArtists(ctx, shell));
       break;
     case 'albums':
-      void renderAlbums(ctx, shell).catch(fail);
+      drawn(renderAlbums(ctx, shell));
       break;
     case 'playlists':
-      void renderPlaylists(ctx, shell).catch(fail);
+      drawn(renderPlaylists(ctx, shell));
       break;
     case 'favourites':
-      void renderFavourites(ctx, shell).catch(fail);
+      drawn(renderFavourites(ctx, shell));
       break;
     case 'search':
-      void renderSearch(ctx, shell, id ? decodeURIComponent(id) : '').catch(fail);
+      drawn(renderSearch(ctx, shell, id ? decodeURIComponent(id) : ''));
       break;
     case 'artist':
-      void renderArtist(ctx, shell, id ?? '').catch(fail);
+      drawn(renderArtist(ctx, shell, id ?? ''));
       break;
     case 'album':
-      void renderAlbum(ctx, shell, id ?? '').catch(fail);
+      drawn(renderAlbum(ctx, shell, id ?? ''));
       break;
     case 'playlist':
-      void renderPlaylist(ctx, shell, id ?? '').catch(fail);
+      drawn(renderPlaylist(ctx, shell, id ?? ''));
       break;
     case 'settings':
       renderSettings(ctx, shell);
+      restoreScroll(shell, routeKey);
       break;
     case 'changelog':
       renderChangelog(shell);
+      restoreScroll(shell, routeKey);
       break;
     case 'connect':
       void renderConnect(ctx, shell);
+      restoreScroll(shell, routeKey);
       break;
     case 'now':
       // Covered by the overlay; nothing to draw behind it.
       replace(shell.view, h('div'));
+      restoreScroll(shell, routeKey);
       break;
     default:
       replace(
@@ -658,6 +731,7 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
           h('button', { class: 'button', text: 'Back to the library', onclick: () => (location.hash = DEFAULT_ROUTE) }),
         ]),
       );
+      restoreScroll(shell, routeKey);
   }
   updateRowHighlight(ctx, shell);
 }

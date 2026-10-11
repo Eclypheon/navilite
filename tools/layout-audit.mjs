@@ -229,6 +229,7 @@ export function formatReport(report, safeArea) {
   lines.push(`  env(safe-area-inset-*) top ${env.safeAreaInsets.top} right ${env.safeAreaInsets.right} bottom ${env.safeAreaInsets.bottom} left ${env.safeAreaInsets.left}`);
   lines.push(`  viewport meta: ${env.viewportMeta}`);
   lines.push(`  safe-area emulation: ${safeArea ?? 'NOT applied — env() would read 0 in this Chrome'}`);
+  lines.push(`  scroll surface measured: ${report.results[0]?.scrollSurface ?? '(unknown)'} — since v1.4 the app's own scroll container, not the document`);
   lines.push('');
   let failures = 0;
   for (const result of report.results) {
@@ -272,6 +273,40 @@ export function formatReport(report, safeArea) {
   lines.push('');
   lines.push(failures === 0 ? 'RESULT: no horizontal overflow anywhere.' : `RESULT: ${failures} state(s) overflow the viewport.`);
   return { text: lines.join('\n'), failures };
+}
+
+/**
+ * The v1.4 scroll-containment readings, as a report. In-page on a device — where nothing can
+ * synthesise a gesture — the checks are geometric instead of gestural: the header rectangle, the
+ * document's scroll position, and which element hit-testing returns at each point of the screen.
+ */
+export function formatScrollContainment(scroll) {
+  const lines = [];
+  if (!scroll) return ['scroll containment: no readings arrived'];
+  if (scroll.error) return [`scroll containment: FAILED — ${scroll.error}`];
+  lines.push('Scroll containment (v1.4) — what moved when the screen was asked to scroll:');
+  const opened = scroll.before;
+  if (opened) {
+    lines.push(`  scroll surface: ${opened.scrollSurface} (overflow-y ${opened.overflowY}, overscroll-behavior-y ${opened.overscrollY})`);
+    lines.push(`  the list: scrollTop ${opened.scrollTop} of ${opened.scrollable} px scrollable`);
+    lines.push(`  the document: scrollTop ${opened.documentScrollTop}, scrollable ${opened.documentScrollable} px, window.scrollY ${opened.windowScrollY}`);
+    lines.push(`  the top bar: top ${opened.header.top} · height ${opened.header.height} · position ${opened.headerPosition}`);
+  }
+  if (scroll.after) {
+    lines.push(`  after the spectrum was opened, everything scrolled and closed again:`);
+    lines.push(`    the list: scrollTop ${scroll.after.scrollTop} (was ${opened.scrollTop}) — ${scroll.listRestored ? 'restored exactly' : 'NOT restored'}`);
+    lines.push(`    the top bar: top ${scroll.after.header.top} · height ${scroll.after.header.height} — ${scroll.headerUnchanged ? 'identical' : 'CHANGED'}`);
+    lines.push(`    the document: scrollTop ${scroll.after.documentScrollTop} · scrollable ${scroll.after.documentScrollable} px`);
+  }
+  if (scroll.programmatic) {
+    lines.push(`  scrolling the frozen container programmatically moved it by ${scroll.programmatic.moved} px (browser behaviour for overflow: hidden) — the offset was still restored exactly`);
+  }
+  for (const [label, ok] of Object.entries(scroll.checks ?? {})) {
+    lines.push(`  ${ok === true ? 'ok  ' : 'FAIL'}  ${label}`);
+  }
+  lines.push('');
+  lines.push(scroll.passed ? 'RESULT: the scroll did not reach anything it should not have.' : 'RESULT: FAIL — something moved that should not have.');
+  return lines;
 }
 
 /* ----------------------------------------------------------------------- CLI */

@@ -215,6 +215,21 @@ if (STRESS) {
     created: '2026-01-01T00:00:00Z',
     changed: '2026-01-01T00:00:00Z',
   });
+  /*
+   * v1.4: a playlist long enough to *scroll*. The scroll-containment check has to open a list,
+   * scroll it, and then prove the gesture could not reach it from the now-playing screen — and
+   * the other stress playlists hold three tracks, i.e. less than one screen, so a scroll against
+   * them would prove nothing. This is every track in the library (35), which is roughly 2,000 px
+   * of rows at 393 px wide: two and a half screens. Opt-in with `--stress`, like its neighbours,
+   * so the default fixture stays exactly as documented.
+   */
+  state.playlists.push({
+    id: 'pl-stress-long',
+    name: '夜のドライブのためにえらんだ長いプレイリスト（第一集・全三十五曲・これでもかというほど長い名前）',
+    songIds: songs.map((song) => song.id),
+    created: '2026-01-01T00:00:00Z',
+    changed: '2026-01-01T00:00:00Z',
+  });
 }
 
 const wavCache = new Map();
