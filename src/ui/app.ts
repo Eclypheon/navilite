@@ -47,12 +47,22 @@ const STACKED_ROUTES = new Set(['settings', 'changelog', 'connect']);
 /**
  * Pixels of movement that still counts as a tap rather than a scroll.
  *
- * v1.6.1. The number is the whole discriminator now — it was one of three in v1.6, and the other two
- * were the ones refusing real taps (see `bindTapSurface`). WebKit's own slop before it gives up on a
- * tap is the same order of magnitude, so agreeing with it is what makes "a tap" mean the same thing
- * to the app and to the engine that decides whether to send a click at all.
+ * v1.6.2. The number is the whole discriminator now — it was one of three in v1.6, and the other two
+ * were the ones refusing real taps (see `bindTapSurface`). **8 px, measured as straight-line
+ * distance**, is the canonical value for this: it is the `DRAG_SLOP` in the tap-vs-scroll research
+ * this release was asked to conform to (`navilite-tap-vs-scroll-canonical.md`, §1 and §3 — "px of
+ * touch movement that is still a tap"; `@use-gesture`'s `tapsThreshold` defaults to 3, Swiper uses a
+ * comparable per-device number, and both are in the same order as WebKit's own slop before it gives
+ * up on a tap).
+ *
+ * Note the direction: the app was at 10 px *per axis*, which is up to 14 px of travel diagonally,
+ * so moving to the documented 8 px straight-line is **tighter**, not looser — a press-and-hold that
+ * then swipes has to be recognised as a drag sooner, which is what the owner asked for. That change
+ * is the one risky edit in this release (refusing a click is how v1.6 broke tapping), which is why
+ * the harness now also proves a *wobbling* tap still plays: see `holdThenDrag` and `jitterTap` in
+ * `tools/v16-check.mjs`.
  */
-const TAP_SLOP_PX = 10;
+const TAP_SLOP_PX = 8;
 /**
  * How long a refusal may wait for the click it belongs to.
  *
@@ -615,7 +625,7 @@ function bindTapSurface(surface: HTMLElement): void {
       if (!active) return;
       const touch = event.touches[0];
       if (!touch) return;
-      if (Math.abs(touch.clientX - active.x) > TAP_SLOP_PX || Math.abs(touch.clientY - active.y) > TAP_SLOP_PX) {
+      if (Math.hypot(touch.clientX - active.x, touch.clientY - active.y) > TAP_SLOP_PX) {
         active.moved = true;
       }
     },

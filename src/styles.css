@@ -296,9 +296,34 @@ button {
   user-select: none;
   -webkit-touch-callout: none;
   touch-action: pan-y pinch-zoom;
+  /* The system's own flash-on-touch-down, which WKWebView paints before any CSS of ours applies. */
+  -webkit-tap-highlight-color: transparent;
 }
 
-.row:hover,
+/*
+ * v1.6.2: the hover paint on a *row* — the background at the top of this block, and the accent the
+ * play mark takes here — is a pointer's state, not a finger's.
+ *
+ * On iOS a tap makes WebKit match `:hover` on what it landed on and then *keep* matching it (there is
+ * no pointer to leave and unset it), so a row stayed painted the moment it was touched and stayed that
+ * way until the next tap somewhere else: the same complaint as a press highlight, one gesture later.
+ * Both rules live in here, where `hover: hover` and `pointer: fine` say a real cursor is present. A
+ * finger is neither, so on the phone there is no hover state at all; the PWA on a desktop still gets
+ * one. (`:focus-visible` is deliberately not in here — it is not a press: WebKit does not match it for
+ * a tap, it is how a keyboard and a switch control find the row they are on, and moving it behind a
+ * hover query would take the row away from them on an iPhone with a keyboard attached.)
+ */
+@media (hover: hover) and (pointer: fine) {
+  .row:hover {
+    background: var(--bg-raised);
+  }
+
+  .row:hover .row-play {
+    color: var(--accent-primary);
+    border-color: var(--accent-primary);
+  }
+}
+
 .row:focus-visible {
   background: var(--bg-raised);
 }
@@ -351,15 +376,13 @@ button {
   flex: none;
 }
 
-/* The row is the target now: the mark inside it never swallows the tap. */
+/*
+ * The row is the target now: the mark inside it never swallows the tap. Its hover accent is up in the
+ * `@media (hover: hover)` block with the row's own, so a finger never leaves it lit either.
+ */
 .row .row-play {
   cursor: inherit;
   pointer-events: none;
-}
-
-.row:hover .row-play {
-  color: var(--accent-primary);
-  border-color: var(--accent-primary);
 }
 
 .row-remove:hover {
@@ -368,22 +391,25 @@ button {
 }
 
 /*
- * v1.5: one row, one tap target, so the pressed state has to be obvious across the whole width of
- * it. A plate plus a ring, neither of which depends on the row's content, so a long unbroken title
- * cannot break it — and the "now playing" highlight below still wins once the finger lifts.
+ * v1.6.2: **no row paints anything on touch-down.** This is where the highlight he kept seeing came
+ * from — `.row.song:active`, a CSS rule that paints a plate and a ring for as long as the finger is
+ * on the row. `:active` begins at `touchstart` and lasts until `touchend`, so it fired on *every*
+ * contact, whether or not the gesture ever turned into anything: press a track to start a scroll and
+ * the row you happened to land on lit up before your thumb had moved a pixel.
+ *
+ * It was never a threshold, which is what the report guessed at ("the threshold for how long before
+ * it registers it as a swipe and not a tap and hold needs to be increased"): no duration or distance
+ * was consulted, so no value of either could have changed it. He offered the alternative — "or just
+ * remove the fact that tapping without releasing highlights the track at all" — and that is what this
+ * is. The row's own feedback is now the *result* of the activation: a song row that starts playing
+ * gets `.playing` below, a playlist row leaves the screen. There is no press state left to remove,
+ * and nothing flashes at the moment of the tap either, so no feedback exists while a finger is down.
+ *
+ * `.row.song.playing` (line ~1080) is a different thing — it says which track is playing — and is
+ * untouched.
  */
 .row.song {
   -webkit-tap-highlight-color: transparent;
-}
-
-.row.song:active {
-  background: color-mix(in srgb, var(--accent-primary) 22%, var(--bg-raised));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-primary) 45%, var(--line));
-}
-
-.row.song:active .row-title,
-.row.song:active .row-sub {
-  color: var(--text);
 }
 
 /* A song row with a remove control beside it: the row keeps the width, the control sits at the end. */

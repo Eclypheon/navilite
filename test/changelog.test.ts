@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.6.1, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1']);
+test('the changelog is the owner-visible list: v1.0 through v1.6.2, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {
@@ -112,6 +112,20 @@ test('the tap the owner lost is described in his own terms', () => {
   assert.match(text, /Dragging to scroll still only scrolls/, 'the other direction, which must not come back');
   for (const item of v161?.items ?? []) {
     assert.doesNotMatch(item, /touchstart|touchmove|touchend|pointer|EventListener|gesture handler|threshold|transform|use-select|CSS/i);
+  }
+});
+
+test('the press highlight the owner asked to remove is described in his own terms', () => {
+  const v162 = CHANGELOG.find((release) => release.version === '1.6.2');
+  const text = v162?.items.join('\n') ?? '';
+  // His report, in his words: he presses a row to drag, and the row lights up while he does.
+  assert.match(text, /Holding a song no longer highlights it/, 'his report: the track highlighted on a press');
+  assert.match(text, /while your finger was down|for as long as your finger was down/, 'that it happened on contact, not on the swipe');
+  // The one thing that must not change has to be named, so nobody reads this as "highlights are gone".
+  assert.match(text, /the only row that stands out is the one playing/, 'the now-playing highlight, which stays');
+  for (const item of v162?.items ?? []) {
+    // Invisible plumbing does not belong in this list.
+    assert.doesNotMatch(item, /:active|:hover|CSS|selector|stylesheet|media query|tap-highlight|TAP_SLOP|px of movement/i);
   }
 });
 
