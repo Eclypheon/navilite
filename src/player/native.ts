@@ -401,6 +401,11 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
      * completion that never reached the engine could not be told from one the plugin never sent,
      * which is a third of the reason the boundary has been diagnosed three times without an
      * answer. The counters ride to the screen in `status.droppedEvents`.
+     *
+     * v1.9.6 — and the counter no longer ticks at a boundary that *worked*: the slot being adopted is
+     * named as audible before its play call (see `adopt`), because the plugin reports `.playing`
+     * before it resolves that call. `inaudible` is a count of real losses again — events about an
+     * asset the listener is genuinely not hearing.
      */
     let droppedInaudible = 0;
     let droppedSlotGrace = 0;
@@ -657,6 +662,25 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           return false;
         }
         const slotName = from;
+        /*
+         * **The slot is named before the play call, not after it (v1.9.6).**
+         *
+         * The plugin notifies the state change *before* it resolves the call it was given:
+         * `notifyPlaybackState(assetId:…, reason: "play", state: .playing)` and then `call.resolve()`
+         * (`Plugin.swift`, in the play block). So the adopted slot's own "playing" report — the one
+         * event that says this boundary worked, and the first thing that tells the engine sound
+         * exists — arrived while `audibleId` still named the outgoing slot, and `isAudible` threw it
+         * away as an event about an asset nobody is hearing. The engine then learned "playing" from
+         * the plugin's 100 ms current-time timer instead, and `droppedEvents.inaudible` — the counter
+         * built to explain a boundary *failure* — ticked at every successful boundary, which is a
+         * counter pointing at a loss that did not happen.
+         *
+         * Naming the slot here is not a guess about what the plugin will do: it is the claim this
+         * bridge is making anyway — the play has been issued for this slot and nothing else can be
+         * audible — and the failure paths below put it back, because then the outgoing asset really
+         * is still the one playing.
+         */
+        audibleId = slotName;
         const attempt = inAssetLane(async () => {
           try {
             await NativeAudio.play({ assetId: slotName, time: 0 });
@@ -668,16 +692,21 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         });
         const result = await boundedSettled(attempt, false, 'adopt');
         if (!result.settled) {
+          // Nothing is known to be playing on this slot, and the engine is about to load the track
+          // into the audible one: give the name back so the outgoing asset's events are its again.
+          audibleId = to;
           adoptOutcome = 'timed out';
           return false;
         }
         if (!result.value) {
+          audibleId = to;
           adoptOutcome = refusal ?? 'play refused';
           return false;
         }
         adoptOutcome = 'adopted';
         warm.delete(slotName);
-        audibleId = slotName;
+        // `audibleId` already names this slot — it was named before the play call, above, so that the
+        // plugin's own report of this boundary could reach the engine.
         // The adopted item is the audible one now: the forward-buffer target belongs on it, and
         // the item it was prepared as is a different one by the time it is heard (v1.9.2).
         await configureBuffer();

@@ -2235,8 +2235,19 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   shell.barDuration.textContent = formatTime((durationMs || 0) / 1000);
   shell.nowDuration.textContent = formatTime((durationMs || 0) / 1000);
 
-  shell.barChip.textContent = loading ? 'loading…' : `${status.spectrum ? 'spectrum' : status.backend === 'native' ? 'native audio' : 'theme'}${cap === null ? '' : ` · ${cap} kbps`}`;
-  shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : 'fallback'}${cap === null ? '' : ' capped'}`;
+  /*
+   * v1.9.6 — **the chip's third word.**
+   *
+   * `status.spectrum` is false for a fraction of a second at every track change: the track that is
+   * handed over to has its own tap installed, and until that tap produces its first live frame there
+   * are no bars. Two words for three states meant that window printed *native audio* — the owner's
+   * report word for a whole track's worth of no bars, coming back at every boundary. `arming` is the
+   * engine's own statement that the tap is installed, the player is playing, and no frame has come
+   * back yet: the spectrum is coming, so the chip says so and the colour sits between the two.
+   */
+  const chipWord = status.spectrum ? 'spectrum' : status.spectrumArming ? 'spectrum…' : status.backend === 'native' ? 'native audio' : 'theme';
+  shell.barChip.textContent = loading ? 'loading…' : `${chipWord}${cap === null ? '' : ` · ${cap} kbps`}`;
+  shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : status.spectrumArming ? 'arming' : 'fallback'}${cap === null ? '' : ' capped'}`;
 
   /*
    * v1.9.5 — **the app says its own reason, on the screen.**

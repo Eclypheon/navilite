@@ -776,6 +776,16 @@ img {
   border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
 }
 
+/*
+ * v1.9.6 — the third state: the tap is being installed on a track that is playing, so the word is
+ * "spectrum…" and the colour sits between the live green and the fallback amber. It is not a
+ * failure, and it is not yet a measurement, so it must not wear either colour.
+ */
+.mode-chip.arming {
+  color: color-mix(in srgb, var(--ok) 55%, var(--warn));
+  border-color: color-mix(in srgb, var(--ok) 25%, var(--line));
+}
+
 .mode-chip.fallback {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 45%, var(--line));

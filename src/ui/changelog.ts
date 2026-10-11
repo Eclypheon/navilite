@@ -257,4 +257,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'When something is not playing, the bar now says why, in one line under the button: the app\'s own state, what the phone\'s player last reported, whether handing over from one song to the next worked, and how many of the player\'s own messages were dropped.',
       ],
     },
+    {
+      version: '1.9.6',
+      date: '2026-10-12',
+      items: [
+        'When a song hands over to the next one, the chip on the bar stays on the spectrum instead of flashing "native audio" at every change: while the new song\'s reading is still being set up it says "spectrum…", and the bars come back on their own a moment later.',
+        'The line under the bar no longer counts a hand-over that worked as a lost message from the phone: the "playing" report for the song that took over was being thrown away as if it belonged to the song before it.',
+      ],
+    },
   ];

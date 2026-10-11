@@ -138,6 +138,19 @@ export interface EngineStatus {
   backend: PlaybackBackend;
   /** True only when the visualiser is being fed real frames right now. */
   spectrum: boolean;
+  /**
+   * True while the tap is being installed on the track that is playing and has not answered for it
+   * yet (v1.9.6) — the window in which `spectrum` is false and the spectrum is not lost.
+   *
+   * The chip needs three words, not two. `spectrum` is false for a fraction of a second at every
+   * track change, until the track that was handed over to produces its first live frame, and calling
+   * that window *native audio* is the owner's report word for word — the words this release exists to
+   * take off the screen. This flag is the fact that tells the two apart: the tap is installed on the
+   * item the player is playing and nothing has come back from it yet. It is false the moment the
+   * engine has an answer either way (a live frame, or one of the verdicts in `pollSpectrum`), so a
+   * screen reading "spectrum…" is always a tap the engine still expects to answer.
+   */
+  spectrumArming: boolean;
   modeReason: string;
   positionMs: number;
   durationMs: number;
@@ -421,6 +434,10 @@ export class AudioEngine {
   private identicalFrames = 0;
   private lastChecksum = -1;
   private spectrumLive = false;
+  /**
+   * The other half of {@link spectrumLive} (v1.9.6): see {@link EngineStatus.spectrumArming}.
+   */
+  private spectrumArming = false;
   private modeReason = 'nothing playing yet';
   private nativeBands: Uint8Array | null = null;
   private spectrumPoll: ReturnType<typeof setInterval> | null = null;
@@ -951,6 +968,12 @@ export class AudioEngine {
       state: this.state,
       backend: this.backend,
       spectrum: this.spectrumLive,
+      /*
+       * The chip's third word (v1.9.6), and it is a fact about the *whole* state, not just the tap:
+       * only a track that is playing can be waiting for its bars. A paused, ended or loading item has
+       * no frames coming and says "native audio" or "loading…" exactly as it always did.
+       */
+      spectrumArming: this.spectrumArming && this.backend === 'native' && this.state === 'playing',
       modeReason: this.modeReason,
       /*
        * The phone's own account, as a line (v1.9.5): what it said, why it said it, and where the
@@ -1679,6 +1702,28 @@ export class AudioEngine {
      */
     this.nativeDurationMs = 0;
     this.spectrumLive = false;
+    /*
+     * **And the tap has not answered for this item yet (v1.9.6).**
+     *
+     * `spectrumLive` is cleared here for the item that is starting, ahead of the adoption below, and
+     * it comes back on *this* item's first live frame — which, for a warm track that is adopted, is a
+     * fraction of a second after the hand-over. That window is the owner's complaint in miniature:
+     * `status.spectrum` false with a native backend is precisely what the bar chip prints as *native
+     * audio*, so the words he reported came back at every boundary, briefly, instead of for a whole
+     * track. Simply not clearing the flag is not an answer either — it drives `readSpectrum()`, and a
+     * live flag with `nativeBands === null` behind it is the frozen-buffer lie this file spends its
+     * comments on. So the window is *named* instead: arming is true from here until the engine has an
+     * answer about the tap for this item (a live frame, or one of the verdicts in `pollSpectrum`), and
+     * the chip has a third word for it.
+     */
+    this.spectrumArming = true;
+    /*
+     * The tap's budget is per item, and so is the verdict it feeds (v1.9.6): a zero-poll count left
+     * over from the track that just ended used to decide, on this item's first poll, that this item's
+     * tap was reading silence (see `pollSpectrum`) — which now also means deciding, on the first
+     * poll, whether the chip is allowed to say "native audio" about a tap it has not heard from yet.
+     */
+    this.spectrumZeroPolls = 0;
     // A new track is a fresh budget for a tap that will not answer. (v1.7.7: a *budget*, not a
     // rebuild — the tap on the previous item is left where it is and the new item gets its own.)
     this.spectrumRechecks = 0;
@@ -1873,6 +1918,8 @@ export class AudioEngine {
        * honest statement, and the album-art theme.
        */
       this.spectrumLive = false;
+      // v1.9.6 — nothing is being installed either: this build has no tap to install.
+      this.spectrumArming = false;
       this.modeReason = 'this build has no spectrum tap on its native player, so the bars are on the album-art theme — the audio itself is unaffected';
       return;
     }
@@ -2010,6 +2057,9 @@ export class AudioEngine {
         this.spectrumDeadPolls = 0;
         this.spectrumRechecks = 0;
         if (this.spectrumLive) this.spectrumLive = false;
+        // v1.9.6 — the engine has given up on this item's bars, so the chip may say so: the window in
+        // which the tap was still being installed closes here, and the word is "native audio".
+        this.spectrumArming = false;
         this.modeReason =
           'the spectrum tap would not stay up on this stream — the bars are on the album-art theme, and the audio is untouched; the tap is still checked every few seconds and the bars come back on their own if it recovers';
         this.slowSpectrumPoll();
@@ -2029,6 +2079,9 @@ export class AudioEngine {
       this.lastLiveFrameAt = this.clockNow();
       // A tap that has produced real frames has proved itself: the re-check budget starts again.
       this.spectrumRechecks = 0;
+      // And it has answered (v1.9.6): whatever the bars were doing a poll ago, this item's tap is
+      // installed and reading sound, so the chip is back on "spectrum".
+      this.spectrumArming = false;
       if (!this.spectrumLive) {
         this.spectrumLive = true;
         this.modeReason = 'real spectrum — an FFT of the stream this player is playing, read from the native audio tap';
@@ -2036,10 +2089,27 @@ export class AudioEngine {
       }
     } else {
       this.spectrumZeroPolls += 1;
-      if (this.spectrumZeroPolls >= ZERO_POLLS_BEFORE_THEME && this.spectrumLive) {
+      /*
+       * **A verdict about this item's tap, whether or not it ever fed the bars (v1.9.6).**
+       *
+       * This used to require `spectrumLive`, which meant a tap that *never* produced a live frame was
+       * never judged at all: the engine said nothing, and the chip was left with two words for three
+       * states — so "the tap has not answered yet" and "there will be no bars from this item" printed
+       * the same sentence. Twelve polls (~0.4 s) of frames from a tap on the item the player is
+       * playing is the tap's own answer, and it closes both questions at once: the reason line gets
+       * one honest sentence (once, on the transition, not thirty times a second), and the chip stops
+       * saying the spectrum is coming.
+       *
+       * The exception is the tap that has produced *nothing at all* (`frames === 0`): that one has not
+       * answered, it is still being installed, and it keeps the chip's third word rather than being
+       * written off — which is exactly the boundary this release is about.
+       */
+      const answered = frame.frames > 0;
+      if (this.spectrumZeroPolls >= ZERO_POLLS_BEFORE_THEME && (this.spectrumLive || (this.spectrumArming && answered))) {
         this.spectrumLive = false;
+        this.spectrumArming = false;
         this.modeReason =
-          frame.frames > 0
+          answered
             ? 'the native tap is reading digital silence — the audio itself is silent, so the bars are flat'
             : 'the native tap is running but has not produced a frame yet';
         this.emit();
@@ -2061,6 +2131,9 @@ export class AudioEngine {
     this.identicalNativeFrames = identical ? this.identicalNativeFrames + 1 : 0;
     if (this.identicalNativeFrames >= FROZEN_FRAMES_BEFORE_THEME && this.spectrumLive) {
       this.spectrumLive = false;
+      // v1.9.6 — a frozen buffer is an answer about this item's tap (and not a good one); the chip
+      // stops waiting and says so, as the reason line does.
+      this.spectrumArming = false;
       this.modeReason = 'the native tap kept returning the same frame, which is not a measurement — showing the album-art theme';
       this.emit();
     }
@@ -2147,6 +2220,7 @@ export class AudioEngine {
       .then((started) => {
         if (this.track !== track || this.backend !== 'native') return;
         if (started) return;
+        this.spectrumArming = false;
         this.modeReason = 'the native spectrum tap did not start, so the bars are on the album-art theme';
         this.emit();
         this.retrySpectrumOnce(track, 'the install answered that it did not start');
@@ -2154,6 +2228,7 @@ export class AudioEngine {
       .catch((error: unknown) => {
         if (this.track !== track) return;
         this.spectrumLive = false;
+        this.spectrumArming = false;
         this.modeReason = `the native spectrum tap failed (${error instanceof Error ? error.message : String(error)})`;
         this.emit();
         this.retrySpectrumOnce(track, 'the install rejected');
@@ -2175,6 +2250,10 @@ export class AudioEngine {
   private retrySpectrumOnce(track: TrackRequest, why: string): void {
     const timer = setTimeout(() => {
       if (this.track !== track || this.backend !== 'native' || this.state !== 'playing') return;
+      // v1.9.6 — the tap has already answered once (it did not start), so the chip is not left
+      // waiting for it while the check is queued: the engine says the bars are on the theme, and the
+      // retry only ever moves them back if it works.
+      this.spectrumArming = false;
       this.modeReason = `the native spectrum tap did not start (${why}) — checked again a few seconds later`;
       this.verifySpectrum();
     }, SPECTRUM_RECHECK_MS);

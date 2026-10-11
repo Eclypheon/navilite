@@ -169,3 +169,8 @@ Plain language, user-visible changes only. The app shows this same list under
 - A song you pick from far down a playlist starts playing as soon as its first few seconds have arrived, not after the whole song has downloaded.
 - The song before the one playing, and the two songs after it, are kept ready on the phone - so stepping back or forward starts straight away instead of waiting for a fetch.
 - When something is not playing, the bar now says why, in one line under the button: the app's own state, what the phone's player last reported, whether handing over from one song to the next worked, and how many of the player's own messages were dropped.
+
+## 1.9.6 — 2026-10-12
+
+- When a song hands over to the next one, the chip on the bar stays on the spectrum instead of flashing "native audio" at every change: while the new song's reading is still being set up it says "spectrum…", and the bars come back on their own a moment later.
+- The line under the bar no longer counts a hand-over that worked as a lost message from the phone: the "playing" report for the song that took over was being thrown away as if it belonged to the song before it.

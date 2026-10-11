@@ -57,6 +57,15 @@ interface Recording {
    * into its own silent slot, never played. `adopts` counts the times that slot became audible.
    */
   prepares: string[];
+  /**
+   * v1.9.6 — whether the tap has produced a frame for the item it is installed on yet.
+   *
+   * The tap's frame counter is the plugin's own word for "I have measured something for this item",
+   * and it is what the engine's "the tap is being installed" window ends on. False models a tap that
+   * is installed and has produced nothing: every band reads zero, and the counter — deliberately —
+   * does not move, so the engine keeps waiting instead of writing the stream off as silent.
+   */
+  tapProducing: boolean;
   adopts: number;
   /** The URL the prepared slot holds right now, or null when nothing is prepared. */
   preparedUrl: string | null;
@@ -210,12 +219,19 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         record.spectrum.started = false;
       },
       async spectrumFrame() {
-        // Every frame differs from the one before it, the way a real FFT of music does — and a
-        // silent source reads as silence, which is the flat case the visualiser must detect.
-        record.spectrum.frames += 1;
-        const silent = record.spectrum.bands.every((value) => value === 0);
+        /*
+         * Every frame differs from the one before it, the way a real FFT of music does — and a
+         * silent source reads as silence, which is the flat case the visualiser must detect.
+         *
+         * v1.9.6 — `tapProducing: false` is the tap that has been installed on the item and has not
+         * produced a frame for it yet: the plugin's own counter stands still and every band reads
+         * zero. It is the window the bar chip has a third word for, and the engine's rule for when
+         * that window ends ("the tap has answered for this item") is read off that same counter.
+         */
+        if (record.tapProducing) record.spectrum.frames += 1;
+        const silent = !record.tapProducing || record.spectrum.bands.every((value) => value === 0);
         const bands = silent
-          ? record.spectrum.bands.slice()
+          ? record.spectrum.bands.map(() => 0)
           : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
         if (!silent) record.spectrum.silentFrames = 0;
         else record.spectrum.silentFrames += 1;
@@ -372,6 +388,7 @@ function recording(overrides: Partial<Recording> = {}): Recording {
     calls: [],
     loads: [],
     prepares: [],
+    tapProducing: true,
     adopts: 0,
     preparedUrl: null,
     seekNeverSettles: false,
@@ -1301,6 +1318,91 @@ test('a track that reaches its end starts the next one in the queue', async () =
     assert.equal(record.loads.length, 0, `nothing was fetched at the boundary — calls: ${record.calls.join(', ')}`);
     assert.ok(plays.length > 0, `audio for it started — calls: ${record.calls.join(', ')}`);
     assert.equal(engine.status().state, 'playing', 'and the machine is playing, not stuck on the end of the last one');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.9.6 — **the chip's third word, at the boundary it was reported for.**
+ *
+ * The owner's criterion in 1.9.5 was "the bar chip stays on SPECTRUM across a boundary", and it was
+ * only half met: `spectrumLive` is cleared at the top of every start and comes back on the new item's
+ * first live frame, so for a fraction of a second at every hand-over `status.spectrum` was false with a
+ * native backend — which is exactly what the chip printed as *native audio*, his own words for the
+ * thing being fixed, coming back at every change instead of for a whole track.
+ *
+ * `status.spectrumArming` is the engine's statement of that window: this track is playing, its tap is
+ * installed, and nothing has come back from it yet. The fake's tap is held there (`tapProducing:
+ * false`: the plugin's frame counter stands still) for longer than a real tap would stay quiet, which
+ * is what makes the window assertable at all — and the window then ends on the tap's first live frame,
+ * not on a deadline.
+ */
+test('the chip is never told "native audio" while the tap is being installed on a track that is playing', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording({ tapProducing: false });
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(200);
+
+    const installing = engine.status();
+    say(
+      `the tap has produced nothing yet: state ${installing.state}, spectrum ${installing.spectrum}, arming ${installing.spectrumArming}`,
+    );
+    assert.equal(installing.state, 'playing', 'the track is playing — the player said where it was');
+    assert.equal(installing.spectrum, false, 'and no live frame has come back from the tap yet');
+    assert.equal(
+      installing.spectrumArming,
+      true,
+      'so the chip reads "spectrum…" instead of his "native audio" — the tap is installed, the spectrum is coming',
+    );
+
+    // The tap's first frames arrive: the window ends on that fact.
+    record.tapProducing = true;
+    await settle(150);
+    const answered = engine.status();
+    say(`the tap answered: spectrum ${answered.spectrum}, arming ${answered.spectrumArming}`);
+    assert.equal(answered.spectrum, true, 'the first live frame is what the bars are');
+    assert.equal(answered.spectrumArming, false, 'and the chip is back on "spectrum" for the rest of the track');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.9.6 — **a tap that answers with silence is not left "still installing" for ever.**
+ *
+ * The verdict at {@link ZERO_POLLS_BEFORE_THEME} used to require `spectrumLive`, so a tap that *never*
+ * fed the bars — frames arriving, every band zero, a digitally silent stream — was never judged at all:
+ * nothing on the reason line, and a chip with two words for three states. It is judged now, once, and
+ * the counter that decides it is per item: a verdict written for the track that just ended must not
+ * decide the next one's first poll (which is how the chip could have said "native audio" at a boundary
+ * it was told to stay quiet through).
+ */
+test('a tap that answers with silence ends the "spectrum…" window, once, with the sentence that names it', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    // Frames arrive — so the tap has answered — and every band reads zero: the audio is silent.
+    record.spectrum.bands = record.spectrum.bands.map(() => 0);
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(120);
+    assert.equal(engine.status().spectrumArming, true, 'nothing has been measured for this item yet');
+
+    await settle(600);
+    const status = engine.status();
+    say(`silent frames: spectrum ${status.spectrum}, arming ${status.spectrumArming} — ${status.modeReason}`);
+    assert.equal(status.spectrum, false, 'a tap reading silence feeds no bars');
+    assert.equal(status.spectrumArming, false, 'and the engine has answered, so the chip stops saying the spectrum is coming');
+    assert.match(status.modeReason, /digital silence/, 'with the sentence that names the case');
   } finally {
     fakes.restore();
     await stopAll(engines);
