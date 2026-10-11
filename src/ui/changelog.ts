@@ -235,6 +235,16 @@ export const CHANGELOG: ChangelogRelease[] = [
       'Moving the seek bar never leaves the player hanging if the phone takes longer than usual to settle on the new position.',
       'Rapidly switching songs or scrubbing cleanly releases earlier requests so playback never stalls.',
       'Clearer recovery and retry if a track fails to start over a lossy mobile connection.',
-    ],
-  },
-];
+      ],
+      },
+      {
+      version: '1.9.4',
+      date: '2026-10-12',
+      items: [
+      'The next song starts on its own again when one finishes - the look-ahead is re-armed even if preparing a track had failed, so it never goes quiet for the rest of the session.',
+      'Picking a song far down a playlist no longer waits on preparing a track you did not ask for: your choice takes that slot immediately.',
+      'Scrubbing the seek bar no longer confuses where a song started, so moving the bar and then letting the playlist continue both work.',
+      'The player only steps down to a lower-quality stream when your phone actually slows down, instead of after one quick start.',
+      ],
+      },
+      ];
