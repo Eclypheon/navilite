@@ -190,4 +190,11 @@ export const CHANGELOG: ChangelogRelease[] = [
     'And the bars keep up with the sound. Switching to another song used to leave them sitting on the one before it until you paused and played again: they now come up with the track you are hearing, in that song\'s own colours from its cover art. Pausing lets them settle down to nothing instead of showing the waiting picture.',
     ],
   },
+  {
+    version: '1.8.1',
+    date: '2026-10-11',
+    items: [
+    'Your two red circles and the green one. The pills now sit right under the status bar and the controls right above the home bar — that space was empty, and the spectrum has 35 px of it now (the room taken by everything around it went from 208 px to 173 px on your phone). And the seek bar senses your finger on the bar itself instead of a few pixels above it: the strip you drag is a 44 pt target centred on the line, so 40 px either side of it seeks, where before only the 14 px around the thumb answered. The drag and the tap both work exactly as they did.',
+    ],
+  },
 ];

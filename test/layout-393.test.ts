@@ -51,6 +51,50 @@ function run(command: string, args: string[], timeoutMs: number): Promise<{ code
   });
 }
 
+test('the now screen keeps its safe areas, spends less on chrome, and senses the drag on the bar', async (t) => {
+  if (!findChrome()) {
+    t.skip('no Chrome/Chromium binary found — set CHROME_PATH to run the now-screen check');
+    return;
+  }
+  if (!existsSync(new URL('../dist/index.html', import.meta.url))) {
+    t.skip('dist/ is not built — run `npm run build` first');
+    return;
+  }
+
+  const port = PORT + 1;
+  const mock = spawn(process.execPath, ['tools/mock-subsonic.mjs', '--port', String(port), '--stress', '--dist', 'dist'], {
+    cwd: new URL('..', import.meta.url),
+    stdio: 'ignore',
+  });
+  try {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/rest/ping.view?u=navidrome&p=navidrome&v=1.16.1&c=Navilite&f=json`);
+        if (response.ok) break;
+      } catch {
+        /* not up yet */
+      }
+      if (Date.now() > deadline) throw new Error('the mock library never came up');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    const { code, output } = await run(
+      process.execPath,
+      ['tools/layout-audit.mjs', '--url', `http://127.0.0.1:${port}`, '--now-chrome'],
+      240_000,
+    );
+    const failed = output
+      .split('\n')
+      .filter((line) => line.startsWith('FAIL'))
+      .join('\n');
+    assert.equal(code, 0, `the now screen's chrome or its seek bar regressed:\n${failed || output}`);
+    assert.match(output, /RESULT: the chrome is smaller and the drag starts on the bar\./);
+  } finally {
+    mock.kill('SIGKILL');
+  }
+});
+
 test('the app has no horizontal overflow at 393 x 852 on any route, in either now-playing mode', async (t) => {
   if (!findChrome()) {
     t.skip('no Chrome/Chromium binary found — set CHROME_PATH to run the 393 px audit');

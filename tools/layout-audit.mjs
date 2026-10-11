@@ -588,6 +588,246 @@ export function formatDeviceGestures(sweep) {
   return { text: lines.join('\n'), failures };
 }
 
+/* ------------------------------------ the now screen's chrome and its seek bar (v1.8.1) */
+
+/**
+ * The v1.8.1 reading: how much screen the chrome takes, and where the seek bar senses a finger.
+ *
+ * The owner's two reports off v1.8.0 were one layout symptom and one alignment symptom, and neither
+ * is visible to a width audit:
+ *
+ *   - *"there is a lot of empty space at the top bar and also at the bottom"* — the bands above the
+ *     pills and below the transport row. Every one of them is `.now`'s own padding or a margin, and
+ *     the platform insets (`env(safe-area-inset-*)`) are *not* part of the defect: the pills and the
+ *     transport must still clear them. So the reading is per band, and the checks are "chrome got
+ *     smaller" and "the insets still clear", not "the paddings are gone".
+ *   - *"the seeking drag works but only if i drag around the region circled green (which is a few
+ *     pixels above the seek bar)"* — the bar's own box was 4 px tall, exactly the line it painted,
+ *     so the only part of the control a drag could start on was the engine's own 14 px thumb, whose
+ *     box this repository does not position. The fix is geometry, and geometry is what is measured:
+ *     the *region that accepts a gesture*, found by putting one finger at a time at a series of
+ *     offsets from the rendered bar and asking whether the song moved.
+ *
+ * The gestures go through `window.__naviliteLayoutAudit.fingerDrag`, which is the same in-page touch
+ * path the pager checks use — a real `touchstart`/`touchmove`/`touchend` on whatever element is
+ * under the point — and the verdict is read off the *media element's* own clock, so "it seeked" is
+ * the engine's answer and not the harness's.
+ */
+export function chromeBands(reading) {
+  const { now, top, progress, bar, visualizer, title, sub, context, transport } = reading;
+  // Everything on the now screen that is neither the album art, the spectrum nor the track text.
+  const gaps = reading.gaps ?? {};
+  const parts = [
+    ['the pill row (with its padding)', top?.height],
+    ['the gap above the spectrum', gaps.visualizer],
+    ['the gap above the title', gaps.title],
+    ['the gap above the artist line', gaps.sub],
+    ['the gap above the "playing from" line', gaps.context],
+    ['the gap above the seek row', gaps.progress],
+    ['the seek row', progress?.row?.height],
+    ['the transport row (including the home-indicator inset)', bar?.height],
+  ].filter(([, value]) => typeof value === 'number');
+  return {
+    parts,
+    total: Math.round(parts.reduce((sum, [, value]) => sum + value, 0) * 100) / 100,
+    /** The track text itself, which is not chrome and must not be counted as a saving. */
+    text: [title?.height, sub?.height, context?.height].filter((value) => typeof value === 'number'),
+    /** The album art and the spectrum are what the chrome is spent on: neither is chrome. */
+    art: reading.art?.height ?? null,
+    spectrum: visualizer?.height ?? null,
+  };
+}
+
+/** Where a finger starts a drag must be the bar, and the text above it must not be. */
+const DRAG_OFFSETS = { onTheBar: 0, insideTheTarget: -18, onTheTrackText: -34 };
+
+export async function runNowChrome(cdp, options) {
+  const baseUrl = options.url;
+  const read = async (expression) => await evaluate(cdp, expression);
+  await navigate(cdp, baseUrl);
+  await read(
+    `(() => {
+      localStorage.setItem('navilite.settings', JSON.stringify({ serverUrl: ${JSON.stringify(baseUrl)}, username: ${JSON.stringify(options.username ?? 'navidrome')}, playback: 'web' }));
+      localStorage.setItem('navilite.subsonic-password', ${JSON.stringify(options.password ?? 'navidrome')});
+      return true;
+    })()`,
+  );
+  await navigate(cdp, baseUrl);
+  await read(`window.__naviliteLayoutAudit.waitFor('Boolean(window.__navilite && window.__navilite.libraryReady())', 'the library to connect')`);
+  await read(`(location.hash = '#/playlist/pl-stress-ja', true)`);
+  await read(`window.__naviliteLayoutAudit.waitFor("document.querySelectorAll('.row.song').length > 0", 'the stress playlist')`);
+  await read('window.__naviliteLayoutAudit.playRow(0)');
+  await read(`window.__naviliteLayoutAudit.waitFor("location.hash === '#/now'", 'the now screen')`);
+  await read(`window.__naviliteLayoutAudit.waitFor("Boolean(document.querySelector('.now-canvas'))", 'the spectrum canvas')`);
+  await read('window.__naviliteLayoutAudit.settlePager()');
+  await new Promise((resolve) => setTimeout(resolve, 900));
+
+  const geometry = await read(`(() => {
+    const box = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom, left: r.left, width: r.width, height: r.height };
+    };
+    const input = document.querySelector('.now-progress .progress');
+    const style = getComputedStyle(input);
+    const rect = input.getBoundingClientRect();
+    const margins = (selector) => {
+      const el = document.querySelector(selector);
+      const s = getComputedStyle(el);
+      return Number.parseFloat(s.marginTop);
+    };
+    return {
+      inset: window.__naviliteLayoutAudit.environment().safeAreaInsets,
+      now: box('.now'),
+      top: box('.now-top'),
+      pill: box('.pill'),
+      art: box('.now-cover > *'),
+      visualizer: box('.now-visualizer'),
+      title: box('.now-title'),
+      sub: box('.now-sub'),
+      context: box('.now-context'),
+      bar: box('.now-bar'),
+      transport: box('.now-bar .transport.big'),
+      progress: { row: box('.now-progress'), input: { ...box('.now-progress .progress'), centre: rect.left + rect.width / 2, x: rect.left + rect.width * 0.35 } },
+      gaps: {
+        visualizer: margins('.now-visualizer'),
+        title: margins('.now-title'),
+        sub: margins('.now-sub'),
+        context: margins('.now-context'),
+        progress: margins('.now-progress'),
+      },
+      /** The painted bar: a band of this height, this far from the box's top, inside the target. */
+      painted: {
+        background: style.backgroundImage === 'none' ? style.backgroundColor : style.backgroundImage,
+        size: style.backgroundSize,
+        position: style.backgroundPosition,
+      },
+      innerHeight: window.innerHeight,
+    };
+  })()`);
+
+  const centre = geometry.progress.input.top + geometry.progress.input.height / 2;
+  const x = Math.round(geometry.progress.input.x);
+  const clock = `(() => { const e = window.__naviliteMediaElement; return e ? Math.round(e.currentTime * 1000) / 1000 : null; })()`;
+
+  // Nothing is playing while the gestures run: the clock would otherwise drift under them, and a
+  // drift is not a seek.
+  await read('window.__naviliteLayoutAudit.pauseAudio()');
+  await read('window.__naviliteLayoutAudit.seekAudio(20)');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  const gestureAt = async (dy, how) => {
+    const y = Math.round(centre + dy);
+    const under = await read(
+      `(() => { const el = document.elementFromPoint(${x}, ${y}); if (!el) return null; return el.classList && el.classList.contains('progress') ? 'the seek bar' : (el.className && String(el.className).split(' ')[0]) || el.tagName; })()`,
+    );
+    const before = await read(clock);
+    if (how === 'tap') {
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, pointerType: 'mouse' });
+      }
+    } else {
+      await read(`window.__naviliteLayoutAudit.fingerDrag({ from: { x: ${x}, y: ${y} }, to: { x: ${x + 80}, y: ${y} }, steps: 4, gapMs: 10 })`);
+    }
+    let after = before;
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      after = await read(clock);
+      if (after !== null && before !== null && Math.abs(after - before) > 0.05) break;
+    }
+    const seeked = before !== null && after !== null && Math.abs(after - before) > 0.05;
+    if (seeked) {
+      // put it back, so the next probe starts from the same clock
+      await read('window.__naviliteLayoutAudit.seekAudio(20)');
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return { dy, y, under, before, after, seeked };
+  };
+
+  const gestures = {
+    tap: await gestureAt(DRAG_OFFSETS.onTheBar, 'tap'),
+    drag: await gestureAt(0, 'drag'),
+    above: await gestureAt(DRAG_OFFSETS.insideTheTarget, 'drag'),
+    text: await gestureAt(DRAG_OFFSETS.onTheTrackText, 'drag'),
+  };
+  return { geometry, gestures, centre, x, chrome: chromeBands(geometry) };
+}
+
+/** The checks v1.8.1 is signed off on, each one a number out of the reading above. */
+export function judgeNowChrome(reading) {
+  const g = reading.geometry;
+  const painted = g.painted;
+  const input = g.progress.input;
+  const row = g.progress.row;
+  const size = String(painted.size);
+  const bandHeight = Number.parseFloat(size.split(/\s+/).pop() ?? '0');
+  /*
+   * Where the painted band actually is. `background-position: 50% 50%` with a band shorter than the
+   * box means the band's top sits `(box - band) / 2` below the box's top, so its centre is the box's
+   * centre — and that is the whole point of the change: the thing the eye aims at and the thing the
+   * finger lands on are the same pixels.
+   */
+  const bandCentre = input.top + (input.height - bandHeight) / 2 + bandHeight / 2;
+  const offCentre = Math.round((bandCentre - (input.top + input.height / 2)) * 100) / 100;
+  const checks = [];
+  checks.push({
+    label: 'the seek bar is a 44 pt target, centred on the bar it paints',
+    ok: input.height >= 44 && Math.abs(offCentre) <= 2,
+    detail: `target ${input.height} px tall at ${Math.round(input.top)}–${Math.round(input.bottom)} · painted bar ${bandHeight} px (${size}, ${painted.position}) centred at ${bandCentre.toFixed(2)} vs the target's centre ${(input.top + input.height / 2).toFixed(2)} — off by ${offCentre} px · the row it sits in is ${row.height} px`,
+  });
+  checks.push({
+    label: 'a drag on the bar seeks, and so does one inside the target above it',
+    ok: reading.gestures.drag.seeked && reading.gestures.above.seeked,
+    detail: `finger on the bar (y ${reading.gestures.drag.y}, under ${reading.gestures.drag.under}): ${reading.gestures.drag.before} → ${reading.gestures.drag.after} s · ${Math.abs(DRAG_OFFSETS.insideTheTarget)} px above it (y ${reading.gestures.above.y}, under ${reading.gestures.above.under}): ${reading.gestures.above.before} → ${reading.gestures.above.after} s`,
+  });
+  checks.push({
+    label: 'a tap on the bar seeks',
+    ok: reading.gestures.tap.seeked,
+    detail: `y ${reading.gestures.tap.y} (under ${reading.gestures.tap.under}): ${reading.gestures.tap.before} → ${reading.gestures.tap.after} s`,
+  });
+  checks.push({
+    label: 'a drag starting on the track text does not seek',
+    ok: !reading.gestures.text.seeked,
+    detail: `${Math.abs(DRAG_OFFSETS.onTheTrackText)} px above the bar (y ${reading.gestures.text.y}, under ${reading.gestures.text.under}): ${reading.gestures.text.before} → ${reading.gestures.text.after} s`,
+  });
+  const insetTop = Number.parseFloat(String(g.inset.top)) || 0;
+  const insetBottom = Number.parseFloat(String(g.inset.bottom)) || 0;
+  checks.push({
+    label: 'the pills still clear the top inset, and the transport the bottom one',
+    ok: g.pill.top >= insetTop && g.transport.bottom <= g.innerHeight - insetBottom,
+    detail: `env(safe-area-inset-top) ${insetTop} px, the pills start at ${g.pill.top.toFixed(2)} · env(safe-area-inset-bottom) ${insetBottom} px, the transport ends at ${g.transport.bottom.toFixed(2)} of ${g.innerHeight}`,
+  });
+  /*
+   * The reclaim, against the number v1.8.0 measured at this same 393 x 852 with the same insets.
+   * Its chrome was 208.23 px: `now-top` 56.84 (10 px of its own padding on top of the inset), 8 px
+   * above the spectrum, 8 above the title, 2 + 2 above the artist and "playing from" lines, 6 above
+   * the seek row, that row's 17.39, and a 108 px transport row (6 + 58 + 44, the 44 being 10 px of
+   * its own padding over the 34 px home-indicator inset).
+   */
+  checks.push({
+    label: 'less screen goes to chrome than v1.8.0 spent (208.23 px)',
+    ok: reading.chrome.total <= 190,
+    detail: `${reading.chrome.total} px — ${reading.chrome.parts.map(([label, value]) => `${label} ${Math.round(value * 100) / 100}`).join(' · ')} · album art ${reading.chrome.art} px · spectrum ${reading.chrome.spectrum} px (v1.8.0's own reading of that same screen: chrome 208.23, art 357, spectrum 89.5)`,
+  });
+  return checks;
+}
+
+export function formatNowChrome(reading) {
+  const lines = [];
+  lines.push('The now screen (v1.8.1) — the chrome, and where the seek bar senses a finger:');
+  const checks = judgeNowChrome(reading);
+  let failures = 0;
+  for (const check of checks) {
+    if (!check.ok) failures += 1;
+    lines.push(`${check.ok ? 'ok  ' : 'FAIL'}  ${check.label}`);
+    if (check.detail) lines.push(`      ${check.detail}`);
+  }
+  lines.push('');
+  lines.push(failures === 0 ? 'RESULT: the chrome is smaller and the drag starts on the bar.' : `RESULT: ${failures} check(s) failed.`);
+  return { text: lines.join('\n'), failures };
+}
+
 /* ----------------------------------------------------------------------- CLI */
 
 /**
@@ -658,6 +898,19 @@ async function main() {
   const url = argv.get('url') ?? 'http://127.0.0.1:4533';
   const jsonPath = argv.get('json');
   const sweepRange = argv.get('sweep');
+  if (argv.get('now-chrome')) {
+    await withChromePage(async ({ cdp, safeArea }) => {
+      const reading = await runNowChrome(cdp, { url });
+      const { text, failures } = formatNowChrome(reading);
+      process.stdout.write(`safe-area emulation: ${safeArea ?? 'NOT applied — env() would read 0 in this Chrome'}\n\n${text}\n`);
+      if (jsonPath) {
+        writeFileSync(jsonPath, JSON.stringify(reading, null, 2));
+        process.stdout.write(`\nraw measurements: ${jsonPath}\n`);
+      }
+      process.exitCode = failures === 0 ? 0 : 1;
+    });
+    return;
+  }
   if (sweepRange) {
     const [from, to] = String(sweepRange).split(':').map(Number);
     const height = Number(argv.get('height') ?? 852);

@@ -828,7 +828,13 @@ img {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 10px max(14px, env(safe-area-inset-right)) 8px max(14px, env(safe-area-inset-left));
+  /*
+   * v1.8.1. The empty band the owner circled sat between the status bar and the pills, and it was
+   * this padding: the inset above it is the platform's (`env(safe-area-inset-top)` on `.now`), so
+   * anything stacked on top of it is dead screen. 10 px became 2 px at the top and 8 px became 6 px
+   * under the pills.
+   */
+  padding: 2px max(14px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left));
   flex: none;
 }
 
@@ -890,7 +896,8 @@ img {
 .now-lyrics {
   flex: 1 1 auto;
   min-height: 88px;
-  margin-top: 8px;
+  /* v1.8.1: 8 px of gap above the spectrum became 4 — the spectrum is what should gain the space. */
+  margin-top: 4px;
   /* v1.5: clipped, not scrollable — see `.now-pages`. The lyrics panel inside is the scroller. */
   overflow: hidden;
   overflow: clip;
@@ -942,7 +949,7 @@ img {
 
 .now-title {
   flex: none;
-  margin: 8px 0 0;
+  margin: 4px 0 0;
   padding: 0 16px;
   font-size: 19px;
   text-align: center;
@@ -952,7 +959,7 @@ img {
 .now-sub,
 .now-context {
   flex: none;
-  margin: 2px 0 0;
+  margin: 1px 0 0;
   padding: 0 16px;
   color: var(--text-dim);
   font-size: 14px;
@@ -960,10 +967,42 @@ img {
   overflow-wrap: anywhere;
 }
 
+/*
+ * v1.8.1 — the seek row's *housing*, and the fix for "i can only drag a few pixels above the bar".
+ *
+ * The row is a fixed 18 px, so the touch target inside it can be 44 pt tall without the row (and
+ * therefore the whole screen below it) growing by 26 px: a taller flex item than its row overflows
+ * it symmetrically, the row's own height is what the labels need, and nothing below moves. The row
+ * is `position: relative` so the overflowing target still stacks inside it rather than behind it.
+ */
 .now-progress {
+  position: relative;
   flex: none;
-  margin-top: 6px;
+  height: 18px;
+  margin-top: 2px;
   padding: 0 14px;
+}
+
+/*
+ * The seek bar's own box *is* the hit region, and v1.8.1 makes it 44 px tall centred on the visible
+ * track — 11 × the 4 px line it used to be.
+ *
+ * v1.8.0's box was 4 px tall: exactly the line it painted, so the only part of the control a finger
+ * could start a drag on was WebKit's own 14 px thumb, whose box is positioned by the engine and not
+ * by this file — which is why the owner found the drag working "a few pixels above the seek bar"
+ * and the bar itself feeling dead. The visible 4 px line is now painted as a centred band inside
+ * the tall box, so what he aims at and what the finger lands on are the same thing: the element's
+ * centre and the rendered bar's centre are the same pixel, and the transparent padding above and
+ * below it is symmetrical.
+ *
+ * The `height` is the touch target; the `background` is the bar. Nothing else moves: the engine's
+ * own thumb is centred in this box (14 px on the same centre), `msAtX()` reads the same rect, and
+ * the drag/tap handlers are untouched.
+ */
+.now-progress .progress {
+  margin: 0;
+  height: 44px;
+  background: linear-gradient(var(--line), var(--line)) center / 100% 4px no-repeat;
 }
 
 /* One compact bar, at the bottom: shuffle, previous, play/pause, next, repeat. */
@@ -973,7 +1012,22 @@ img {
   align-items: center;
   justify-content: center;
   gap: 16px;
-  padding: 6px 14px calc(10px + env(safe-area-inset-bottom));
+  /*
+   * v1.8.1: the empty space the owner circled under the transport row was this padding — 10 px of
+   * it, stacked on top of `env(safe-area-inset-bottom)`, which is the home indicator's own space
+   * and stays. 2 px is what is left of the extra.
+   */
+  padding: 2px 14px calc(2px + env(safe-area-inset-bottom));
+  /*
+   * The container is transparent and holds no gesture of its own, so it must not swallow the part of
+   * the seek bar's 44 px target that overflows into it (the target's lower half reaches a few px
+   * below this row): `none` here, `auto` on the buttons, which keep every tap they had.
+   */
+  pointer-events: none;
+}
+
+.now-bar > * {
+  pointer-events: auto;
 }
 
 .now-bar .transport {
