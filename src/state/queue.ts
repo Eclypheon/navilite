@@ -15,7 +15,7 @@
  * number shown is the position in the order you are actually hearing.
  */
 import type { Song, QueueContext, QueueItem } from '../api/types.ts';
-import type { AudioEngine, TrackRequest } from '../player/engine.ts';
+import type { AudioEngine, PublishedTrack, TrackRequest } from '../player/engine.ts';
 import { updateNowPlaying, updatePlaybackState, updatePositionState, mediaSessionAvailable } from '../player/mediasession.ts';
 import { clearSnapshot, saveSnapshot } from '../storage/session.ts';
 import { ByteRate } from './bitrate.ts';
@@ -181,7 +181,7 @@ export class PlaybackQueue {
      * already playing, so the queue moves its cursor onto the track that is sounding and never
      * asks the engine to start anything.
      */
-    engine.onAdvancedNatively = (songId) => this.adoptNativeAdvance(songId);
+    engine.onAdvancedNatively = (songId, index) => this.adoptNativeAdvance(songId, index);
   }
 
   get current(): QueueItem | null {
@@ -270,15 +270,15 @@ export class PlaybackQueue {
      */
     this.engine.pruneWarmed?.(this.neighbourhoodIds());
     /*
-     * And the native boundary is **un-armed** by a selection (v1.9.8).
+     * And the queue is **published to the native side** the moment a selection moves it (v1.9.9).
      *
-     * The chain the native side is holding is a bet on the track that was playing still being the
-     * one that ends: it is the track after *that* one. The listener has just moved somewhere else,
-     * so the bet is off, and until the new track has sound and the neighbourhood is warm again
-     * there is nothing the native side may play. It is re-armed by `warmNeighbours` below, once
-     * this start has actually produced a track to follow.
+     * This is not the look-ahead v1.9.8 used to arm here — that was a chain of two warm slots, and
+     * the listener has just moved away from them. What goes now is the new queue: the resolved order,
+     * the entry this tap is on, and the repeat mode. The native side may not act on it (the app is
+     * on screen, so the statement carries `awake: true`), but it holds the picture, so a track that
+     * ends while the app is in the background advances from where the listener actually is.
      */
-    this.engine.setNeighbours?.([], null);
+    this.publishQueue();
     this.startFailed = false;
     this.onChanged?.();
   }
@@ -322,6 +322,10 @@ export class PlaybackQueue {
     this.cursor = Math.min(Math.max(0, startIndex), Math.max(0, items.length - 1));
     this.context = context;
     this.pendingStartMs = Math.max(0, positionMs);
+    // The queue is published even before it is played (v1.9.9): the native side then holds the
+    // picture the app is showing, so an edge case like "the app is backgrounded before anything is
+    // tapped" cannot leave it walking a queue the listener is no longer looking at.
+    this.publishQueue();
     this.onChanged?.();
   }
 
@@ -358,6 +362,7 @@ export class PlaybackQueue {
     this.context = state.context;
     this.pendingStartMs = Math.max(0, positionMs);
     this.lastPositionMs = this.pendingStartMs;
+    this.publishQueue();
     this.onChanged?.();
   }
 
@@ -377,6 +382,8 @@ export class PlaybackQueue {
     if (this.order.length !== this.items.length) {
       this.order = this.shuffled ? [...this.order, ...identityOrder(items.length).map((i) => i + this.order.length)] : identityOrder(this.items.length);
     }
+    // What was appended is part of the queue the native side walks (v1.9.9).
+    this.publishQueue();
     this.onChanged?.();
     this.scheduleSaveQueue();
   }
@@ -397,12 +404,25 @@ export class PlaybackQueue {
   }
 
   async previous(): Promise<void> {
-    // Under three seconds in, "previous" means the previous track; after that it is
-    // the usual restart-this-one behaviour.
+    /*
+     * What "previous" means, in code at last (v1.9.9).
+     *
+     * The rule has been written in a comment at this spot since v1.1 and it was never what the code
+     * did. It read `if (position > 3000) { await seek(0); if (position <= 3000) return; }` — the
+     * second test is inside a branch the first test has already answered, so it is dead, and what
+     * the app actually did was: past three seconds, **seek to zero and then play the previous track
+     * anyway**. "Restart this one" never happened on this button.
+     *
+     * So, as the queue's own rule and the lock screen's:
+     *   - more than three seconds in: restart the track that is playing, and go nowhere else;
+     *   - within the first three seconds: the previous entry, at 0:00;
+     *   - and at the very first entry of the queue: restart it (no wrap — wrapping backwards out of
+     *     the first track is a jump to the end of the queue, which is not what a back button is for).
+     */
     const position = this.engine.status().positionMs;
     if (position > 3000 || this.cursor <= 0) {
       await this.engine.seek(0);
-      if (position <= 3000) return;
+      return;
     }
     /*
      * v1.9.2 — the one start path that still could not show waiting, which matters *more* now that
@@ -413,6 +433,8 @@ export class PlaybackQueue {
     this.cursor = Math.max(0, this.cursor - 1);
     this.loading = true;
     this.startFailed = false;
+    // The cursor moved: the native side is told where the listener now is (v1.9.9).
+    this.publishQueue();
     this.onChanged?.();
     await this.startCurrent();
   }
@@ -439,12 +461,17 @@ export class PlaybackQueue {
     if (on === this.shuffled) return;
     this.shuffled = on;
     this.applyShuffle(on);
+    // The order *is* the queue the native side walks (v1.9.9): a shuffle it does not hear about is
+    // a boundary that plays the wrong track.
+    this.publishQueue();
     this.onChanged?.();
   }
 
   setRepeat(mode: RepeatMode): void {
     if (mode === this.repeatMode) return;
     this.repeatMode = mode;
+    // Repeat decides what happens at the end of the published queue, so it is part of the statement.
+    this.publishQueue();
     this.onChanged?.();
   }
 
@@ -462,8 +489,8 @@ export class PlaybackQueue {
     this.pendingStartMs = 0;
     this.loading = false;
     this.startFailed = false;
-    // Nothing is playing, so there is nothing for the native side to advance to (v1.9.8).
-    this.engine.setNeighbours?.([], null);
+    // There is no queue, so the native side is told there is none (v1.9.9).
+    this.publishQueue();
     this.cancelPrepared();
     clearSnapshot();
     await this.engine.stop();
@@ -508,6 +535,8 @@ export class PlaybackQueue {
     this.cursor = plan.cursor;
     this.loading = true;
     this.startFailed = false;
+    // The native side is told where the listener now is (v1.9.9) — an advance is a cursor move.
+    this.publishQueue();
     this.onChanged?.();
     await this.startCurrent();
   }
@@ -714,23 +743,37 @@ export class PlaybackQueue {
     if (!started) return;
     this.engine.pruneWarmed?.(this.neighbourhoodIds());
     /*
-     * **And the native player is told what to play if this track ends while the app is away
-     * (v1.9.8).** In the order they would be played, and only the ones that are actually on the
-     * player — the engine filters against its own warm pool, so a track this app has not got ready
-     * is never named to the native side. The chain is what makes a track that ends *while the app
-     * is backgrounded* advance at all: off screen there is no web layer to hear a completion, and
-     * this is the only thing that knows what follows.
+     * **And the queue itself is published to the native side (v1.9.9).**
+     *
+     * In v1.9.8 this spot named the two warm slots after the one playing — the *look-ahead*, which
+     * is a bet on the track that is playing still being the one that ends, and which nothing could
+     * refill once the web layer was suspended. What goes now is the queue: the resolved play order,
+     * the entry playing, the repeat mode. The native side walks it and fetches what it has no slot
+     * for, so a track that ends while the app is away always has somewhere to go.
      */
-    this.engine.setNeighbours?.(this.forwardIds(), this.previousId());
+    this.publishQueue();
     const run = (this.warmRun += 1);
     void (async () => {
-      for (const song of this.neighbourSongs()) {
+      for (const target of this.warmTargets()) {
         /*
          * Abandoned runs stop here: the queue has moved on (a newer run), so warming more of the old
          * chain's neighbourhood would be a download for a track nobody is next to.
          */
         if (run !== this.warmRun || this.currentSong?.id !== started.id) return;
-        const url = this.library.streamUrl(song, this.rate.maxBitRate);
+        /*
+         * **The entries a press consumes are warmed as the original file (v1.9.9)**, and the
+         * ladder's cap reaches only the track beyond them.
+         *
+         * This is the second half of the owner's no-transcode rule. v1.9.8 stopped the *start* from
+         * asking for a lower rate, but the ladder still decided what the neighbourhood was warmed
+         * under — and a tap adopts the warmed URL. So on a demoted link the track he was waiting for
+         * was the 128 kbps variant, silently. `next` (the boundary, and the next button) and
+         * `previous` (a step back) are both one press away and are therefore warmed as the file sits
+         * on the server; only the look-ahead beyond them may carry a cap, which is the job the
+         * ladder was always for — less bandwidth on a slow link, spent on a track nobody is waiting
+         * for.
+         */
+        const url = target.capped ? this.library.streamUrl(target.song, this.rate.maxBitRate) : this.library.streamUrl(target.song);
         /*
          * The engine is asked whether it already holds this track, under **this** URL, rather than
          * the queue keeping its own copy of what it asked for (v1.9.5). That is the asymmetry that
@@ -738,12 +781,41 @@ export class PlaybackQueue {
          * "warm" on its own would skip the re-warm and leave the next boundary without anything to
          * adopt.
          */
-        if (this.engine.warmedUrl?.(song.id) === url) continue;
+        if (this.engine.warmedUrl?.(target.song.id) === url) continue;
         // The engine claims the track itself, before it issues anything, and gives the claim back
         // when the player did not take it — so there is nothing to record here.
-        await this.engine.prepareNext(this.trackRequestFor(song, url));
+        await this.engine.prepareNext(this.trackRequestFor(target.song, url));
       }
     })();
+  }
+
+  /**
+   * Publish the queue to the engine (v1.9.9), which states it to the native side.
+   *
+   * The list is the **resolved play order** — `order` applied, so a shuffled queue is published
+   * shuffled and the native side needs no second model of what shuffle means — and `index` is the
+   * position in that order the listener is on. Every URL is the track's own file: an entry is only
+   * ever a URL the native side could fetch and play as it sits on the server, and the warmth of an
+   * entry is the engine's to attach, from its own pool, under the exact string it holds it.
+   */
+  private publishQueue(): void {
+    this.engine.setQueue?.({
+      list: this.order.map((itemIndex) => this.publishedTrack(this.items[itemIndex]!.song)),
+      index: this.cursor,
+      repeat: this.repeatMode,
+    });
+  }
+
+  /** One entry of the published queue, from the song and this library. */
+  private publishedTrack(song: Song): PublishedTrack {
+    return {
+      songId: song.id,
+      url: this.library.streamUrl(song),
+      title: song.title,
+      artist: song.artist ?? 'Unknown artist',
+      album: song.album ?? '',
+      artworkUrl: this.library.coverUrl(song.coverArt ?? song.albumId, 512),
+    };
   }
 
   /** The song at `step` places from the current one in the play order, or `null`. */
@@ -752,17 +824,20 @@ export class PlaybackQueue {
   }
 
   /**
-   * The songs kept warm around the current one, in the order they are warmed (v1.9.5).
+   * The songs kept warm around the current one, with whether the ladder's cap may reach each
+   * (v1.9.9).
    *
    * Closest first, and the boundary before everything: the next track (what a track ending plays),
    * then the previous one (a step back), then the one after next. Songs that repeat inside the
-   * window (a two-song queue) appear once.
+   * window (a two-song queue) appear once. Only the last of those is beyond a single press, so only
+   * the last of those may be prepared as a lower-bitrate variant.
    */
-  private neighbourSongs(): Song[] {
-    const out: Song[] = [];
+  private warmTargets(): Array<{ song: Song; capped: boolean }> {
+    const out: Array<{ song: Song; capped: boolean }> = [];
     for (const step of WARM_STEPS) {
       const song = this.songAt(step);
-      if (song && !out.some((other) => other.id === song.id)) out.push(song);
+      if (!song || out.some((target) => target.song.id === song.id)) continue;
+      out.push({ song, capped: Math.abs(step) > 1 });
     }
     return out;
   }
@@ -770,29 +845,7 @@ export class PlaybackQueue {
   /** The current track and its neighbourhood by id — what a selection is allowed to keep warm. */
   private neighbourhoodIds(): string[] {
     const current = this.currentSong;
-    return [...(current ? [current.id] : []), ...this.neighbourSongs().map((song) => song.id)];
-  }
-
-  /**
-   * The tracks **ahead** of the current one, in the order they would be played (v1.9.8).
-   *
-   * The native side's chain, and nothing else: this is what a track that ends while the app is
-   * backgrounded advances to, first entry first. Two at most — the pool holds the next two, and a
-   * boundary the app is not awake for cannot be re-filled from here.
-   */
-  private forwardIds(): string[] {
-    const out: string[] = [];
-    for (const step of WARM_STEPS) {
-      if (step <= 0) continue;
-      const song = this.songAt(step);
-      if (song && !out.includes(song.id)) out.push(song.id);
-    }
-    return out;
-  }
-
-  /** The track **behind** the current one, or `null` — the chain's other direction (v1.9.8). */
-  private previousId(): string | null {
-    return this.songAt(-1)?.id ?? null;
+    return [...(current ? [current.id] : []), ...this.warmTargets().map((target) => target.song.id)];
   }
 
   /**
@@ -813,9 +866,24 @@ export class PlaybackQueue {
    *     queue was replaced can name a song that is not in this list any more, and moving the cursor
    *     to it would be inventing one.
    */
-  async adoptNativeAdvance(songId: string): Promise<void> {
-    const index = this.items.findIndex((item) => item.song.id === songId);
-    const at = index === -1 ? -1 : this.order.indexOf(index);
+  async adoptNativeAdvance(songId: string, index = -1): Promise<void> {
+    /*
+     * **By index first (v1.9.9), and by id only as a fallback.**
+     *
+     * The native side now walks the queue the app published, so it can say *where* it moved to as
+     * well as what it moved to — and a position in the published order is the only thing that is
+     * right when that order is shuffled. The id lookup this used to rely on alone was the hole:
+     * with shuffle on, the track's position in the list is not its position in the order, and the
+     * old lookup took the *item* index and then asked the order for it — which is correct but only
+     * checks the track, never that the two sides agree on where they are.
+     */
+    let at = -1;
+    if (index >= 0 && index < this.order.length && this.items[this.order[index]!]?.song.id === songId) {
+      at = index;
+    } else {
+      const itemIndex = this.items.findIndex((item) => item.song.id === songId);
+      at = itemIndex === -1 ? -1 : this.order.indexOf(itemIndex);
+    }
     if (at === -1) return;
     if (this.currentSong?.id === songId) {
       this.loading = false;
@@ -830,7 +898,7 @@ export class PlaybackQueue {
     this.submitted = false;
     this.inFlightSongId = null;
     this.playToken += 1;
-    const song = this.items[index]!.song;
+    const song = this.items[this.order[at]!]!.song;
     const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
     this.onChanged?.();
     await this.engine.adoptNativeAdvance?.(this.trackRequest(song, this.engine.warmedUrl?.(song.id) ?? null, artworkUrl));

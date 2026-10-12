@@ -1306,13 +1306,22 @@ async function restorePlayQueue(ctx: AppContext): Promise<boolean> {
       },
       snapshot.positionMs,
     );
-    if (snapshot.playing) {
-      try {
-        await queue.start();
-      } catch (error) {
-        console.warn('[navilite] could not start the restored track; leaving it paused', error);
-      }
-    }
+    /*
+     * **And the launch stops there (v1.9.9).**
+     *
+     * This used to start the restored track again when the snapshot said it was playing — *"open the
+     * app and, if a track was playing when you left, it opens on the spectrum for that track"*. It
+     * is also the second half of the crash: a launch that plays is a launch that prepares, and the
+     * prepare was what reached `preroll` on an item that had not resolved yet. The app comes up
+     * restored — the same queue, the same cursor, the same second, the same "playing" on the chip —
+     * and it is inert until the listener asks for sound: one tap on play, in the bar or on a row,
+     * starts it from exactly that second. Nothing is fetched, nothing is prepared and nothing is
+     * played before that tap.
+     *
+     * The snapshot's own `playing` flag is not thrown away: it is why the restored track shows as
+     * paused-but-ready rather than as a track that was never started, which is what `pendingStartMs`
+     * carries into the first play.
+     */
     return true;
   }
   return restoreServerQueue(ctx);

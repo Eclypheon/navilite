@@ -942,6 +942,27 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
         }
         return most
     }
+
+    /// The player's and the item's own state, in one word each (v1.9.9) — for the reason line.
+    ///
+    /// `preroll` is only legal in `.readyToPlay`, so which of the three states a slot is sitting in
+    /// is the fact that decides whether it may be asked to start. Naming it makes a slot that was
+    /// not ready readable on the screen, instead of a warm that silently did not happen.
+    static func statusName(_ status: AVPlayer.Status) -> String {
+        switch status {
+        case .readyToPlay: return "ready to play"
+        case .failed: return "failed"
+        default: return "not ready yet"
+        }
+    }
+
+    static func statusName(_ status: AVPlayerItem.Status) -> String {
+        switch status {
+        case .readyToPlay: return "ready to play"
+        case .failed: return "failed"
+        default: return "not ready yet"
+        }
+    }
 }
 
 /**
@@ -979,6 +1000,55 @@ private final class WarmAttempt {
             return
         }
         item.preferredForwardBufferDuration = max(1, seconds)
+        /*
+         * **The gate this call shipped without (v1.9.9), and the crash it caused.**
+         *
+         * `preroll(atRate:)` raises an Objective-C exception — not an error a completion handler can
+         * report — when the player is not `readyToPlay`. On v1.9.8 this ran on the *first* slot the
+         * app prepared, which on a cold launch is an item that has only just been created: the
+         * exception takes the process down, and the next launch restores the same track and does it
+         * again, which is the crash loop the owner was in. A design review read this line; running it
+         * is what found it.
+         *
+         * So the call is now *conditional on the state AVFoundation requires*, and nothing is issued
+         * while that state is unknown:
+         *
+         *   - `.readyToPlay` on **both** the player and its item: the one state `preroll` may be
+         *     called in. Everything below is unchanged from v1.9.8;
+         *   - `.failed`: answered as a slot that cannot start, naming the failure, rather than asked;
+         *   - `.unknown` (the item exists and has not resolved yet): nothing is issued, and the same
+         *     wait that covers "the slot has no item yet" covers this — `waited`/`warmStep` until
+         *     `warmDeadline`, then the honest answer that the slot does not hold media.
+         *
+         * This is the same shape as the rest of this plugin: a measurement, or a reason, never a
+         * crash and never a silence.
+         */
+        guard found.player.status == .readyToPlay, item.status == .readyToPlay else {
+            if item.status == .failed || found.player.status == .failed {
+                answer(
+                    buffered: false,
+                    seconds: NaviliteSpectrum.bufferedSeconds(item),
+                    ready: false,
+                    reason: "the slot's item could not be loaded (\(item.error?.localizedDescription ?? found.player.error?.localizedDescription ?? "no reason given by the player"))"
+                )
+                return
+            }
+            guard waited < NaviliteSpectrum.warmDeadline else {
+                let held = NaviliteSpectrum.bufferedSeconds(item)
+                answer(
+                    buffered: held >= minSeconds,
+                    seconds: held,
+                    ready: false,
+                    reason: "the player was not ready to start this slot within \(NaviliteSpectrum.warmDeadline) s (player \(NaviliteSpectrum.statusName(found.player.status)), item \(NaviliteSpectrum.statusName(item.status)))"
+                )
+                return
+            }
+            waited += NaviliteSpectrum.warmStep
+            DispatchQueue.main.asyncAfter(deadline: .now() + NaviliteSpectrum.warmStep) { [weak self] in
+                self?.start(plugin: plugin, seconds: seconds)
+            }
+            return
+        }
         found.player.preroll(atRate: 1.0) { [weak self] ready in
             guard let self, !self.answered else { return }
             let held = NaviliteSpectrum.bufferedSeconds(item)

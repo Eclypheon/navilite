@@ -61,6 +61,8 @@ function stubEngine(): {
   prepares: TrackRequest[];
   /** How many times the queue threw the prepared track away. */
   discards: number;
+  /** Make the next start report no sound at all, which is what demotes the ladder (v1.9.9). */
+  failNextStart: () => void;
   releasePlay: () => void;
 } {
   const plays: TrackRequest[] = [];
@@ -70,6 +72,8 @@ function stubEngine(): {
   let discards = 0;
   let engineState: 'idle' | 'playing' = 'idle';
   let release: (() => void) | null = null;
+  /** Whether the next start ends without sound — one rung down the ladder (v1.9.9). */
+  let fails = false;
   const engine = {
     onEnded: null as null | (() => void),
     onProgress: null as null | ((positionMs: number, durationMs: number) => void),
@@ -108,6 +112,18 @@ function stubEngine(): {
       warmed.set(track.id, track.url);
       return true;
     },
+    /**
+     * The engine's own answer to "did that start produce sound" (v1.9.2), and the one measurement
+     * the ladder is allowed to be fed (v1.9.8). `failNextStart` below is how a start that produced
+     * nothing is modelled — the case that demotes the ladder one rung (v1.9.9).
+     */
+    startDidFail: () => fails,
+    lastStartOutcome: () => (fails ? ('timeout' as const) : ('player' as const)),
+    retryPlayInPlace: async () => {
+      // The retry is the same item asked again: it produces sound, so the start is not a failure.
+      fails = false;
+      return true;
+    },
     /** The engine's pool, read back (v1.9.5) — the queue's only source of truth about warmth. */
     warmedUrl: (songId: string) => warmed.get(songId) ?? null,
     pruneWarmed: (keep: readonly string[]) => {
@@ -131,6 +147,9 @@ function stubEngine(): {
     prepares,
     get discards() {
       return discards;
+    },
+    failNextStart: () => {
+      fails = true;
     },
     releasePlay: () => release?.(),
   };
@@ -216,6 +235,41 @@ test('the next track is requested before the current one ends', async () => {
     'the next two tracks were handed to the engine to get ready, under the URLs they will be played with',
   );
   assert.equal(prepares[0]!.title, 'Track song-2', 'with the metadata the lock-screen card will need');
+});
+
+test('only the track beyond a single press may be prepared as a lower-bitrate variant', async () => {
+  /*
+   * The owner's rule, in his words: *"transcoding is slow heavy work if possible avoid it if it leads
+   * to delays there should be no need to transcode the songs unless it's being done while another
+   * song is playing so it doesn't affect the user experience"* — and the tap path carries no
+   * `maxBitRate` at all (asserted above). But a tap **adopts the warmed URL**, so a cap on the warm
+   * path reaches the start path anyway: that is finding 6 of the 1.9.9 design note, and it is what
+   * this test pins down.
+   *
+   * The ladder is driven one rung down here by a start that produced no sound (the demote path), and
+   * what is asserted is which URLs the look-ahead then asks for: the **next** entry — the boundary,
+   * and the next button — is the original file, and only the entry beyond it carries the cap, because
+   * that one is behind two presses and nobody is waiting for it.
+   */
+  const { engine, releasePlay, prepares, failNextStart } = stubEngine();
+  const { library } = stubLibrary();
+  const queue = new PlaybackQueue(engine, library);
+
+  failNextStart();
+  void queue.play(queueOf('song-1', 'song-2', 'song-3'), 0, CONTEXT);
+  await tick();
+  releasePlay();
+  await tick();
+  await tick();
+
+  const kbps = queue.streamKbps;
+  assert.ok(kbps !== null, 'the start that produced no sound demoted the ladder, so a cap is in force');
+  assert.deepEqual(
+    prepares.map((prepare) => prepare.url),
+    [urlOf('song-2'), cappedUrlOf('song-3', kbps)],
+    'the next entry is prepared as the file sits on the server; only the one beyond it is capped',
+  );
+  assert.equal(prepares[0]!.url.includes('maxBitRate'), false, 'and the entry a track end will play carries no transcode request at all');
 });
 
 test('ten taps in a row each paint the row he touched, and the waiting state never clears itself', async () => {

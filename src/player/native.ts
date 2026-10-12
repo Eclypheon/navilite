@@ -42,45 +42,50 @@ interface NaviliteRemotePlugin {
   /** Bring the audio session back up after a foreground return (idempotent). */
   activateSession(): Promise<{ active: boolean }>;
   /**
-   * State the boundary the native side is to own (v1.9.8) — **a statement, not an increment**.
+   * Publish the **queue** to the native side (v1.9.9) — **a statement, not an increment**.
    *
-   * `assetId` is the slot that is playing and `chain` the slots to play after it, in order, each
-   * with the track's own id so the app can be told which track the native player moved to. Sending
-   * the whole picture every time is deliberate: the app re-states it after every start, every warm
-   * and every visibility change, so there is no incremental state on the native side that a lost
-   * message could leave half-applied.
+   * `list` is the app's resolved play order — every entry, in the order it will be played, each with
+   * the asset id that holds it when the app has it warm — and `index` is the entry that is playing.
+   * That is the whole difference from v1.9.8's `arm`, which named the two warm slots after the
+   * current one and nothing else: off screen the web layer is suspended, so that chain was never
+   * refilled and a third boundary had nothing to play. A list the native side owns does not run out.
    *
-   * `awake` is whether the web layer is running (the app is on screen). While it is, the JS side
-   * owns the boundary and the native one must not act — the two would otherwise both advance and
-   * skip a track.
+   * `repeat` is the app's repeat mode, so the native side can take the end of the queue the way the
+   * app would; `awake` is whether the web layer is running (the native side may only act on a
+   * boundary while it is not); `audibleAssetId` is the slot playing right now, so the native side
+   * never mistakes a silent warm slot for the track being heard.
    */
-  arm(options: {
-    assetId?: string;
-    songId?: string;
-    chain?: Array<{ assetId: string; songId: string }>;
-    previous?: { assetId: string; songId: string } | null;
-    awake?: boolean;
-  }): Promise<{ armed: number; previous: boolean; awake: boolean }>;
-  /** Give the chain back — nothing is to be advanced to any more. */
-  disarm(): Promise<{ armed: number }>;
+  setQueue(options: {
+    list: Array<{ songId: string; url: string; title: string; artist: string; album: string; artworkUrl?: string; assetId?: string }>;
+    index: number;
+    repeat: 'off' | 'all' | 'one';
+    awake: boolean;
+    audibleAssetId?: string;
+    audibleSongId?: string;
+    generation?: number;
+  }): Promise<{ queued: number; index: number; awake: boolean; armed: boolean }>;
   /**
-   * The native side's own account of the boundary: the slot it believes is playing, the track that
-   * slot holds, the chain it is holding, and what it has done — `advances` it took itself,
+   * The native side's own account: the entry it believes is playing (asset, track and **index**), the
+   * queue it is holding, the repeat mode, and what it has done — `advances` it took itself,
    * `failures` where it could not, and `ignored`, the completions that were not about the item it
-   * was told is playing. This is the reconciliation the return to the foreground reads (v1.9.8): a
-   * track that advanced while the app was away is a fact the web layer never heard, and asking is
-   * the only way it learns.
+   * was told is playing. This is the reconciliation the return to the foreground reads: a track
+   * that advanced while the app was away is a fact the web layer never heard, and asking is the only
+   * way it learns.
    */
   now(): Promise<{
     assetId?: string;
     songId?: string;
-    armedSongIds?: string[];
+    index?: number;
+    queued?: number;
+    repeat?: string;
+    generation?: number;
     advances?: number;
     failures?: number;
     ignored?: number;
+    awake?: boolean;
     reason?: string;
   }>;
-  addListener(eventName: 'next' | 'previous' | 'advanced' | 'advanceFailed', listenerFunc: (event: { songId?: string; assetId?: string; reason?: string }) => void): Promise<PluginListenerHandle>;
+  addListener(eventName: 'next' | 'previous' | 'advanced' | 'advanceFailed', listenerFunc: (event: { songId?: string; assetId?: string; index?: number; reason?: string }) => void): Promise<PluginListenerHandle>;
 }
 
 /**
@@ -178,6 +183,35 @@ export interface NativeTruth {
   durationMs: number;
 }
 
+/**
+ * One entry of the queue as the native side is given it (v1.9.9).
+ *
+ * `url` is the entry's **own file**, never a capped or transcoded variant: this side fetches an
+ * unwarmed entry itself at a boundary, and the owner's rule is that a track being played is played
+ * as the file sits on the server. `warmUrl` is the URL the app holds that entry warm *under*, and it
+ * is what the bridge checks before it names a slot — the same string, asked for again, which is what
+ * makes the slot's bytes the bytes the play will use.
+ */
+export interface NativeQueueEntry {
+  songId: string;
+  url: string;
+  title: string;
+  artist: string;
+  album: string;
+  artworkUrl: string | null;
+  warmUrl?: string | null;
+}
+
+/** The app's statement of the queue: the resolved play order, the entry playing, and the rules. */
+export interface NativeQueueStatement {
+  list: readonly NativeQueueEntry[];
+  /** Position in `list` of the entry playing now, or -1 when nothing is. */
+  index: number;
+  repeat: 'off' | 'all' | 'one';
+  /** Whether the web layer is running. Only `false` lets the native side take a boundary. */
+  awake: boolean;
+}
+
 export interface NativeBridge {
   load(info: NativeTrackInfo): Promise<void>;
   /**
@@ -219,31 +253,34 @@ export interface NativeBridge {
    */
   invalidatePrepared?(): void;
   /**
-   * State the boundary the **native player** is to own, and whether it may act on it (v1.9.8).
+   * Publish the **queue** the native player is to walk (v1.9.9), and whether it may act on it.
    *
-   * `next` is the tracks warm ahead of the one playing, in the order they would be played; the
-   * bridge turns each into the slot holding it — a track that is not warm is not named to the
-   * native side at all. `previous` is the one behind, for the lock screen's back button. `awake`
-   * is whether the web layer is running.
+   * `list` is the app's resolved play order — one entry per track, in the order it will be played,
+   * each carrying the asset id that holds it when the app has it warm — and `index` is the entry
+   * playing now. The bridge turns the warm entries into the slots holding them; an entry the app
+   * has nothing warm for goes **without a slot**, and the native side then fetches that entry itself
+   * at the boundary. That is the structural half of this release: the list cannot run out, so no
+   * number of track ends with the app away can silence the music, and every boundary that cannot be
+   * taken is reported with its reason.
    *
-   * This is the structural half of the release. Off screen there is no web layer: the plugin's own
-   * completion is delivered to a frozen view, `watchForPinnedEnd` is driven by a clock tick that
-   * has been stopped, and every path that could have moved the queue is in the suspended process.
-   * So the native side is given its own next — and it plays it itself, from its own observation of
-   * the audible item's end. Answers whether the platform took it (there is no native boundary on
-   * Android, and none in a build without our iOS plugin, where the JS side keeps owning it).
+   * `awake` is whether the web layer is running: with the app on screen the JS side owns the
+   * boundary exactly as it always has, and the native side is only told what follows.
+   *
+   * Answers whether the native side holds the boundary (there is no native boundary on Android, and
+   * none in a build without our iOS plugin, where the JS side keeps owning it).
    */
-  armBoundary?(boundary: { next: readonly string[]; previous: string | null; awake: boolean }): Promise<boolean>;
+  setQueue?(statement: NativeQueueStatement): Promise<boolean>;
   /**
-   * Ask the native side which slot it is playing now, and adopt its answer (v1.9.8).
+   * Ask the native side which entry it is playing now, and adopt its answer (v1.9.8, by index since
+   * v1.9.9).
    *
-   * A track that advanced while the app was away is a fact the web layer never received, and this
-   * is the only way it learns: on the way back, before anything is read from the player, the
-   * bridge compares the native side's own record with the slot it believes is audible and moves
-   * onto it. `changed` true means the app was following the wrong slot, and `songId` is the track
-   * that is actually sounding — never guessed, and never silent.
+   * A track that advanced while the app was away is a fact the web layer never received, and this is
+   * the only way it learns: on the way back, before anything is read from the player, the bridge
+   * compares what the native side says with what it believes is audible, and reports the **index**
+   * as well as the track — an index is what a shuffled play order needs, and the id lookup it used
+   * to do was the hole once shuffle was on.
    */
-  reconcile?(): Promise<{ changed: boolean; songId: string | null } | null>;
+  reconcile?(): Promise<{ changed: boolean; songId: string | null; index: number } | null>;
   /** What the native boundary has done, as numbers and a sentence — for the reason line (v1.9.8). */
   nativeAdvance?(): { armed: number; advances: number; failures: number; ignored: number; reason: string };
   play(startSeconds: number): Promise<void>;
@@ -328,13 +365,15 @@ export interface NativeBridgeEvents {
   onBoundaryRefused?(): void;
   /**
    * The native player took a track boundary **by itself** (v1.9.8), and this is the track it moved
-   * to. See {@link NativeBridge.armBoundary}: while the app is off screen nothing else can.
+   * to — with the **index** it moved to inside the queue the app published (v1.9.9), because a play
+   * order is not a list of slot names and an index is the only thing that survives a shuffle.
+   * See {@link NativeBridge.setQueue}: while the app is off screen nothing else can take a boundary.
    *
    * It is an *adoption*: the audio is already playing, so the listener to this must move onto that
    * track rather than start it. Optional so a bridge without it (an older build, the fake bridges in
    * the tests) is a bridge that simply never reports one.
    */
-  onAdvanced?(songId: string): void;
+  onAdvanced?(songId: string, index: number): void;
 }
 
 const BACKGROUND_AUDIO_SERVICE = 'BackgroundAudio';
@@ -406,6 +445,75 @@ async function boundedSettled<T>(
 /** The same, for the calls where the answer is all that matters. */
 async function bounded<T>(work: Promise<T>, fallback: T, what: string, ms = BRIDGE_TIMEOUT_MS): Promise<T> {
   return (await boundedSettled(work, fallback, what, ms)).value;
+}
+
+/**
+ * How long a warm job may wait for the audible lane to go quiet before it gives up and issues
+ * nothing (v1.9.9). Short on purpose: the point is that warm work never sits in front of a tap, and
+ * a warm that cannot happen now is warmed again by the next look-ahead.
+ */
+const WARM_YIELD_MS = 3000;
+const WARM_YIELD_STEP_MS = 100;
+
+/**
+ * The two lanes every write to the player runs on (v1.9.9) — **and the rule that the audible one is
+ * never behind warm work**.
+ *
+ * This is one release's worth of the owner's second mandatory invariant, in a shape that can be
+ * tested without a phone: `audible` carries what the listener is waiting for, `warm` carries what he
+ * is not, and a warm job can ask `yieldToAudible` whether it is polite to issue anything at all yet.
+ * Both lanes serialise their own work (two writes to one asset slot must never be in flight at
+ * once), and neither waits for the other.
+ */
+export interface AssetLanes {
+  /** Run work on the audible lane: a start, an adoption, the play of a start, a slot's unload. */
+  audible<T>(work: () => Promise<T>): Promise<T>;
+  /** Run work on the warm lane: a warm, its proof, a replaced slot's unload, a discard. */
+  warm<T>(work: () => Promise<T>): Promise<T>;
+  /** True while an audible job is actually running — what warm work stands aside for. */
+  readonly busy: boolean;
+  /** Wait for the audible lane to go quiet, bounded. `false` means it never did. */
+  yieldToAudible(ms?: number): Promise<boolean>;
+}
+
+export function createAssetLanes(yieldStepMs = WARM_YIELD_STEP_MS): AssetLanes {
+  const chain = <T>(current: Promise<unknown>, work: () => Promise<T>): { next: Promise<T>; settled: Promise<unknown> } => {
+    const next = current.then(work, work);
+    return { next, settled: next.then(() => undefined, () => undefined) };
+  };
+  let audibleLane: Promise<unknown> = Promise.resolve();
+  let warmLane: Promise<unknown> = Promise.resolve();
+  let inFlight = 0;
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  return {
+    audible<T>(work: () => Promise<T>): Promise<T> {
+      const run = async (): Promise<T> => {
+        // Counted from the moment the job actually runs, not from the moment it is queued: what a
+        // warm job must stand aside for is a start that is really in flight.
+        inFlight += 1;
+        try {
+          return await work();
+        } finally {
+          inFlight = Math.max(0, inFlight - 1);
+        }
+      };
+      const { next, settled } = chain(audibleLane, run);
+      audibleLane = settled;
+      return next;
+    },
+    warm<T>(work: () => Promise<T>): Promise<T> {
+      const { next, settled } = chain(warmLane, work);
+      warmLane = settled;
+      return next;
+    },
+    get busy(): boolean {
+      return inFlight > 0;
+    },
+    async yieldToAudible(ms = WARM_YIELD_MS): Promise<boolean> {
+      for (let waited = 0; waited < ms && inFlight > 0; waited += yieldStepMs) await sleep(yieldStepMs);
+      return inFlight === 0;
+    },
+  };
 }
 
 /**
@@ -519,15 +627,18 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     /** The track the audible slot holds (v1.9.8) — what the native boundary is told is playing. */
     let audibleSongId: string | null = null;
     /**
-     * The boundary the native player is to own (v1.9.8), as the app last stated it, and what came of
-     * it. Every entry has one clearing path: `armBoundary` replaces the whole picture, `armBoundary`
-     * with an empty chain clears it, and the engine states an empty one whenever a selection moves
-     * the queue, the warm pool is thrown away, or the app is stopped.
+     * The queue the native player is to walk (v1.9.9), as the app last stated it, and what came of
+     * it. Every field has one clearing path: `setQueue` replaces the whole statement, an empty list
+     * is the app saying "there is no queue", and the engine states one after every start, every warm
+     * and every visibility change — so nothing here can be left half-applied by a lost message.
      */
-    let boundary: { next: readonly string[]; previous: string | null; awake: boolean } = { next: [], previous: null, awake: true };
-    let boundarySlots = 0;
+    let statement: NativeQueueStatement = { list: [], index: -1, repeat: 'off', awake: true };
+    /** How many entries the native side was given, and how many of them it holds a slot for. */
+    let boundaryQueued = 0;
     let boundaryArmed = false;
     let boundaryReason = 'nothing stated yet';
+    /** The number of the statement, so the reason line can name the picture the native side holds. */
+    let statementGeneration = 0;
     /** What the native side has done by itself, and where it would not (v1.9.8). */
     let nativeAdvances = 0;
     let nativeFailures = 0;
@@ -602,25 +713,25 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     let lastPositionMs = 0;
 
     /*
-     * One lane for the two asset slots, so two writes to a slot can never be in flight at once.
+     * **Two lanes, and the audible one is never behind warm work.**
      *
      * A track is loaded with `unload`+`preload` under its slot's name, which makes an unfinished
      * `preload` and the next track's `unload`+`preload` two writers on one slot: the older one can
-     * finish last and leave the plugin holding the wrong stream. The engine already refuses to
-     * *play* a superseded load (`startNative`); this is the other half — the loads themselves run in
-     * the order the taps were made, so the last preload to complete is the last one asked for. The
-     * prepared slot goes through the same lane, so an adopt at a boundary cannot be overtaken by the
-     * preload for the track after it.
+     * finish last and leave the plugin holding the wrong stream. So the writes are serialised — but
+     * until v1.9.9 they were serialised **on one lane with the warm work**, and that is the
+     * contention the owner can feel: `prepare` waits for real bytes now (it proves the slot holds
+     * media), a tap's `load` queues behind it, and `boundedSettled` giving up on *waiting* does not
+     * let the job go — the tap then waits for the whole network-bound warm to finish before its own
+     * first byte is asked for.
+     *
+     * So the two are separate lanes: the audible one carries what the listener is waiting for (a
+     * load, an adoption, the play of a start, the slot an adoption frees), the warm one carries what
+     * he is not (a warm, its proof, a replaced slot's unload, a discard). A warm job additionally
+     * **yields** while a start or an adoption is in flight — the bytes still share one pipe, so a
+     * fetch competing with the track he is waiting for is the failure this app has shipped before.
+     * The mechanism is exported (`createAssetLanes`) so the rule can be tested without a phone.
      */
-    let assetLane: Promise<unknown> = Promise.resolve();
-    const inAssetLane = <T>(work: () => Promise<T>): Promise<T> => {
-      const next = assetLane.then(work, work);
-      assetLane = next.then(
-        () => undefined,
-        () => undefined,
-      );
-      return next;
-    };
+    const lanes = createAssetLanes();
 
     /** What the lock-screen card shows for a track, in one place — the audible and prepared alike. */
     const metadata = (info: NativeTrackInfo) => ({
@@ -720,58 +831,74 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     };
 
     /**
-     * State the whole boundary to the native side, and take its answer (v1.9.8).
+     * Publish the whole queue to the native side, and take its answer (v1.9.9).
      *
-     * The chain is built from the warm pool here rather than by the caller, because the caller
-     * (the engine) tracks tracks by id and the native side needs *slots* — and the only thing that
-     * knows which slot holds which track is this file. A track that is not warm is not named: the
-     * native side must never be handed a slot that holds something else.
+     * The slots are attached here rather than by the caller, because the caller (the engine) tracks
+     * tracks by id and the native side plays *slots* — and the only thing that knows which slot holds
+     * which track is this file. The rule that keeps a slot and a URL from ever disagreeing is kept
+     * from v1.9.8: an entry is named with a slot **only when this bridge holds it under exactly the
+     * URL the engine says it was warmed with**. Everything else goes to the native side without a
+     * slot, which is not a gap — it is the instruction to fetch that entry itself at the boundary,
+     * and that is why the queue cannot run out.
      */
-    const stateBoundary = async (): Promise<boolean> => {
-      if (!remote?.arm) {
+    const stateQueue = async (): Promise<boolean> => {
+      if (!remote?.setQueue) {
         boundaryArmed = false;
-        boundarySlots = 0;
+        boundaryQueued = 0;
         boundaryReason = 'this build has no native boundary plugin, so the web layer owns the boundary as it always did';
         return false;
       }
-      const chain: Array<{ assetId: string; songId: string }> = [];
-      for (const songId of boundary.next) {
-        for (const [slot, held] of warm) {
-          if (held.songId !== songId) continue;
-          chain.push({ assetId: slot, songId });
-          break;
+      let warmEntries = 0;
+      const list = statement.list.map((entry) => {
+        const held =
+          entry.warmUrl == null
+            ? undefined
+            : [...warm.entries()].find(([, claim]) => claim.songId === entry.songId && claim.url === entry.warmUrl);
+        if (held === undefined) {
+          return { songId: entry.songId, url: entry.url, title: entry.title, artist: entry.artist, album: entry.album, artworkUrl: entry.artworkUrl ?? undefined };
         }
-      }
-      let previous: { assetId: string; songId: string } | null = null;
-      if (boundary.previous !== null) {
-        for (const [slot, held] of warm) {
-          if (held.songId !== boundary.previous) continue;
-          previous = { assetId: slot, songId: boundary.previous };
-          break;
-        }
-      }
+        warmEntries += 1;
+        return {
+          songId: entry.songId,
+          url: entry.url,
+          title: entry.title,
+          artist: entry.artist,
+          album: entry.album,
+          artworkUrl: entry.artworkUrl ?? undefined,
+          assetId: held[0],
+        };
+      });
+      statementGeneration += 1;
       const answer = await bounded(
-        remote.arm({ assetId: audibleId, songId: audibleSongId ?? undefined, chain, previous, awake: boundary.awake }),
+        remote.setQueue({
+          list,
+          index: statement.index,
+          repeat: statement.repeat,
+          awake: statement.awake,
+          audibleAssetId: audibleId,
+          audibleSongId: audibleSongId ?? undefined,
+          generation: statementGeneration,
+        }),
         null,
-        'arm',
+        'setQueue',
       );
-      boundarySlots = chain.length + (previous === null ? 0 : 1);
+      boundaryQueued = answer?.queued ?? list.length;
       /*
        * **The native side may act on this only while the web layer is not running.** With the app
        * on screen the JS side takes the boundary exactly as it always has — which is what keeps the
        * two from both advancing a track, and keeps `repeat one`, the end of the queue and the
        * on-screen `next` on the one path that implements them.
        */
-      boundaryArmed = answer !== null && boundary.awake === false && chain.length > 0;
+      boundaryArmed = answer !== null && answer.armed === true && statement.awake === false && statement.index >= 0;
       boundaryReason =
         answer === null
           ? 'the native boundary plugin did not answer, so the web layer keeps the boundary'
           : boundaryArmed
-            ? `the native player will play the next slot itself if this track ends with the app away (${chain.length} ahead, ${previous === null ? 'none' : 'one'} behind)`
-            : boundary.awake
+            ? `the native player will walk this queue itself if a track ends with the app away (${list.length} entries, ${warmEntries} of them held warm here)`
+            : statement.awake
               ? 'the app is on screen, so the web layer takes the track boundary and the native side is only told what follows'
-              : chain.length === 0
-                ? 'nothing is warm ahead of this track, so nothing could advance while the app is away'
+              : statement.index < 0
+                ? 'no track is playing, so there is nothing for the native side to advance from'
                 : 'the native boundary plugin took the statement';
       return boundaryArmed;
     };
@@ -809,7 +936,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         preparedEpoch += 1;
         warm.clear();
         audibleSongId = info.id ?? audibleSongId;
-        await bounded(inAssetLane(() => fillSlot(audibleId, info)), undefined, 'load');
+        // The listener's own request, on the lane that belongs to him — and while it is in flight,
+        // warm work stands aside instead of competing for the link.
+        await lanes.audible(() => bounded(fillSlot(audibleId, info), undefined, 'load'));
       },
       async prepare(info) {
         /*
@@ -835,7 +964,19 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         const key = info.id ?? info.url;
         for (const held of warm.values()) if (held.songId === key && held.url === info.url) return true;
         const result = await boundedSettled(
-          inAssetLane(async () => {
+          lanes.warm(async () => {
+            if (epoch !== preparedEpoch) return false;
+            /*
+             * **And warm work stands aside while a start or an adoption is in flight (v1.9.9).**
+             *
+             * The lanes are separate, which is what keeps a tap from *queueing* behind a warm — but
+             * the bytes are one pipe, and a fetch that runs while the listener waits for the first
+             * seconds of a track he tapped is competing with the very stream he is waiting for. So
+             * the warm waits for the audible lane to be quiet, with a bound: past it, this answers
+             * "not warm" and issues nothing at all, which the engine reads as a claim that was never
+             * made. Nothing is lost — the look-ahead warms again after the start has settled.
+             */
+            if (!(await lanes.yieldToAudible())) return false;
             if (epoch !== preparedEpoch) return false;
             for (const [slot, held] of [...warm]) {
               if (held.songId !== key) continue;
@@ -930,16 +1071,18 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          */
         audibleId = slotName;
         audibleSongId = songId ?? audibleSongId;
-        const attempt = inAssetLane(async () => {
-          try {
-            await NativeAudio.play({ assetId: slotName, time: 0 });
-          } catch (error) {
-            refusal = `play refused (${error instanceof Error ? error.message : String(error)})`;
-            return false;
-          }
-          return true;
+        const result = await lanes.audible(async () => {
+          const attempt = (async (): Promise<boolean> => {
+            try {
+              await NativeAudio.play({ assetId: slotName, time: 0 });
+            } catch (error) {
+              refusal = `play refused (${error instanceof Error ? error.message : String(error)})`;
+              return false;
+            }
+            return true;
+          })();
+          return boundedSettled(attempt, false, 'adopt');
         });
-        const result = await boundedSettled(attempt, false, 'adopt');
         if (!result.settled) {
           // Nothing is known to be playing on this slot, and the engine is about to load the track
           // into the audible one: give the name back so the outgoing asset's events are its again.
@@ -963,7 +1106,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         // The slot that was just emptied is the one written here (v1.9.7: the stamp is per slot).
         slotWrittenAt.set(to, Date.now());
         await bounded(
-          inAssetLane(async () => {
+          lanes.audible(async () => {
             try {
               await NativeAudio.unload({ assetId: to });
             } catch {
@@ -977,22 +1120,27 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         return true;
       },
       /*
-       * ---------------------------------------------------------- the native boundary (v1.9.8)
+       * ------------------------------------------------------ the published queue (v1.9.9)
        *
-       * Three methods, and they are the whole of "the app is not the only owner of the boundary
-       * any more": `armBoundary` states what to play next and whether the native side may act,
-       * `reconcile` reads back which slot the native side is playing, and `nativeAdvance` is the
-       * account for the reason line.
+       * Three methods, and they are the whole of "the app is not the only owner of the boundary any
+       * more": `setQueue` publishes the queue the native side is to walk and whether it may act on
+       * it, `reconcile` reads back which entry it is playing, and `nativeAdvance` is the account for
+       * the reason line.
        */
-      async armBoundary(next) {
-        boundary = { next: [...next.next], previous: next.previous, awake: next.awake };
-        return stateBoundary();
+      async setQueue(next) {
+        statement = {
+          list: [...next.list],
+          index: Number.isFinite(next.index) ? Number(next.index) : -1,
+          repeat: next.repeat,
+          awake: next.awake,
+        };
+        return stateQueue();
       },
       async reconcile() {
         if (!remote?.now) return null;
         const state = await bounded(remote.now(), null, 'reconcile');
         if (!state) {
-          boundaryReason = 'the native boundary plugin did not answer, so the app cannot ask it which slot it is playing';
+          boundaryReason = 'the native boundary plugin did not answer, so the app cannot ask it which entry it is playing';
           return null;
         }
         if (Number.isFinite(state.advances)) nativeAdvances = Number(state.advances);
@@ -1000,20 +1148,32 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         if (Number.isFinite(state.ignored)) nativeIgnored = Number(state.ignored);
         if (typeof state.reason === 'string' && state.reason) boundaryReason = state.reason;
         const slot = typeof state.assetId === 'string' && state.assetId ? state.assetId : null;
-        if (slot === null || slot === audibleId) return { changed: false, songId: state.songId ?? null };
+        const nativeIndex = Number.isFinite(state.index) ? Number(state.index) : -1;
         /*
-         * The native player is on another slot than the app believed. That is a track the app
-         * advanced to without being told, and the answer is to move onto it — never to play
-         * anything: the audio is already coming out of that slot.
+         * **The app is following the wrong track if either fact says so (v1.9.9).** The slot is the
+         * old test and it still holds — but the *index* is the one a shuffled order needs: two
+         * different tracks can be played from the same slot name over time, and the id lookup this
+         * used to fall back on cannot tell an advance from a re-warm. An index that differs from the
+         * one the app last published is a boundary the native side took, whether or not it happened
+         * to come out of the slot the app expected.
          */
-        warm.delete(slot);
-        audibleId = slot;
+        const movedIndex = nativeIndex >= 0 && nativeIndex !== statement.index;
+        if (slot === null || (slot === audibleId && !movedIndex)) return { changed: false, songId: state.songId ?? null, index: nativeIndex };
+        /*
+         * The native player is on another entry than the app believed. That is a track the app
+         * advanced to without being told, and the answer is to move onto it — never to play anything:
+         * the audio is already coming out of that slot.
+         */
+        if (slot !== null) {
+          warm.delete(slot);
+          audibleId = slot;
+        }
         audibleSongId = typeof state.songId === 'string' && state.songId ? state.songId : null;
-        return { changed: true, songId: audibleSongId };
+        return { changed: true, songId: audibleSongId, index: nativeIndex };
       },
       nativeAdvance() {
         return {
-          armed: boundaryArmed ? boundarySlots : 0,
+          armed: boundaryArmed ? boundaryQueued : 0,
           advances: nativeAdvances,
           failures: nativeFailures,
           ignored: nativeIgnored,
@@ -1032,7 +1192,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         warm.clear();
         if (slots.length === 0) return;
         await bounded(
-          inAssetLane(async () => {
+          lanes.warm(async () => {
             for (const slot of slots) await unloadSlot(slot);
           }),
           undefined,
@@ -1041,9 +1201,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       },
       async play(startSeconds) {
         await startService();
-        // Behind the same lane: the play for a track whose preload is still running must not
+        // Behind the audible lane: the play for a track whose own load is still running must not
         // overtake it, and it must not start the previous track's asset either.
-        await bounded(inAssetLane(() => NativeAudio.play({ assetId: audibleId, time: Math.max(0, startSeconds) })), undefined, 'play');
+        await lanes.audible(() => bounded(NativeAudio.play({ assetId: audibleId, time: Math.max(0, startSeconds) }), undefined, 'play'));
         /*
          * The forward-buffer target, written **after** the play call (v1.9.2).
          *
@@ -1173,10 +1333,15 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
                * the app believed was audible would be dropped by `isAudible` as a message about an
                * asset nobody is hearing, and the app would go on reading — and reporting — a player
                * that is no longer making the sound.
+               *
+               * v1.9.9 — **and the index travels with it.** The track is what the screen needs; the
+               * index is what the queue needs, because a play order is not a list of slot names and
+               * the app adopts by position in the order it published.
                */
               remote.addListener('advanced', (event) => {
                 const songId = typeof event?.songId === 'string' ? event.songId : '';
                 const slot = typeof event?.assetId === 'string' ? event.assetId : '';
+                const moved = Number.isFinite(event?.index) ? Number(event?.index) : -1;
                 nativeAdvances += 1;
                 /*
                  * The slot the native side says it played is the audible one from that instant, and
@@ -1196,8 +1361,14 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
                   }
                 }
                 if (songId) audibleSongId = songId;
-                boundaryReason = `the native player took the boundary itself and is playing ${songId || 'the next slot'}`;
-                events.onAdvanced?.(songId);
+                /*
+                 * And the index the native side moved to becomes the index the app has published,
+                 * so the reconciliation on the way back does not read this same advance a second
+                 * time and move the queue again.
+                 */
+                if (moved >= 0) statement = { ...statement, index: moved };
+                boundaryReason = `the native player took the boundary itself and is playing ${songId || 'the next entry'}`;
+                events.onAdvanced?.(songId, moved);
               }),
               /*
                * And where it could not. The app is told the track ended after all — which is what it

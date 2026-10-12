@@ -190,3 +190,13 @@ Plain language, user-visible changes only. The app shows this same list under
 - The first song you tap is played as the file sits on your server, exactly as v1.7 did. The app had started asking the server for a smaller copy of every song before the first note, and on your setup that means the server re-encodes the song before it sends a byte - which is why the first tap had got slower. Nothing is re-encoded for a song you are waiting to hear any more.
 - A song that fails to start is asked for again on the song that is already there, instead of being thrown away and downloaded a second time - so a hiccup can no longer turn into another long wait, or into the same song starting over.
 - The line under the bar now also says what the phone's player did on its own while the app was away: how many songs it was holding ready to play, how many it moved on to by itself, and where it could not.
+
+## 1.9.9 — 2026-10-13
+
+- The app no longer closes itself on the first song you tap. It was asking the phone's player to get a song ready in a state the player refuses, which took the app down the moment a song was tapped — and then again every time it opened, because it opened on the song that had been playing. Nothing is asked of the player now until it says it is ready for it.
+- A song that ends while the app is in your pocket always goes on to the next one, however many go by. The phone's player is given the whole queue to walk now, and when the next song is not already sitting in it, it fetches that song itself.
+- Next and previous no longer wait for a song that is being got ready in the background. Starting a song and preparing the following one were sharing one line, so a tap could sit behind a whole download and look like it had done nothing.
+- Previous does what it says now. More than three seconds into a song it restarts that song; inside the first three seconds it goes back a song. It used to restart the song and then play the previous one anyway, so going forward was the only thing that ever worked.
+- A song you are waiting for is never a smaller copy of the file on your server. The app was still asking for a lower-quality version for the next songs and then playing it, so on a slow connection the song you tapped was quietly the reduced one.
+- Opening the app no longer starts playing by itself. It comes up where you left it — same queue, same song, same second — and one tap on play carries on from there.
+- The next and previous buttons on the lock screen now work while the app is in the background, and going back works more than once.

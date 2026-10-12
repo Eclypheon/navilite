@@ -1,23 +1,25 @@
 /**
- * v1.9.8 — the boundary, the warm slot, and the start path.
+ * v1.9.9 — the published queue, the boundary the native side walks, and the two lanes.
  *
- * Three claims, each of which is the owner's complaint in his own words, and none of which can be
- * proved by reading a phone:
+ * Four claims, and each one is a defect the owner could feel:
  *
- *   1. **A track that ends with the app away advances.** Off screen there is no web layer at all —
- *      the plugin's completion goes to a suspended view and `watchForPinnedEnd` is driven by a clock
- *      tick that has been stopped — so the native player is given the next slot and plays it itself
- *      (`armBoundary`, and the `advanced` event it answers with). Asserted here as: the boundary the
- *      app states names **exactly the warm tracks ahead of it, in the order they would be played**,
- *      it names them to the native side only while the app is away, and the track it moves to is
- *      **adopted** — nothing is loaded, nothing is played, and no track is skipped.
- *   2. **A warm next slot is real.** `prepare` resolves only after the slot has been asked for the
- *      media data required to start, and the bridge answers `false` — the engine drops its claim —
- *      when the slot holds nothing. So "warm" cannot be a claim about a player that was merely
- *      created.
- *   3. **The start path never asks for a transcode, and a failed start is retried in place.** The
- *      URL a play is given carries no `maxBitRate`, and the retry after a start that produced no
- *      sound asks the player that already holds the track rather than unloading it.
+ *   1. **The boundary is the whole queue, not the look-ahead.** v1.9.8 armed the native side with
+ *      the two warm slots after the one playing — a chain built in JavaScript, never refilled while
+ *      JavaScript was suspended, so a third track end with the app away had nothing to play and the
+ *      music stopped. What is asserted here is that the statement carries **every entry of the
+ *      resolved play order**, with a slot only for the entries the app genuinely holds warm and *no
+ *      slot* for the rest (which the native side fetches itself): n entries, n boundaries. Asserted
+ *      against the bridge, which is the thing that decides which slot an entry is played from.
+ *   2. **An advance is adopted by index.** A play order is not a list of slot names, and with
+ *      shuffle on the position in the order is the only thing that says which track is playing. The
+ *      index the native side reports is honoured (and an index that names a *different* track is not
+ *      adopted blindly — the id is the fallback).
+ *   3. **A warm slot that holds no media is not warm.** The engine drops the claim, the entry is
+ *      published **without a slot**, and nothing anywhere claims that boundary was going to be
+ *      instant.
+ *   4. **The audible lane is never behind warm work.** The two lanes and the yield are in
+ *      `createAssetLanes`, and they are driven here directly: a start must not wait for a warm that
+ *      is still fetching, and a warm that cannot yield must issue nothing at all.
  *
  * The real `AudioEngine` and the real `PlaybackQueue` are driven here, against a fake bridge and a
  * fake library: no DOM, no network, no phone.
@@ -26,7 +28,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { AudioEngine, type EngineOptions } from '../src/player/engine.ts';
-import type { NativeBridge, NativeBridgeEvents, NativeTrackInfo } from '../src/player/native.ts';
+import { createAssetLanes, type NativeBridge, type NativeBridgeEvents, type NativeQueueStatement, type NativeTrackInfo } from '../src/player/native.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
 import type { Library } from '../src/state/library.ts';
 import type { QueueContext, Song } from '../src/api/types.ts';
@@ -69,11 +71,19 @@ const settle = async (): Promise<void> => {
   for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
 };
 
+/** One statement of the queue as the bridge received it, in the terms the tests assert on. */
+interface Stated {
+  songs: string[];
+  /** The slot each entry was played from, or null where the app holds nothing warm. */
+  slots: Array<string | null>;
+  index: number;
+  repeat: string;
+  awake: boolean;
+}
+
 interface Boundary {
-  /** What the app has stated to the native side, latest first. */
-  stated: Array<{ next: readonly string[]; previous: string | null; awake: boolean }>;
-  /** The slots the bridge turned those tracks into — the chain the native side would play. */
-  chain: string[];
+  /** What the app has stated to the native side, latest last. */
+  stated: Stated[];
   /** The track the native player moved to by itself, as the app was told. */
   advanced: string[];
   /** Slots the bridge asked the plugin to make warm, and what the plugin answered. */
@@ -89,8 +99,8 @@ interface Boundary {
 }
 
 /**
- * The bridge, reduced to what the engine and the queue touch — with the two statements under test
- * (the boundary and the warm proof) recorded rather than simulated.
+ * The bridge, reduced to what the engine and the queue touch — with the statement under test
+ * (the published queue) recorded rather than simulated, and the warm proof answered from a flag.
  */
 function fakeBridge(record: Boundary): (os: string, events: NativeBridgeEvents) => Promise<NativeBridge> {
   return async (_os: string, events: NativeBridgeEvents) => {
@@ -127,7 +137,7 @@ function fakeBridge(record: Boundary): (os: string, events: NativeBridgeEvents) 
         const slot = slots.get(songId);
         if (slot === undefined) return false;
         slots.delete(songId);
-        record.plays.push(`play@0`);
+        record.plays.push('play@0');
         await wait();
         setTimeout(() => events.onPosition(0), 5);
         return true;
@@ -135,16 +145,23 @@ function fakeBridge(record: Boundary): (os: string, events: NativeBridgeEvents) 
       async discard() {
         slots.clear();
       },
-      async armBoundary(boundary: { next: readonly string[]; previous: string | null; awake: boolean }) {
-        record.stated.push({ next: [...boundary.next], previous: boundary.previous, awake: boundary.awake });
-        record.chain = boundary.next.map((songId) => slots.get(songId) ?? `missing:${songId}`);
-        return true;
+      async setQueue(statement: NativeQueueStatement) {
+        const songs = statement.list.map((entry) => entry.songId);
+        const statedSlots = statement.list.map((entry) => {
+          if (entry.warmUrl == null) return null;
+          return slots.get(entry.songId) ?? `missing:${entry.songId}`;
+        });
+        record.stated.push({ songs, slots: statedSlots, index: statement.index, repeat: statement.repeat, awake: statement.awake });
+        // The native side can walk this queue: it holds the order and the index, and it fetches
+        // whatever it was given no slot for.
+        return songs.length > 0 && statement.index >= 0;
       },
       async reconcile() {
-        return { changed: false, songId: null };
+        return { changed: false, songId: null, index: -1 };
       },
       nativeAdvance() {
-        return { armed: record.chain.length, advances: record.advanced.length, failures: 0, ignored: 0, reason: 'test' };
+        const last = record.stated[record.stated.length - 1];
+        return { armed: last ? last.songs.length : 0, advances: record.advanced.length, failures: 0, ignored: 0, reason: 'test' };
       },
       async retryPlayInPlace() {
         record.retries += 1;
@@ -174,7 +191,7 @@ function stubLibrary(): Library {
 }
 
 function blank(): Boundary {
-  return { stated: [], chain: [], advanced: [], warmed: [], loads: [], plays: [], retries: 0, events: null, warmHoldsBytes: true };
+  return { stated: [], advanced: [], warmed: [], loads: [], plays: [], retries: 0, events: null, warmHoldsBytes: true };
 }
 
 /** The engine and the queue, wired to each other exactly as `src/ui/app.ts` wires them. */
@@ -187,6 +204,8 @@ function pair(record: Boundary): { engine: AudioEngine; queue: PlaybackQueue } {
   return { engine, queue };
 }
 
+const lastStated = (record: Boundary): Stated => record.stated[record.stated.length - 1]!;
+
 /**
  * Every engine is stopped before its test ends: the clock ticker and the spectrum poll are
  * `setInterval`s, and a test process that holds one open never exits.
@@ -197,7 +216,7 @@ async function stopAll(engines: AudioEngine[]): Promise<void> {
   for (const engine of engines) await engine.stop();
 }
 
-test('the boundary names the warm tracks ahead, in order, and only while the app is away', async () => {
+test('the native side is given the whole queue — every entry, in the order it will be played', async () => {
   const record = blank();
   const { engine, queue } = pair(record);
   // Off screen — the state the native side is given the boundary in.
@@ -207,26 +226,33 @@ test('the boundary names the warm tracks ahead, in order, and only while the app
   await settle();
 
   /*
-   * The tracks ahead of the one playing are what a track that ends advances to, and the order is
-   * the play order: song-2 is next, song-3 is the one after it. A boundary that named only one of
-   * them, or named them the other way round, would play the wrong track — and a boundary that named
-   * the *previous* track (which is also warm, and is warmed second) would play it twice.
+   * **All three entries, not the two after the one playing.** This is the invariant that makes a
+   * boundary uncrossable: the order is the app's, the native side holds the whole of it, and it can
+   * fetch any entry it has no slot for. v1.9.8 stated a two-slot chain here and ran out after two
+   * track ends with the app away.
    */
-  const last = record.stated[record.stated.length - 1];
-  assert.deepEqual(last?.next, ['song-2', 'song-3'], 'the native side is given the two tracks ahead of this one, in the order they would be played');
-  assert.deepEqual(record.chain, ['navilite-slot-1', 'navilite-slot-2'], 'and each is a slot the app actually warmed, in that order');
-  assert.equal(last?.awake, false, 'stated as "the app is away", which is the only state in which the native side may act');
+  const stated = lastStated(record);
+  assert.deepEqual(stated.songs, ['song-1', 'song-2', 'song-3'], 'the whole resolved play order is published, in the order it will be played');
+  assert.equal(stated.index, 0, 'with the entry that is playing named as an index');
+  assert.equal(stated.repeat, 'off', 'and the repeat mode, so the end of the list can be taken the way the app would');
+  assert.equal(stated.awake, false, 'stated as "the app is away", which is the only state in which the native side may act');
+  assert.deepEqual(
+    stated.slots,
+    [null, 'navilite-slot-1', 'navilite-slot-2'],
+    'the entries the app holds warm carry their slot; everything else is published without one, which is the instruction to fetch it',
+  );
+  assert.equal(engine.status().nativeBoundary.armed, 3, 'the native side says it is holding all three entries');
 
-  // Coming back in: the same picture, stated with the web layer awake, so the native side stands down.
+  // Coming back in: the same queue, stated with the web layer awake, so the native side stands down.
   await engine.handleVisibility(false);
-  const back = record.stated[record.stated.length - 1];
-  assert.equal(back?.awake, true, 'with the app on screen the web layer takes the boundary back, and the native side is told so');
-  assert.deepEqual(back?.next, ['song-2', 'song-3'], 'the chain itself is unchanged — only who acts on it');
+  const back = lastStated(record);
+  assert.equal(back.awake, true, 'with the app on screen the web layer takes the boundary back, and the native side is told so');
+  assert.deepEqual(back.songs, ['song-1', 'song-2', 'song-3'], 'the queue itself is unchanged — only who acts on it');
   assert.equal(engine.status().nativeBoundary.advances, 0, 'and nothing has been advanced by it');
   await stopAll([engine]);
 });
 
-test('a track the native player started by itself is adopted — nothing is loaded, nothing is replayed', async () => {
+test('a track the native player started by itself is adopted by index — nothing is loaded, nothing is replayed', async () => {
   const record = blank();
   const { engine, queue } = pair(record);
   await engine.handleVisibility(true);
@@ -237,29 +263,60 @@ test('a track the native player started by itself is adopted — nothing is load
   const playsBefore = record.plays.length;
 
   /*
-   * The native player took the boundary: it played the slot holding song-2 while the web view was
-   * frozen, and this is the message the app receives when it wakes (or immediately, if it was still
-   * alive to receive it).
+   * The native player took the boundary: it played the entry holding song-3 while the web view was
+   * frozen, and this is the message the app receives when it wakes — with the index it moved to.
    */
-  record.events?.onAdvanced?.('song-2');
+  record.events?.onAdvanced?.('song-3', 2);
   await settle();
 
-  assert.equal(queue.currentSong?.id, 'song-2', 'the queue moves onto the track that is sounding');
-  assert.equal(queue.position, 1, 'and its cursor moves with it, in the order the listener left');
+  assert.equal(queue.currentSong?.id, 'song-3', 'the queue moves onto the track that is sounding');
+  assert.equal(queue.position, 2, 'and its cursor moves to the index the native side reported');
   assert.equal(record.loads.length, loadsBefore, 'nothing was loaded: the track is already on the player and already playing');
   assert.equal(record.plays.length, playsBefore, 'and nothing was played again — adopting a boundary is not starting a track');
   assert.equal(engine.status().state, 'playing', 'the machine agrees that sound exists');
-  assert.equal(engine.currentTrack?.id, 'song-2', 'the engine is following the track that replaced the one it had');
+  assert.equal(engine.currentTrack?.id, 'song-3', 'the engine is following the track that replaced the one it had');
 
   /*
    * And the same message arriving twice — which it does, because the app learns about an advance both
    * from the event and from asking the player on the way back — changes nothing but the look-ahead.
    */
-  record.events?.onAdvanced?.('song-2');
+  record.events?.onAdvanced?.('song-3', 2);
   await settle();
-  assert.equal(queue.currentSong?.id, 'song-2', 'a second report of the same advance is idempotent');
+  assert.equal(queue.currentSong?.id, 'song-3', 'a second report of the same advance is idempotent');
   assert.equal(record.loads.length, loadsBefore, 'and still loads nothing');
-  assert.equal(queue.position, 1, 'the cursor does not run on');
+  assert.equal(queue.position, 2, 'the cursor does not run on');
+  await stopAll([engine]);
+});
+
+test('an index that names a different track is not adopted blindly — the track id still decides', async () => {
+  const record = blank();
+  const { engine, queue } = pair(record);
+  /*
+   * A queue whose play order is **not** its list order: `order` is [2, 0, 1], so position 0 is
+   * song-3, position 1 is song-1, position 2 is song-2. This is the shape shuffle produces, and it
+   * is what the by-id adoption could not describe: the native side's index and the track's place in
+   * the list are two different numbers.
+   */
+  queue.restoreExact(
+    { songs: [song('song-1'), song('song-2'), song('song-3')], order: [2, 0, 1], cursor: 0, shuffle: true, repeat: 'off', context: CONTEXT },
+    0,
+  );
+  void queue.start();
+  await settle();
+
+  // The native side says it is on song-1 at index 2 — where its list holds song-2. A wrong index is
+  // not a track: the id is what decides, and the cursor lands where song-1 really is.
+  record.events?.onAdvanced?.('song-1', 2);
+  await settle();
+  assert.equal(queue.currentSong?.id, 'song-1', 'the track the native side named is the one adopted');
+  assert.equal(queue.position, 1, 'and its position in the published order, not the index it came with');
+  assert.equal(queue.songPosition, 0, 'which is the first entry of the list — the order is not the list');
+
+  // The honest index, from the same list: adopted as given.
+  record.events?.onAdvanced?.('song-2', 2);
+  await settle();
+  assert.equal(queue.currentSong?.id, 'song-2', 'a correct index is adopted as it is');
+  assert.equal(queue.position, 2, 'at the position it names in the published order');
   await stopAll([engine]);
 });
 
@@ -270,7 +327,7 @@ test('a boundary the native side refuses comes back to the app, and the track st
 
   void queue.play(queueOf('song-1', 'song-2', 'song-3'), 0, CONTEXT);
   await settle();
-  assert.equal(record.stated[record.stated.length - 1]?.awake, false, 'the app is away and the native side holds the boundary');
+  assert.equal(lastStated(record).awake, false, 'the app is away and the native side holds the boundary');
 
   /*
    * Its own completion is not the app's to act on while it is away: the native player is the only
@@ -292,7 +349,7 @@ test('a boundary the native side refuses comes back to the app, and the track st
   await stopAll([engine]);
 });
 
-test('a warm slot that holds no media is not warm, and the app is told so instead of pretending', async () => {
+test('a warm slot that holds no media is not warm, and the entry is published without a slot', async () => {
   const record = blank();
   record.warmHoldsBytes = false;
   const { engine, queue } = pair(record);
@@ -303,8 +360,12 @@ test('a warm slot that holds no media is not warm, and the app is told so instea
 
   assert.ok(record.warmed.length > 0, 'the app asked the player for the media a warm slot needs');
   assert.deepEqual(engine.status().warmedIds, [], 'a slot that answered "no media" is not claimed as warm by the engine');
-  assert.deepEqual(record.stated[record.stated.length - 1]?.next, [], 'and the native boundary is not armed with a slot that cannot start');
-  assert.equal(engine.status().nativeBoundary.armed, 0, 'so nothing is armed, and the app says so rather than promising an instant boundary');
+  assert.deepEqual(
+    lastStated(record).slots,
+    [null, null, null],
+    'so no entry is published with a slot — the native side fetches each one itself rather than being handed an asset that cannot start',
+  );
+  assert.equal(engine.status().nativeBoundary.armed, 3, 'and the queue is still the boundary: totality is the list, not the warmth');
   await stopAll([engine]);
 });
 
@@ -372,7 +433,7 @@ test('a start that failed is retried in place by the queue — no second cold lo
     warmedUrl: () => null,
     pruneWarmed: () => undefined,
     prepareNext: async () => true,
-    setNeighbours: () => undefined,
+    setQueue: () => undefined,
     discardPrepared: async () => undefined,
     adoptNativeAdvance: () => undefined,
     status: () => ({ state: 'idle' as const, positionMs: 0 }),
@@ -394,4 +455,61 @@ test('a start that failed is retried in place by the queue — no second cold lo
   assert.deepEqual(plays, [urlOf('song-1')], 'the track was asked for once, as the original file, and never reloaded at another URL');
   assert.deepEqual(retries, ['retry'], 'and the failure was answered by asking the player that holds it, once');
   assert.equal(queue.didNotStart, false, 'a retry that produced sound is not a failure on screen');
+});
+
+/* ------------------------------------------------------------------ the two lanes (v1.9.9) */
+
+test('a start does not wait for a warm job, however long that warm job takes', async () => {
+  /*
+   * The owner's mandatory rule: *"the audible path never shares a lane with warm work — a tap must
+   * not wait on a background preroll or a warm write, ever."* v1.9.8 put both on one lane, and a
+   * warm is network-bound (`prepare` waits for real bytes), so a tap could sit behind a whole fetch.
+   *
+   * Here the warm job is a 400 ms fetch and the start is a 20 ms job issued *while it is running*:
+   * the start finishes first, by a wide margin.
+   */
+  const lanes = createAssetLanes(5);
+  const order: string[] = [];
+  const warm = lanes.warm(async () => {
+    order.push('warm-started');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    order.push('warm-finished');
+  });
+  await tick();
+  const startedAt = Date.now();
+  await lanes.audible(async () => {
+    order.push('start-began');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    order.push('start-finished');
+  });
+  const elapsed = Date.now() - startedAt;
+
+  assert.deepEqual(order, ['warm-started', 'start-began', 'start-finished'], 'the start ran while the warm was still fetching, not after it');
+  assert.ok(elapsed < 200, `the start did not wait for the warm job (it took ${elapsed} ms of a 400 ms warm)`);
+  await warm;
+});
+
+test('warm work yields while a start is in flight, and issues nothing when it cannot', async () => {
+  /*
+   * The two lanes are separate, but the bytes share one pipe: a fetch that runs while the listener
+   * waits for the first seconds of a track he tapped is competing with the stream he is waiting for.
+   * So a warm job asks first, and gives up (rather than running late) if the lane never goes quiet.
+   */
+  const lanes = createAssetLanes(5);
+  let audibleDone = false;
+  const start = lanes.audible(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    audibleDone = true;
+  });
+  await tick();
+  assert.equal(lanes.busy, true, 'a start in flight is a lane that is busy');
+
+  // A short yield budget: the start is still in flight, so the warm is told to issue nothing.
+  const polite = await lanes.warm(() => lanes.yieldToAudible(30));
+  assert.equal(polite, false, 'a warm that cannot get clear of the audible lane issues nothing at all');
+
+  await start;
+  assert.equal(audibleDone, true, 'and the start was never held up by it');
+  assert.equal(lanes.busy, false, 'once the start is over the lane is quiet again');
+  assert.equal(await lanes.warm(() => lanes.yieldToAudible(30)), true, 'so the next warm job is free to run');
 });
