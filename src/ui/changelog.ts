@@ -276,4 +276,15 @@ export const CHANGELOG: ChangelogRelease[] = [
         'If the bars cannot re-attach to the song that is playing, the chip stops saying "spectrum…" and says the bars are on the album-art theme, which is what was actually happening.',
       ],
     },
+    {
+      version: '1.9.8',
+      date: '2026-10-13',
+      items: [
+        'A song that ends while the app is in your pocket or the screen is locked now goes on to the next one. Until now the phone\'s player had no idea what came next - it was waiting to be told by the app, and the app was not running - so the music simply stopped at the end of the song. The phone\'s player is given the next song now, and it plays it itself.',
+        'The song after the one playing is really already there. The app used to report a song as "ready" the moment it had made a player for it, before a single byte had arrived - which is why waiting for the next song to start still meant waiting for it. It now waits until the song\'s own audio has actually arrived, and says so honestly when it has not.',
+        'The first song you tap is played as the file sits on your server, exactly as v1.7 did. The app had started asking the server for a smaller copy of every song before the first note, and on your setup that means the server re-encodes the song before it sends a byte - which is why the first tap had got slower. Nothing is re-encoded for a song you are waiting to hear any more.',
+        'A song that fails to start is asked for again on the song that is already there, instead of being thrown away and downloaded a second time - so a hiccup can no longer turn into another long wait, or into the same song starting over.',
+        'The line under the bar now also says what the phone\'s player did on its own while the app was away: how many songs it was holding ready to play, how many it moved on to by itself, and where it could not.',
+      ],
+    },
   ];

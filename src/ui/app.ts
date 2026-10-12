@@ -2289,6 +2289,10 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
     `${status.state} · ${status.backend} · spectrum ${status.spectrum ? 'live' : 'off'} · ` +
     `${status.pluginState === null ? 'player: nothing reported yet' : `player: ${status.pluginState}`} · ` +
     `adopt: ${status.adoptOutcome} · warm: ${status.warmedIds.length} · ` +
+    // v1.9.8 — the native player's own boundary: how many slots it will play by itself while the
+    // app is away, how many tracks it has taken, and the sentence naming which state it is in.
+    `native: ${status.nativeBoundary.armed} armed, ${status.nativeBoundary.advances} taken, ` +
+    `${status.nativeBoundary.failures} refused, ${status.nativeBoundary.ignored} ignored · ` +
     `dropped: ${status.droppedEvents.inaudible} inaudible, ${status.droppedEvents.slotGrace} in a slot write · ${status.modeReason}`;
   const abnormal = status.state !== 'playing' || !status.spectrum;
   /*

@@ -171,6 +171,17 @@ export class PlaybackQueue {
     // The lock screen's next/previous (v1.7): the platform delivers them, the queue acts on them.
     engine.onNextRequested = () => void this.next();
     engine.onPreviousRequested = () => void this.previous();
+    /*
+     * And the boundary the **native player took by itself** (v1.9.8).
+     *
+     * While the app is off screen the web layer is not running, so the track that ended has no
+     * owner for "next" here at all: the native side plays the slot the app armed for it, and this
+     * is how the queue hears about it — on the way back, or immediately if the web layer was
+     * still alive to receive the message. It is an *adoption*, not an advance: the audio is
+     * already playing, so the queue moves its cursor onto the track that is sounding and never
+     * asks the engine to start anything.
+     */
+    engine.onAdvancedNatively = (songId) => this.adoptNativeAdvance(songId);
   }
 
   get current(): QueueItem | null {
@@ -258,6 +269,16 @@ export class PlaybackQueue {
      * slots it needs.
      */
     this.engine.pruneWarmed?.(this.neighbourhoodIds());
+    /*
+     * And the native boundary is **un-armed** by a selection (v1.9.8).
+     *
+     * The chain the native side is holding is a bet on the track that was playing still being the
+     * one that ends: it is the track after *that* one. The listener has just moved somewhere else,
+     * so the bet is off, and until the new track has sound and the neighbourhood is warm again
+     * there is nothing the native side may play. It is re-armed by `warmNeighbours` below, once
+     * this start has actually produced a track to follow.
+     */
+    this.engine.setNeighbours?.([], null);
     this.startFailed = false;
     this.onChanged?.();
   }
@@ -279,9 +300,13 @@ export class PlaybackQueue {
   }
 
   /**
-   * The bitrate the next stream will ask for: `null` = the original file, a number = Navidrome
-   * transcodes to it. The player bar shows the number while a cap is in force, so a cap is never
-   * silent (v1.9.0).
+   * The bitrate the app is asking for on the **next track's background preparation**: `null` = no
+   * cap at all, a number = Navidrome transcodes the warmed stream to it.
+   *
+   * The player bar shows the number while a cap is in force, so a cap is never silent (v1.9.0).
+   * Since v1.9.8 it is a cap on what is *prepared*, never on what is being tapped: the track the
+   * listener is waiting for is always the original file (`trackRequest`), which is the owner's own
+   * rule about transcoding.
    */
   get streamKbps(): number | null {
     return this.rate.maxBitRate;
@@ -437,6 +462,8 @@ export class PlaybackQueue {
     this.pendingStartMs = 0;
     this.loading = false;
     this.startFailed = false;
+    // Nothing is playing, so there is nothing for the native side to advance to (v1.9.8).
+    this.engine.setNeighbours?.([], null);
     this.cancelPrepared();
     clearSnapshot();
     await this.engine.stop();
@@ -535,14 +562,22 @@ export class PlaybackQueue {
      * out), so this await is the whole of the wait the listener is in, and `startDidFail` is the
      * engine's honest answer to "did that work".
      *
-     * A start that failed is retried **once**, one rung down the bitrate ladder: the same URL asking
-     * the same question of a link that could not answer it is the same answer, and the smaller
-     * stream is the one thing this app can actually change about his side of a relayed link. If the
-     * retry fails too, the failure stands on screen (`didNotStart`) and one tap tries again.
+     * v1.9.8 — **the retry is in place, and it never unloads anything that may be sounding.**
      *
-     * The time it took is the measurement the ladder is built on (v1.9.2) — and it is only measured
-     * for a start that fetched: an adopted track was buffered while the previous one played, so its
-     * "latency" says nothing about the link.
+     * This used to answer a start that produced no sound with a *second full cold load of the same
+     * track* at a new URL: `unload` + `preload` on the audible slot, which takes the item that may
+     * already be playing away and puts a fresh fetch where it was. Worst case that is thirty more
+     * seconds of nothing, or the same song restarting — and it is now impossible by construction,
+     * because the app no longer has a reason to ask for a *different* stream: the track was asked
+     * for as the original file, and the only thing the retry changes is that the player is asked
+     * again. So the retry is `retryPlayInPlace`: the item the load left there is told to play once
+     * more, and the failure stands on screen if that does not produce sound either.
+     *
+     * The time it took is the measurement the ladder is built on (v1.9.2) — and since v1.9.8 it is
+     * taken from **audio-start**: only a start the player itself concluded (`lastStartOutcome` of
+     * `player`) is a number about this link. A start that was adopted out of the warm pool is not
+     * measured at all (it fetched nothing), and neither is one that ended in a timeout or in the
+     * app going off screen.
      */
     const startedAt = Date.now();
     /*
@@ -561,13 +596,21 @@ export class PlaybackQueue {
     try {
       await this.engine.play(request, startMs);
       failed = this.engine.startDidFail?.() === true;
-      if (!failed && warmedUrl === null) this.rate.noteStart(Date.now() - startedAt);
+      const concludedByThePlayer = (this.engine.lastStartOutcome?.() ?? 'player') === 'player';
+      if (!failed && warmedUrl === null && concludedByThePlayer) this.rate.noteStart(Date.now() - startedAt);
       if (failed && token === this.playToken) {
+        /*
+         * One rung down, and **the same item tried again** (v1.9.8). The rung only decides what is
+         * warmed next — see `warmNeighbours` — and the retry asks the player that already holds
+         * this track for sound rather than fetching it a second time.
+         */
         this.rate.demote();
-        const retry = this.trackRequest(song, null, artworkUrl);
         this.onChanged?.();
-        await this.engine.play(retry, startMs);
-        failed = this.engine.startDidFail?.() === true;
+        const retry = this.engine.retryPlayInPlace;
+        if (retry) {
+          const heard = await retry.call(this.engine, startMs);
+          failed = !heard;
+        }
       }
     } catch (error) {
       // The same silence the engine reports by itself, except that here it arrived as a rejection.
@@ -616,13 +659,20 @@ export class PlaybackQueue {
   /**
    * A play/ warm request for one song at one exact URL.
    *
-   * `url` is the warm pool's own URL when the track was already got ready, and otherwise the URL the
-   * link's own measurement earns (`rate.maxBitRate`: `null` = the original file).
+   * `url` is the warm pool's own URL when the track was already got ready, and otherwise the
+   * **original file** — with no `maxBitRate` at all (v1.9.8).
+   *
+   * That absence is the owner's rule, and it is the whole of the first-tap regression: v1.7 asked
+   * for `streamUrl(song.id)` and nothing else, v1.9.0 started asking for `maxBitRate=128` on every
+   * URL, and a request for `maxBitRate` is a request for Navidrome to spawn a transcode *before the
+   * first byte*. A track the listener is waiting to hear is now never asked for at a lower rate.
+   * The ladder has not gone away — it decides what is warmed for the *next* track, off this path
+   * entirely (`warmNeighbours`).
    */
   private trackRequest(song: Song, url: string | null, artworkUrl: string | null): TrackRequest {
     return {
       id: song.id,
-      url: url ?? this.library.streamUrl(song, this.rate.maxBitRate),
+      url: url ?? this.library.streamUrl(song),
       crossOrigin: this.library.crossOrigin,
       title: song.title,
       artist: song.artist ?? 'Unknown artist',
@@ -663,6 +713,15 @@ export class PlaybackQueue {
     const started = this.currentSong;
     if (!started) return;
     this.engine.pruneWarmed?.(this.neighbourhoodIds());
+    /*
+     * **And the native player is told what to play if this track ends while the app is away
+     * (v1.9.8).** In the order they would be played, and only the ones that are actually on the
+     * player — the engine filters against its own warm pool, so a track this app has not got ready
+     * is never named to the native side. The chain is what makes a track that ends *while the app
+     * is backgrounded* advance at all: off screen there is no web layer to hear a completion, and
+     * this is the only thing that knows what follows.
+     */
+    this.engine.setNeighbours?.(this.forwardIds(), this.previousId());
     const run = (this.warmRun += 1);
     void (async () => {
       for (const song of this.neighbourSongs()) {
@@ -712,6 +771,75 @@ export class PlaybackQueue {
   private neighbourhoodIds(): string[] {
     const current = this.currentSong;
     return [...(current ? [current.id] : []), ...this.neighbourSongs().map((song) => song.id)];
+  }
+
+  /**
+   * The tracks **ahead** of the current one, in the order they would be played (v1.9.8).
+   *
+   * The native side's chain, and nothing else: this is what a track that ends while the app is
+   * backgrounded advances to, first entry first. Two at most — the pool holds the next two, and a
+   * boundary the app is not awake for cannot be re-filled from here.
+   */
+  private forwardIds(): string[] {
+    const out: string[] = [];
+    for (const step of WARM_STEPS) {
+      if (step <= 0) continue;
+      const song = this.songAt(step);
+      if (song && !out.includes(song.id)) out.push(song.id);
+    }
+    return out;
+  }
+
+  /** The track **behind** the current one, or `null` — the chain's other direction (v1.9.8). */
+  private previousId(): string | null {
+    return this.songAt(-1)?.id ?? null;
+  }
+
+  /**
+   * The native player took the boundary by itself, and this is the queue catching up (v1.9.8).
+   *
+   * Three things make this a different kind of method from `advance`:
+   *
+   *   - **it is an adoption, not a start.** The track is already playing — the native side played
+   *     the slot the app had armed for it — so nothing here asks the engine to load, adopt or play
+   *     anything. The cursor moves to the track that is *sounding*, and the engine is told which
+   *     request it is now the audible one.
+   *   - **it is idempotent on the track.** The same message can arrive two ways (a message that
+   *     was waiting for the web view, and the foreground reconciliation that reads the player's own
+   *     record), and it can arrive after the ordinary JS advance has already moved there. In both
+   *     cases the answer is the same: the cursor is already on it, so there is nothing to move —
+   *     only the look-ahead to re-arm.
+   *   - **a track this queue does not hold is ignored**, not guessed at: a chain armed before the
+   *     queue was replaced can name a song that is not in this list any more, and moving the cursor
+   *     to it would be inventing one.
+   */
+  async adoptNativeAdvance(songId: string): Promise<void> {
+    const index = this.items.findIndex((item) => item.song.id === songId);
+    const at = index === -1 ? -1 : this.order.indexOf(index);
+    if (at === -1) return;
+    if (this.currentSong?.id === songId) {
+      this.loading = false;
+      this.warmNeighbours();
+      return;
+    }
+    this.cursor = at;
+    this.pendingStartMs = 0;
+    this.loading = false;
+    this.startFailed = false;
+    this.playedMs = 0;
+    this.submitted = false;
+    this.inFlightSongId = null;
+    this.playToken += 1;
+    const song = this.items[index]!.song;
+    const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
+    this.onChanged?.();
+    await this.engine.adoptNativeAdvance?.(this.trackRequest(song, this.engine.warmedUrl?.(song.id) ?? null, artworkUrl));
+    this.reportNowPlaying(song);
+    this.setupMediaSession(song, artworkUrl);
+    this.scheduleSaveQueue();
+    this.persistSnapshot(true);
+    this.onChanged?.();
+    this.warmNeighbours();
   }
 
   /** A play/ warm request for one song at one exact URL. */

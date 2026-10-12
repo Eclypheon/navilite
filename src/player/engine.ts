@@ -177,6 +177,17 @@ export interface EngineStatus {
    * and three rounds of diagnosis were made without that fact ever being visible.
    */
   warmedIds: string[];
+  /**
+   * The native player's own boundary, as the bridge reports it (v1.9.8).
+   *
+   * `armed` is how many slots the native side is ready to play **by itself** — zero whenever the
+   * app is on screen (the web layer owns the boundary then, see `armBoundary`), whenever nothing is
+   * warm ahead, and whenever the platform has no such plugin. `advances` counts the tracks it
+   * actually took, `failures` the ones it could not, and `ignored` the item-ends that were not
+   * about the slot the app told it was playing. `reason` names, in one sentence, which of those
+   * states it is in — the clearing path for every one of them.
+   */
+  nativeBoundary: { armed: number; advances: number; failures: number; ignored: number; reason: string };
 }
 
 /**
@@ -407,6 +418,18 @@ const FROZEN_FRAMES_BEFORE_THEME = 10;
 const METER_INTERVAL_MS = 100;
 
 /**
+ * The bitrate a stream URL asks Navidrome for, as a word (v1.9.8).
+ *
+ * Used in one sentence only — the boundary's account of a warm asset that is not the stream the
+ * play request asks for — and it exists because "a different stream" was not enough to tell a rung
+ * move from a re-created client, which is what the sentence has to distinguish.
+ */
+function askedRate(url: string): string {
+  const match = /[?&]maxBitRate=(\d+)/.exec(url);
+  return match ? `${match[1]} kbps` : 'the original file';
+}
+
+/**
  * A cheap fingerprint of one frame of bands.
  *
  * Zero only for a frame that is entirely silent, which is the case the "is it frozen?" question must
@@ -567,6 +590,28 @@ export class AudioEngine {
    */
   private readonly warmed = new Map<string, string>();
   /**
+   * The tracks around the current one, as the queue knows them (v1.9.8): the ones warm **ahead** in
+   * the order they would be played, and the one behind.
+   *
+   * The engine keeps them only long enough to state them to the native side (`syncBoundary`), which
+   * is what decides what a track that ends with the app away advances to. Cleared by an empty
+   * statement from the queue — a selection, a cleared queue, a stopped engine — and by nothing
+   * else: what is stated is filtered against `warmed` at every statement, so a stale id is never
+   * named to the native side.
+   */
+  private neighbours: { next: readonly string[]; previous: string | null } = { next: [], previous: null };
+  /**
+   * Whether the **native side** is holding a boundary it will take by itself, i.e. whether the app
+   * may stop worrying about the end of this track (v1.9.8).
+   *
+   * True only while the app is off screen *and* the bridge has been given at least one warm slot
+   * ahead: with the app on screen the web layer owns the boundary exactly as it always has, and
+   * with nothing warm ahead there is nothing for the native side to play. Every write is a fresh
+   * statement (`syncBoundary`), so a lost message cannot leave it stuck on — and it is read in one
+   * place, `boundaryOwnedByNative`.
+   */
+  private boundaryArmed = false;
+  /**
    * The start in flight, and how it ends (v1.9.2). See {@link START_DEADLINE_MS}.
    *
    * While this is set, `play()` has not resolved: the caller is waiting for the player to say that
@@ -587,6 +632,18 @@ export class AudioEngine {
    * down by the queue, and if that fails too the screen says so and waits for a tap.
    */
   private startFailed = false;
+  /**
+   * How the last start ended, and the only thing the ladder is allowed to be fed (v1.9.8).
+   *
+   * `player` is the one ending that is a measurement: the player itself reported sound for this
+   * track, so the time from the request to that report is a number about this link. `background` is
+   * the app leaving the screen mid-load, `timeout` is a start that produced nothing, and
+   * `superseded` is a start the listener replaced — none of those say anything about the link, and
+   * charging them to it is how the previous release's own work (the transcode spawn and the stalled
+   * start) came to be measured as the link's fault. Cleared by the next start, which is the only
+   * thing that writes it.
+   */
+  private startOutcome: 'player' | 'background' | 'timeout' | 'superseded' | null = null;
   /**
    * The offset **this start** was asked for — what tells this track's reports from the outgoing
    * item's.
@@ -674,6 +731,13 @@ export class AudioEngine {
   /** Lock-screen next / previous, when the platform delivers them. */
   onNextRequested: (() => void) | null = null;
   onPreviousRequested: (() => void) | null = null;
+  /**
+   * The native player took a track boundary **by itself** (v1.9.8), and this is the track it moved
+   * to. The queue owns what "next" means, so it owns this too: it is an *adoption* — the audio is
+   * already playing — and the handler is awaited where the answer matters (the return to the
+   * foreground reads the player's record and hands it over before anything else is read).
+   */
+  onAdvancedNatively: ((songId: string) => void | Promise<void>) | null = null;
 
   constructor(options: EngineOptions = {}) {
     const info = options.platform ?? platformInfo();
@@ -890,6 +954,11 @@ export class AudioEngine {
       if (this.state === 'loading') this.dispatch({ type: 'engine-state', playing: true });
       this.startFailed = false;
     }
+    /*
+     * How it ended, kept for the queue (v1.9.8). `play()` clears it as each start begins, so what
+     * is read once a start has returned is that start's own ending and nothing older.
+     */
+    this.startOutcome = source;
     const wait = this.startWait;
     if (!wait) return;
     this.startWait = null;
@@ -921,6 +990,16 @@ export class AudioEngine {
    */
   startDidFail(): boolean {
     return this.startFailed;
+  }
+
+  /**
+   * How the last start ended (v1.9.8) — see {@link startOutcome}.
+   *
+   * The queue reads this the moment `play()` returns, and feeds the bitrate ladder from it: only a
+   * start the player itself concluded is a measurement of this link.
+   */
+  lastStartOutcome(): 'player' | 'background' | 'timeout' | 'superseded' | null {
+    return this.startOutcome;
   }
 
   private startClockTick(): void {
@@ -1040,6 +1119,18 @@ export class AudioEngine {
       adoptOutcome: this.adoptOutcome,
       droppedEvents: this.native?.droppedEvents?.() ?? { inaudible: 0, slotGrace: 0 },
       warmedIds: [...this.warmed.keys()],
+      /*
+       * The native side's own boundary (v1.9.8). Read straight from the bridge, which is the only
+       * thing that knows which slots it was given and what it did with them; a build with no such
+       * bridge reports the zero state and the sentence that says why.
+       */
+      nativeBoundary: this.native?.nativeAdvance?.() ?? {
+        armed: 0,
+        advances: 0,
+        failures: 0,
+        ignored: 0,
+        reason: 'this build has no native boundary to report',
+      },
       positionMs: Number.isFinite(positionMs) ? positionMs : 0,
       durationMs: Number.isFinite(durationMs) ? durationMs : 0,
       error: this.error,
@@ -1223,6 +1314,15 @@ export class AudioEngine {
            * the end of the item, and this report is the only one that will ever come.
            */
           if (!isPlaying && this.reportIsAtEnd(facts)) {
+            /*
+             * **Unless the native player owns this boundary (v1.9.8).** With the app away and a
+             * warm slot armed, the native side has already played the next track by the time a
+             * report like this can arrive — a report that got out before the web view froze, or one
+             * delivered on the way back. Moving the queue on it would skip a track. `boundaryOwnedByNative`
+             * says which of the two owns this end, and it is false in every case where the app is
+             * on screen.
+             */
+            if (this.boundaryOwnedByNative()) return;
             this.nativePositionMs = this.durationMs();
             this.reportEnded(
               `the player reported itself not playing (${state}${facts?.reason ? `, ${facts.reason}` : ''}) with its own position at the end of the item`,
@@ -1241,6 +1341,18 @@ export class AudioEngine {
           this.dispatch({ type: 'interruption' });
           if (state === 'stopped') this.nativePositionMs = Math.min(this.nativePositionMs, this.durationMs());
         },
+        onBoundaryRefused: () => {
+          if (this.backend !== 'native') return;
+          /*
+           * **The one door the native boundary may not close (v1.9.8).** While the app is away its own
+           * end-of-track doors are held shut (`boundaryOwnedByNative`) because the native player is
+           * the only thing that can hear the end there — so if the native side then says it could not
+           * take the boundary, this is what reopens them. The end is reported exactly as it would
+           * have been reported without any of this, which is what keeps a refused boundary from
+           * becoming a track that never moves on.
+           */
+          this.reportEnded('the native player said it could not take the boundary it was armed for');
+        },
         onComplete: () => {
           if (this.backend !== 'native') return;
           /*
@@ -1253,7 +1365,22 @@ export class AudioEngine {
            * asset's own.)
            */
           if (this.inTransition()) return;
+          // The native player owns this boundary while the app is away (v1.9.8) — see
+          // `boundaryOwnedByNative`.
+          if (this.boundaryOwnedByNative()) return;
           this.reportEnded('the player reported the item complete');
+        },
+        /*
+         * **The native player took a boundary by itself (v1.9.8).**
+         *
+         * The queue owns what "next" means, so the message is passed straight to it: it moves its
+         * cursor onto the track that is sounding and re-arms the look-ahead around it. Nothing here
+         * touches the machine — the track that was playing is over and the one that replaced it is
+         * already audible, and `adoptNativeAdvance` is the single account of that.
+         */
+        onAdvanced: (songId) => {
+          if (this.backend !== 'native' || !songId) return;
+          void this.onAdvancedNatively?.(songId);
         },
       });
       /*
@@ -1308,6 +1435,8 @@ export class AudioEngine {
      */
     this.concludeStart('superseded');
     this.startFailed = false;
+    // Each start owns its own ending (v1.9.8) — see `startOutcome`.
+    this.startOutcome = null;
     this.generation += 1;
     this.track = track;
     this.error = null;
@@ -1380,6 +1509,8 @@ export class AudioEngine {
       return false;
     }
     this.trimWarmed();
+    // A new warm slot is a new candidate for the native boundary (v1.9.8).
+    void this.syncBoundary();
     return true;
   }
 
@@ -1409,6 +1540,8 @@ export class AudioEngine {
    */
   pruneWarmed(keep: readonly string[]): void {
     for (const songId of [...this.warmed.keys()]) if (!keep.includes(songId)) this.warmed.delete(songId);
+    // What is no longer warm cannot be what the native side plays next (v1.9.8).
+    void this.syncBoundary();
   }
 
   /**
@@ -1429,9 +1562,155 @@ export class AudioEngine {
    */
   async discardPrepared(): Promise<void> {
     this.warmed.clear();
+    // Nothing is warm, so nothing is armed: the native side is told so it can stop holding a next.
+    void this.syncBoundary();
     const bridge = this.native;
     if (this.backend !== 'native' || !bridge?.discard) return;
     await bridge.discard();
+  }
+
+  /* ------------------------------------------------- the native boundary (v1.9.8) */
+
+  /**
+   * The queue's statement of what surrounds the track that is playing — the tracks it is warming
+   * ahead of it, in the order they would be played, and the one behind.
+   *
+   * The queue is the only thing that knows this (the play order, the shuffle, the repeat mode), and
+   * the engine is the only thing that knows what is actually *warm*; what is stated to the native
+   * side is the intersection of the two (`syncBoundary`). Cheap and idempotent: it may be called
+   * from anywhere, as often as anyone likes.
+   */
+  setNeighbours(next: readonly string[], previous: string | null): void {
+    this.neighbours = { next: [...next], previous };
+    void this.syncBoundary();
+  }
+
+  /**
+   * State the boundary to the native side: **what it will play if this track ends while the app is
+   * away**, and whether it is allowed to.
+   *
+   * This is the structural half of v1.9.8. Off screen there is no web layer at all — the plugin's
+   * completion is delivered to a suspended view, `watchForPinnedEnd` is driven by a clock tick that
+   * has been stopped, and every path that could move the queue is in the frozen process — so the
+   * native side is given its own next here, and plays it itself from its own observation of the
+   * audible item's end. `awake` is what keeps the two owners from both advancing a track: while the
+   * app is on screen this states the same picture and the native side does not act on it.
+   *
+   * The answer is the count of slots the bridge actually armed, and `null` from the bridge (no such
+   * plugin, a call that did not answer) is "the web layer keeps the boundary" — never a silent
+   * assumption that something else is looking after it.
+   */
+  private async syncBoundary(): Promise<void> {
+    const bridge = this.native;
+    if (this.backend !== 'native' || !bridge?.armBoundary) {
+      this.boundaryArmed = false;
+      return;
+    }
+    const next = this.neighbours.next.filter((songId) => this.warmed.has(songId));
+    const previous = this.neighbours.previous !== null && this.warmed.has(this.neighbours.previous) ? this.neighbours.previous : null;
+    const armed = await bridge.armBoundary({ next, previous, awake: this.foreground });
+    this.boundaryArmed = armed && next.length > 0;
+  }
+
+  /**
+   * Whether the end of this track belongs to the native player (v1.9.8).
+   *
+   * Read in exactly two places, both of which are doors onto the end of a track, and both of which
+   * must stay shut while the native side is holding a slot to advance to: with the app away the
+   * native player is the only thing that can hear the end, and the app's own doors — which are
+   * driven by a clock tick and by plugin messages that have been stopped and suspended — would
+   * either never fire or fire at the wrong moment. When it *does* fire (a `complete` that arrived
+   * before the web view froze, say) the native side is already on the next track, and advancing
+   * again would skip one.
+   */
+  private boundaryOwnedByNative(): boolean {
+    if (this.backend !== 'native' || this.foreground || !this.boundaryArmed) return false;
+    return [...this.warmed.keys()].some((songId) => this.neighbours.next.includes(songId));
+  }
+
+  /**
+   * The item the load left in place is asked for sound **again**, without touching any slot
+   * (v1.9.8).
+   *
+   * This is the whole of "a start that failed must not become a second cold load of the same track
+   * at a new URL" — see `PlaybackQueue.startCurrent`. Nothing is unloaded, nothing is preloaded and
+   * no URL changes: the player that already holds this track is asked to play it once more, and the
+   * answer is whether it produced sound (the same evidence every other start is judged on).
+   */
+  async retryPlayInPlace(startMs = 0): Promise<boolean> {
+    const bridge = this.native;
+    const track = this.track;
+    if (this.backend !== 'native' || !bridge || !track) return false;
+    this.generation += 1;
+    this.startFailed = false;
+    this.startOutcome = null;
+    /*
+     * The item is already the player's: the load has returned, so a report from here on is about
+     * *this* track and not about one being replaced. No bracket is opened for the same reason — the
+     * bracket exists to filter the outgoing item's reports during a load, and there is no load.
+     */
+    this.loadInFlight = null;
+    this.audibleIsOutgoing = null;
+    this.positionReported = false;
+    this.startAnchorMs = Math.max(0, startMs);
+    this.setNativePosition(startMs, false);
+    this.dispatch({ type: 'select', trackId: track.id });
+    try {
+      await bridge.play(startMs / 1000);
+    } catch (cause) {
+      this.fail(cause);
+      this.startFailed = true;
+      return false;
+    }
+    if (this.track !== track) return false;
+    const outcome = await this.awaitStart();
+    if (this.track !== track) return false;
+    if (outcome === 'timeout') {
+      this.startFailed = true;
+      this.modeReason = 'the track did not start in time even when the player was asked for it a second time — the item is still loaded, so one tap tries again';
+      this.dispatch({ type: 'failure', message: 'the track did not start in time' });
+      this.emit();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Adopt a track the **native player started by itself** (v1.9.8) — the audio is already playing.
+   *
+   * Nothing here loads, plays, adopts from the pool or writes to the player: the native side played
+   * the slot the app had armed for it, and all that is left is for the engine's own state to agree
+   * with it. The clock is re-based at the start of the new track (the native play is `time: 0`) and
+   * marked *unreported*, so the display holds at zero until the player's own report arrives rather
+   * than counting up from a position nobody measured.
+   *
+   * The request is the queue's, and its URL is the one the warmed slot holds: the same string the
+   * asset on the player was fetched under, which is what keeps the spectrum's own URL check and the
+   * next adoption consistent.
+   */
+  adoptNativeAdvance(track: TrackRequest): void {
+    if (this.backend !== 'native') return;
+    this.generation += 1;
+    this.track = track;
+    this.error = null;
+    this.startFailed = false;
+    this.startOutcome = 'player';
+    this.loadInFlight = null;
+    this.audibleIsOutgoing = null;
+    this.warmed.delete(track.id);
+    this.nativeDurationMs = 0;
+    this.spectrumLive = false;
+    this.spectrumArming = true;
+    this.spectrumZeroPolls = 0;
+    this.spectrumRechecks = 0;
+    this.positionReported = false;
+    this.setNativePosition(0, false);
+    this.modeReason =
+      'the native player took the track boundary itself while the app was not listening — the audio never stopped, and this is the app catching up with it';
+    this.dispatch({ type: 'engine-state', playing: true });
+    this.concludeStart('player');
+    this.attachSpectrum(track);
+    this.emit();
   }
 
   async toggle(): Promise<void> {
@@ -1610,6 +1889,9 @@ export class AudioEngine {
     this.track = null;
     // Nothing is playing, so nothing is warm for it either (v1.9.1).
     this.warmed.clear();
+    // And there is nothing for the native side to advance to (v1.9.8).
+    this.neighbours = { next: [], previous: null };
+    void this.syncBoundary();
     this.setNativePosition(0);
     this.nativeDurationMs = 0;
     this.dispatch({ type: 'cleared' });
@@ -1655,9 +1937,32 @@ export class AudioEngine {
       // no callback arrives. So the clock stops counting here rather than at an unknown later
       // moment; what it shows is the last position the player was known to be at.
       this.stopClockTick();
+      /*
+       * **And this is the moment the boundary changes hands (v1.9.8).** The web layer is about to
+       * stop running, so the native player is told — with `awake: false` — what it is to play if
+       * this track ends while nobody is looking, and it is henceforth the owner of that end. The
+       * statement is re-made rather than assumed: what it says is filtered against what is actually
+       * warm, and it is the same call in both directions, so there is no flag that could stick.
+       */
+      await this.syncBoundary();
       return;
     }
     this.foreground = true;
+    /*
+     * **The app comes back to a player that may have moved on without it.** Nothing in the web
+     * layer heard the track end, so before anything is read from the player the native side is
+     * asked which slot it is playing now, and its answer is adopted: the queue moves onto that
+     * track (it is already sounding — nothing is started, nothing is re-fetched) and everything
+     * else below reads the player that is actually playing. This is the return half of the native
+     * boundary, and the reason a track that advanced while the app was away is never lost.
+     */
+    const moved = await this.native?.reconcile?.();
+    if (moved?.changed && moved.songId) {
+      this.modeReason = `the native player moved to another track while the app was away (${moved.songId}) — the app is adopting the track that is already playing`;
+      await this.onAdvancedNatively?.(moved.songId);
+    }
+    // And with the web layer running again, the boundary goes back to it (v1.9.8).
+    await this.syncBoundary();
     const stateBefore = this.state;
     await this.native?.activateSession();
     const truth = await this.native?.sync();
@@ -1865,7 +2170,15 @@ export class AudioEngine {
         : warmUrl === null
           ? `nothing warm for this track (holding ${this.warmed.size})`
           : warmUrl !== track.url
-            ? 'not attempted — the warm asset is a different stream than this request'
+            ? /*
+               * **The mismatch, named with its two numbers (v1.9.8).** A warm asset the play request
+               * does not ask for is an asset of different bytes, so it must not be played — but the
+               * reason this deserves a sentence is that it is also *recoverable*: the cold fetch
+               * that follows drops every claim, and the queue re-warms around this track the moment
+               * it has sound. What it must never be is silent, which is what one fixed sentence for
+               * a rung move and for a re-created client made it.
+               */
+              `not attempted — the warm asset is a different stream than this request (warmed as ${askedRate(warmUrl)}, asked for as ${askedRate(track.url)}), so this start fetches cold and the neighbourhood is re-warmed around it`
             : typeof bridge.adopt !== 'function'
               ? 'not attempted — this build has no warm pool'
               : 'attempting';

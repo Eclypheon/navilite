@@ -33,11 +33,22 @@
 export const BITRATE_LADDER = [64, 96, 128, 160, 192, 256, 320] as const;
 
 /**
- * What is asked for before anything has been measured: modest, and not the bottom of the ladder —
- * an unmeasured link is usually a phone on wifi, and 96 kbps would be an audible downgrade for no
- * reason. This is the one value that is a guess, and it is the reason the chip gives the number.
+ * What is asked for before anything has been measured: **nothing at all** (v1.9.8).
+ *
+ * v1.9.0–1.9.7 asked for 128 kbps from the very first request of a session, on the reasoning that
+ * an unmeasured link is usually a phone. That reasoning is what the owner's own rule overrides, and
+ * he is explicit: *"transcoding is slow heavy work if possible avoid it if it leads to delays there
+ * should be no need to transcode the songs unless it's being done while another song is playing so
+ * it doesn't affect the user experience"*.
+ *
+ * A `maxBitRate` is not a preference — it is a request for Navidrome to **spawn a transcode**, and
+ * that transcode sits between his tap and the first note. So the app caps nothing until it has
+ * *measured* this link as slow, and even then the cap is never applied to the track he is waiting
+ * for: it decides only what is prepared **in the background** for the track after it
+ * (`PlaybackQueue.warmNeighbours`). A slow link therefore costs the next boundary a little quality
+ * and never costs the track being tapped its start.
  */
-export const STARTING_KBPS = 128;
+export const STARTING_KBPS: number | null = null;
 
 /** A start that took at least this long is a link that cannot carry the rung it just carried. */
 export const SLOW_START_MS = 6000;
@@ -56,8 +67,15 @@ const ORIGINAL = BITRATE_LADDER.length;
  * write it are a finished start and a start that did not finish.
  */
 export class ByteRate {
-  /** Index into {@link BITRATE_LADDER}; {@link ORIGINAL} means "no cap — the original file". */
-  private rung = BITRATE_LADDER.indexOf(STARTING_KBPS as (typeof BITRATE_LADDER)[number]);
+  /**
+   * Index into {@link BITRATE_LADDER}; {@link ORIGINAL} means "no cap — the original file".
+   *
+   * It starts *past the top of the ladder* (v1.9.8): the app asks for nothing until a start has
+   * been measured slow, which is the owner's rule — a tap must never be made to wait for a
+   * transcode. Every way the rung moves is named: a finished start (`noteStart`), and a start that
+   * produced no sound at all (`demote`).
+   */
+  private rung: number = ORIGINAL;
   /** The last start's time to first audio, in ms — `null` until one has been timed. */
   private startMs: number | null = null;
   private timed = 0;

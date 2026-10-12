@@ -41,7 +41,46 @@ interface NaviliteRemotePlugin {
   detach(): Promise<void>;
   /** Bring the audio session back up after a foreground return (idempotent). */
   activateSession(): Promise<{ active: boolean }>;
-  addListener(eventName: 'next' | 'previous', listenerFunc: () => void): Promise<PluginListenerHandle>;
+  /**
+   * State the boundary the native side is to own (v1.9.8) — **a statement, not an increment**.
+   *
+   * `assetId` is the slot that is playing and `chain` the slots to play after it, in order, each
+   * with the track's own id so the app can be told which track the native player moved to. Sending
+   * the whole picture every time is deliberate: the app re-states it after every start, every warm
+   * and every visibility change, so there is no incremental state on the native side that a lost
+   * message could leave half-applied.
+   *
+   * `awake` is whether the web layer is running (the app is on screen). While it is, the JS side
+   * owns the boundary and the native one must not act — the two would otherwise both advance and
+   * skip a track.
+   */
+  arm(options: {
+    assetId?: string;
+    songId?: string;
+    chain?: Array<{ assetId: string; songId: string }>;
+    previous?: { assetId: string; songId: string } | null;
+    awake?: boolean;
+  }): Promise<{ armed: number; previous: boolean; awake: boolean }>;
+  /** Give the chain back — nothing is to be advanced to any more. */
+  disarm(): Promise<{ armed: number }>;
+  /**
+   * The native side's own account of the boundary: the slot it believes is playing, the track that
+   * slot holds, the chain it is holding, and what it has done — `advances` it took itself,
+   * `failures` where it could not, and `ignored`, the completions that were not about the item it
+   * was told is playing. This is the reconciliation the return to the foreground reads (v1.9.8): a
+   * track that advanced while the app was away is a fact the web layer never heard, and asking is
+   * the only way it learns.
+   */
+  now(): Promise<{
+    assetId?: string;
+    songId?: string;
+    armedSongIds?: string[];
+    advances?: number;
+    failures?: number;
+    ignored?: number;
+    reason?: string;
+  }>;
+  addListener(eventName: 'next' | 'previous' | 'advanced' | 'advanceFailed', listenerFunc: (event: { songId?: string; assetId?: string; reason?: string }) => void): Promise<PluginListenerHandle>;
 }
 
 /**
@@ -64,14 +103,29 @@ interface NaviliteSpectrumPlugin {
   stop(): Promise<{ stopped: boolean }>;
   bands(): Promise<NativeSpectrumFrame>;
   /**
-   * Aim the audible item at a forward buffer of `seconds` (v1.9.2).
+   * Aim the audible item at a forward buffer of `seconds` (v1.9.2) — and start it eagerly (v1.9.8).
    *
    * Ours to reach because our plugin holds the audible `AVPlayer` already (the same reflective
-   * lookup the tap uses); the vendor plugin has no API for it. Optional in the type so a build
-   * whose plugin predates it degrades to "no forward-buffer target", which is what every build
-   * before this one had.
+   * lookup the tap uses); the vendor plugin has no API for it. The same call also tells the item it
+   * must **not** wait for a comfortable buffer before it makes a sound
+   * (`automaticallyWaitsToMinimizeStalling = false`), which is the owner's own wording: start as
+   * soon as the first seconds are there and keep filling behind the playback. Optional in the type
+   * so a build whose plugin predates it degrades to "no forward-buffer target", which is what every
+   * build before this one had.
    */
-  configureBuffer(options: { seconds: number; assetId?: string }): Promise<{ buffered: boolean; seconds?: number }>;
+  configureBuffer(options: { seconds: number; assetId?: string }): Promise<{ buffered: boolean; seconds?: number; eager?: boolean }>;
+  /**
+   * Make a **warm** slot demonstrably able to start (v1.9.8), and report the bytes it holds.
+   *
+   * `preload` resolving only ever meant "an `AVPlayerItem` and an `AVPlayer` were created"; a
+   * player nobody has asked for anything does not necessarily hold a byte, which is why the next
+   * two tracks could be "prepared" and still take a full fetch to start. This aims that slot at a
+   * forward buffer of `seconds` and asks AVFoundation to load the media data needed to start
+   * (`preroll`) — it makes no sound, it is not the audible engine, and it answers with the seconds
+   * of media the slot actually holds. Optional in the type so a build whose plugin predates it
+   * degrades to "warmth cannot be proved here", which is what every build before this one had.
+   */
+  warmSlot?(options: { assetId: string; seconds: number; minSeconds?: number }): Promise<{ buffered: boolean; seconds?: number; reason?: string }>;
 }
 
 /** One frame of the native spectrum, plus what the tap thinks about it. */
@@ -164,6 +218,34 @@ export interface NativeBridge {
    * slot, and safely callable from anywhere.
    */
   invalidatePrepared?(): void;
+  /**
+   * State the boundary the **native player** is to own, and whether it may act on it (v1.9.8).
+   *
+   * `next` is the tracks warm ahead of the one playing, in the order they would be played; the
+   * bridge turns each into the slot holding it — a track that is not warm is not named to the
+   * native side at all. `previous` is the one behind, for the lock screen's back button. `awake`
+   * is whether the web layer is running.
+   *
+   * This is the structural half of the release. Off screen there is no web layer: the plugin's own
+   * completion is delivered to a frozen view, `watchForPinnedEnd` is driven by a clock tick that
+   * has been stopped, and every path that could have moved the queue is in the suspended process.
+   * So the native side is given its own next — and it plays it itself, from its own observation of
+   * the audible item's end. Answers whether the platform took it (there is no native boundary on
+   * Android, and none in a build without our iOS plugin, where the JS side keeps owning it).
+   */
+  armBoundary?(boundary: { next: readonly string[]; previous: string | null; awake: boolean }): Promise<boolean>;
+  /**
+   * Ask the native side which slot it is playing now, and adopt its answer (v1.9.8).
+   *
+   * A track that advanced while the app was away is a fact the web layer never received, and this
+   * is the only way it learns: on the way back, before anything is read from the player, the
+   * bridge compares the native side's own record with the slot it believes is audible and moves
+   * onto it. `changed` true means the app was following the wrong slot, and `songId` is the track
+   * that is actually sounding — never guessed, and never silent.
+   */
+  reconcile?(): Promise<{ changed: boolean; songId: string | null } | null>;
+  /** What the native boundary has done, as numbers and a sentence — for the reason line (v1.9.8). */
+  nativeAdvance?(): { armed: number; advances: number; failures: number; ignored: number; reason: string };
   play(startSeconds: number): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -233,6 +315,26 @@ export interface NativeBridgeEvents {
   onPosition(seconds: number): void;
   onState(state: 'playing' | 'paused' | 'stopped', isPlaying: boolean, facts?: NativePlaybackFacts): void;
   onComplete(): void;
+  /**
+   * The native player **could not** take a boundary it was armed for (v1.9.8) — so the end of that
+   * track is the web layer's again, whoever else thinks it owns it.
+   *
+   * This is the one door onto the end of a track that the native boundary must never close: while
+   * the app is away the app's own end-of-track doors are shut on purpose (`boundaryOwnedByNative`),
+   * and if the native side then reports that it could not advance, nothing else would ever move the
+   * queue. Optional, with `onComplete` as the fallback, so a bridge without it behaves exactly as
+   * it did before.
+   */
+  onBoundaryRefused?(): void;
+  /**
+   * The native player took a track boundary **by itself** (v1.9.8), and this is the track it moved
+   * to. See {@link NativeBridge.armBoundary}: while the app is off screen nothing else can.
+   *
+   * It is an *adoption*: the audio is already playing, so the listener to this must move onto that
+   * track rather than start it. Optional so a bridge without it (an older build, the fake bridges in
+   * the tests) is a bridge that simply never reports one.
+   */
+  onAdvanced?(songId: string): void;
 }
 
 const BACKGROUND_AUDIO_SERVICE = 'BackgroundAudio';
@@ -330,6 +432,23 @@ export { BRIDGE_BUILD_TIMEOUT_MS };
  */
 const BUFFER_AHEAD_SECONDS = 5;
 
+/**
+ * How much media a **warm** slot has to hold before the app will call it warm (v1.9.8).
+ *
+ * The slot is prepared ahead of the track that is playing, and what it is for is starting without a
+ * fetch: a slot with less than this much media ahead of it is a slot that will stall at the
+ * boundary. The proof is asked of the plugin, which reads it from the item's own loaded ranges.
+ */
+const WARM_MIN_SECONDS = 1.5;
+
+/**
+ * How long the whole of `prepare` may take (v1.9.8) — creating the slot *and* proving it holds
+ * media. Longer than the default bridge deadline because a warm now waits for real bytes: the
+ * track is one the listener is not waiting for, so its preparation is allowed to take as long as a
+ * fetch takes, and the answer it gives back has to be about the bytes that arrived.
+ */
+const PREPARE_TIMEOUT_MS = 8000;
+
 export async function createNativeBridge(os: OsName, events: NativeBridgeEvents): Promise<NativeBridge | null> {
   if (os === 'web') return null;
   try {
@@ -397,6 +516,22 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     let preparedEpoch = 0;
     /** What the last `adopt()` did, in the words the reason line shows (v1.9.5). */
     let adoptOutcome = 'not attempted';
+    /** The track the audible slot holds (v1.9.8) — what the native boundary is told is playing. */
+    let audibleSongId: string | null = null;
+    /**
+     * The boundary the native player is to own (v1.9.8), as the app last stated it, and what came of
+     * it. Every entry has one clearing path: `armBoundary` replaces the whole picture, `armBoundary`
+     * with an empty chain clears it, and the engine states an empty one whenever a selection moves
+     * the queue, the warm pool is thrown away, or the app is stopped.
+     */
+    let boundary: { next: readonly string[]; previous: string | null; awake: boolean } = { next: [], previous: null, awake: true };
+    let boundarySlots = 0;
+    let boundaryArmed = false;
+    let boundaryReason = 'nothing stated yet';
+    /** What the native side has done by itself, and where it would not (v1.9.8). */
+    let nativeAdvances = 0;
+    let nativeFailures = 0;
+    let nativeIgnored = 0;
 
     /**
      * Whether an event is about the asset the listener is hearing.
@@ -555,6 +690,92 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       }
     };
 
+    /**
+     * Make one **warm** slot demonstrably able to start, and say whether it is (v1.9.8).
+     *
+     * `preload` resolving only ever meant "an `AVPlayerItem` and an `AVPlayer` exist"; nothing had
+     * been asked of them, so the "next two songs" could be prepared in name only — which is the
+     * owner's *"it should already have prefetched the next song but it still doesn't load and play
+     * instantly"*. This aims the slot at a forward buffer and asks AVFoundation for the media data
+     * needed to start it; the seconds it reports back are what the slot actually holds.
+     *
+     * `null` means **warmth cannot be proved here** — Android has no spectrum plugin, and it is our
+     * plugin that reaches the vendor's players — and the caller then keeps the old behaviour rather
+     * than failing a warm it cannot judge. `false` means the slot was asked and has no bytes: it is
+     * not a warm slot, and the caller gives it back.
+     */
+    const proveWarm = async (slot: string): Promise<boolean | null> => {
+      if (!spectrum?.warmSlot) return null;
+      try {
+        const answer = await spectrum.warmSlot({ assetId: slot, seconds: BUFFER_AHEAD_SECONDS, minSeconds: WARM_MIN_SECONDS });
+        if (answer.buffered === true) return true;
+        const held = Number.isFinite(answer.seconds) ? Number(answer.seconds).toFixed(1) : '0';
+        console.warn(`[navilite] a warm slot holds ${held} s of media (${answer.reason ?? 'no reason given'})`);
+        return false;
+      } catch (error) {
+        // A plugin that does not implement this call at all is not a slot that failed to load.
+        console.warn('[navilite] a warm slot could not be asked whether it can start', error);
+        return null;
+      }
+    };
+
+    /**
+     * State the whole boundary to the native side, and take its answer (v1.9.8).
+     *
+     * The chain is built from the warm pool here rather than by the caller, because the caller
+     * (the engine) tracks tracks by id and the native side needs *slots* — and the only thing that
+     * knows which slot holds which track is this file. A track that is not warm is not named: the
+     * native side must never be handed a slot that holds something else.
+     */
+    const stateBoundary = async (): Promise<boolean> => {
+      if (!remote?.arm) {
+        boundaryArmed = false;
+        boundarySlots = 0;
+        boundaryReason = 'this build has no native boundary plugin, so the web layer owns the boundary as it always did';
+        return false;
+      }
+      const chain: Array<{ assetId: string; songId: string }> = [];
+      for (const songId of boundary.next) {
+        for (const [slot, held] of warm) {
+          if (held.songId !== songId) continue;
+          chain.push({ assetId: slot, songId });
+          break;
+        }
+      }
+      let previous: { assetId: string; songId: string } | null = null;
+      if (boundary.previous !== null) {
+        for (const [slot, held] of warm) {
+          if (held.songId !== boundary.previous) continue;
+          previous = { assetId: slot, songId: boundary.previous };
+          break;
+        }
+      }
+      const answer = await bounded(
+        remote.arm({ assetId: audibleId, songId: audibleSongId ?? undefined, chain, previous, awake: boundary.awake }),
+        null,
+        'arm',
+      );
+      boundarySlots = chain.length + (previous === null ? 0 : 1);
+      /*
+       * **The native side may act on this only while the web layer is not running.** With the app
+       * on screen the JS side takes the boundary exactly as it always has — which is what keeps the
+       * two from both advancing a track, and keeps `repeat one`, the end of the queue and the
+       * on-screen `next` on the one path that implements them.
+       */
+      boundaryArmed = answer !== null && boundary.awake === false && chain.length > 0;
+      boundaryReason =
+        answer === null
+          ? 'the native boundary plugin did not answer, so the web layer keeps the boundary'
+          : boundaryArmed
+            ? `the native player will play the next slot itself if this track ends with the app away (${chain.length} ahead, ${previous === null ? 'none' : 'one'} behind)`
+            : boundary.awake
+              ? 'the app is on screen, so the web layer takes the track boundary and the native side is only told what follows'
+              : chain.length === 0
+                ? 'nothing is warm ahead of this track, so nothing could advance while the app is away'
+                : 'the native boundary plugin took the statement';
+      return boundaryArmed;
+    };
+
     const startService = async () => {
       if (!service) return;
       try {
@@ -587,6 +808,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          */
         preparedEpoch += 1;
         warm.clear();
+        audibleSongId = info.id ?? audibleSongId;
         await bounded(inAssetLane(() => fillSlot(audibleId, info)), undefined, 'load');
       },
       async prepare(info) {
@@ -622,6 +844,18 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
             }
             const slot = pickWarmSlot();
             await fillSlot(slot, info);
+            /*
+             * **And the slot has to be able to start, or it is not a warm slot (v1.9.8).**
+             *
+             * Creating a player was never the claim this call makes; holding the bytes is. A slot
+             * that was asked for media and did not get any is given straight back — the engine drops
+             * its claim with this answer, so the next boundary reports an honest cold fetch instead
+             * of a "warm" track that still has to be downloaded.
+             */
+            if ((await proveWarm(slot)) === false) {
+              await unloadSlot(slot);
+              return false;
+            }
             // Re-inserted so the warming order stays the eviction order.
             warm.delete(slot);
             warm.set(slot, { songId: key, url: info.url });
@@ -629,6 +863,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           }),
           false,
           'prepare',
+          PREPARE_TIMEOUT_MS,
         );
         return result.settled && result.value;
       },
@@ -694,6 +929,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          * is still the one playing.
          */
         audibleId = slotName;
+        audibleSongId = songId ?? audibleSongId;
         const attempt = inAssetLane(async () => {
           try {
             await NativeAudio.play({ assetId: slotName, time: 0 });
@@ -739,6 +975,50 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         );
         lastPositionMs = 0;
         return true;
+      },
+      /*
+       * ---------------------------------------------------------- the native boundary (v1.9.8)
+       *
+       * Three methods, and they are the whole of "the app is not the only owner of the boundary
+       * any more": `armBoundary` states what to play next and whether the native side may act,
+       * `reconcile` reads back which slot the native side is playing, and `nativeAdvance` is the
+       * account for the reason line.
+       */
+      async armBoundary(next) {
+        boundary = { next: [...next.next], previous: next.previous, awake: next.awake };
+        return stateBoundary();
+      },
+      async reconcile() {
+        if (!remote?.now) return null;
+        const state = await bounded(remote.now(), null, 'reconcile');
+        if (!state) {
+          boundaryReason = 'the native boundary plugin did not answer, so the app cannot ask it which slot it is playing';
+          return null;
+        }
+        if (Number.isFinite(state.advances)) nativeAdvances = Number(state.advances);
+        if (Number.isFinite(state.failures)) nativeFailures = Number(state.failures);
+        if (Number.isFinite(state.ignored)) nativeIgnored = Number(state.ignored);
+        if (typeof state.reason === 'string' && state.reason) boundaryReason = state.reason;
+        const slot = typeof state.assetId === 'string' && state.assetId ? state.assetId : null;
+        if (slot === null || slot === audibleId) return { changed: false, songId: state.songId ?? null };
+        /*
+         * The native player is on another slot than the app believed. That is a track the app
+         * advanced to without being told, and the answer is to move onto it — never to play
+         * anything: the audio is already coming out of that slot.
+         */
+        warm.delete(slot);
+        audibleId = slot;
+        audibleSongId = typeof state.songId === 'string' && state.songId ? state.songId : null;
+        return { changed: true, songId: audibleSongId };
+      },
+      nativeAdvance() {
+        return {
+          armed: boundaryArmed ? boundarySlots : 0,
+          advances: nativeAdvances,
+          failures: nativeFailures,
+          ignored: nativeIgnored,
+          reason: boundaryReason,
+        };
       },
       async discard() {
         /*
@@ -881,7 +1161,64 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         let detached = false;
         void remote
           .attach()
-          .then(() => Promise.all([remote.addListener('next', () => handlers.next()), remote.addListener('previous', () => handlers.previous())]))
+          .then(() =>
+            Promise.all([
+              remote.addListener('next', () => handlers.next()),
+              remote.addListener('previous', () => handlers.previous()),
+              /*
+               * **The boundary the native player took by itself (v1.9.8).**
+               *
+               * The slot it moved to is the one that is playing from that instant, so this bridge's
+               * own state moves with it *before* the engine hears anything: an event about the slot
+               * the app believed was audible would be dropped by `isAudible` as a message about an
+               * asset nobody is hearing, and the app would go on reading — and reporting — a player
+               * that is no longer making the sound.
+               */
+              remote.addListener('advanced', (event) => {
+                const songId = typeof event?.songId === 'string' ? event.songId : '';
+                const slot = typeof event?.assetId === 'string' ? event.assetId : '';
+                nativeAdvances += 1;
+                /*
+                 * The slot the native side says it played is the audible one from that instant, and
+                 * it is taken from the message rather than looked up: it is the one thing that knows
+                 * which slot it made the sound come out of. The warm map is cleaned with it — a slot
+                 * it has played is not a slot held ready — and only if the name is missing does this
+                 * fall back to finding the track in the pool.
+                 */
+                if (slot) {
+                  warm.delete(slot);
+                  audibleId = slot;
+                } else if (songId) {
+                  for (const [held, entry] of [...warm]) {
+                    if (entry.songId !== songId) continue;
+                    warm.delete(held);
+                    audibleId = held;
+                  }
+                }
+                if (songId) audibleSongId = songId;
+                boundaryReason = `the native player took the boundary itself and is playing ${songId || 'the next slot'}`;
+                events.onAdvanced?.(songId);
+              }),
+              /*
+               * And where it could not. The app is told the track ended after all — which is what it
+               * would have heard had the native side not been armed for it — so the ordinary path
+               * advances the track (and, with the app away, does so the moment it comes back).
+               */
+              remote.addListener('advanceFailed', (event) => {
+                const why = typeof event?.reason === 'string' && event.reason ? event.reason : 'no reason given';
+                nativeFailures += 1;
+                boundaryReason = `the native player could not take the boundary itself (${why})`;
+                /*
+                 * The end of that track is the web layer's again: while the app is away its own
+                 * doors are shut on purpose, and the only thing that may reopen them is this — the
+                 * native side saying it did not take the boundary. `onComplete` is the fallback for
+                 * an engine that predates the distinction.
+                 */
+                if (events.onBoundaryRefused) events.onBoundaryRefused();
+                else events.onComplete();
+              }),
+            ]),
+          )
           .then((added) => {
             if (detached) {
               void remote.detach().catch(() => undefined);

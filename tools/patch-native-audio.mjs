@@ -98,6 +98,28 @@ patch({
             var options: [String: Any] = [AVURLAssetPreferPreciseDurationAndTimingKey: false]`,
 });
 
+/*
+ *   3. **iOS — start on the first seconds that arrive, not on a comfortable buffer.** Nothing
+ *      anywhere in this app or in the plugin ever set `automaticallyWaitsToMinimizeStalling`, whose
+ *      default `true` lets AVFoundation decide for itself that it has buffered "enough" before it
+ *      makes a sound. That decision is the silence before a cold tap produces a note, and it is the
+ *      one AVFoundation lever for the owner's own wording: *"play as soon as ~5 seconds of audio are
+ *      buffered, then keep filling behind it"*. It belongs here rather than in our own plugin
+ *      (`NaviliteSpectrum.configureBuffer` sets it too, for the audible item) because it has to be
+ *      false on the item **before** the play call, and this is the line where every item this
+ *      plugin creates is created.
+ */
+patch({
+  file: SWIFT,
+  id: 'ios-start-eagerly',
+  anchor: `                let player = AVPlayer(playerItem: playerItem)
+                player.volume = self.initialVolume`,
+  replacement: `                let player = AVPlayer(playerItem: playerItem)
+                // <marker>: make a sound on the first seconds that arrive, and keep filling behind.
+                player.automaticallyWaitsToMinimizeStalling = false
+                player.volume = self.initialVolume`,
+});
+
 for (const line of applied) console.log(`[navilite] ${line}`);
 if (failures.length > 0) {
   for (const line of failures) console.error(`[navilite] PATCH FAILED — ${line}`);

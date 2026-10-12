@@ -702,8 +702,14 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "start", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "bands", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "configureBuffer", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "configureBuffer", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "warmSlot", returnType: CAPPluginReturnPromise)
     ]
+
+    /// How long `warmSlot` waits for a slot's item to appear, and for AVFoundation to answer — the
+    /// same 100 ms steps the spectrum's own install waits in, and a deadline it cannot exceed.
+    static let warmStep = 0.1
+    static let warmDeadline = 6.0
 
     /// The asset id `src/player/native.ts` loads every track under.
     static let audibleAssetId = "navilite-current"
@@ -875,8 +881,136 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
                 return
             }
             item.preferredForwardBufferDuration = max(1, seconds)
-            call.resolve(["buffered": true, "seconds": item.preferredForwardBufferDuration, "assetId": audible.assetId])
+            /*
+             * **And it starts on the first seconds that arrive, not on a comfortable buffer
+             * (v1.9.8).**
+             *
+             * The owner's own wording: *"play as soon as ~5 seconds of audio are buffered, then keep
+             * filling behind it"*. Until this release nothing anywhere set
+             * `automaticallyWaitsToMinimizeStalling`, whose default `true` lets AVFoundation decide
+             * for itself that it has "enough" — which on a relayed mobile link is the whole of the
+             * silence before a cold tap produces a note. False is what makes the forward-buffer
+             * target above mean something: start now, fill behind. It is a property of the item,
+             * written on an item that is already the right one, and it makes no sound.
+             */
+            audible.player.automaticallyWaitsToMinimizeStalling = false
+            call.resolve([
+                "buffered": true,
+                "seconds": item.preferredForwardBufferDuration,
+                "eager": !audible.player.automaticallyWaitsToMinimizeStalling,
+                "assetId": audible.assetId
+            ])
         }
+    }
+
+    /**
+     * Make a **warm** slot demonstrably able to start, and answer with the media it holds (v1.9.8).
+     *
+     * `preload` resolving only ever meant that an `AVPlayerItem` and an `AVPlayer` were created: the
+     * player nobody has asked for anything does not necessarily hold a byte, which is exactly why
+     * the owner's *"it should already have prefetched the next song but it still doesn't load and
+     * play instantly"* was right — the "next two songs" were prepared in name only.
+     *
+     * So this does the two things that make a slot real, and it does them on the slot the app names:
+     * it aims the item at a forward buffer, and it asks AVFoundation for the media data required to
+     * start it (`preroll`), which loads without making a sound. Then it reports the seconds the item
+     * actually holds. The audio being heard is not touched, not started and not seeked: this slot
+     * has never been played and is not the audible one.
+     */
+    @objc func warmSlot(_ call: CAPPluginCall) {
+        guard let assetId = call.getString("assetId"), !assetId.isEmpty else {
+            call.reject("warmSlot needs the id of the slot to make warm")
+            return
+        }
+        let seconds = max(1, call.getDouble("seconds") ?? 5)
+        let minSeconds = max(0.5, call.getDouble("minSeconds") ?? 1.5)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                call.reject("the spectrum plugin is gone")
+                return
+            }
+            WarmAttempt(call: call, assetId: assetId, minSeconds: minSeconds).start(plugin: self, seconds: seconds)
+        }
+    }
+
+    /// The media a slot's item holds right now, in seconds — the longest loaded range it reports.
+    static func bufferedSeconds(_ item: AVPlayerItem) -> Double {
+        var most = 0.0
+        for value in item.loadedTimeRanges {
+            let seconds = value.timeRangeValue.duration.seconds
+            if seconds.isFinite, seconds > most { most = seconds }
+        }
+        return most
+    }
+}
+
+/**
+ * One `warmSlot` call in flight (v1.9.8).
+ *
+ * A class because three things race here and exactly one of them may answer: the slot's item
+ * appearing (a preload that is still resolving), AVFoundation's own answer to `preroll`, and the
+ * deadline. Whichever speaks first wins, the others are no-ops, and the answer always carries the
+ * seconds of media the slot actually holds — never a claim about a player that was merely created.
+ */
+private final class WarmAttempt {
+    private let call: CAPPluginCall
+    private let assetId: String
+    private let minSeconds: Double
+    private var answered = false
+    private var waited = 0.0
+
+    init(call: CAPPluginCall, assetId: String, minSeconds: Double) {
+        self.call = call
+        self.assetId = assetId
+        self.minSeconds = minSeconds
+    }
+
+    func start(plugin: NaviliteSpectrum, seconds: Double) {
+        guard !answered else { return }
+        guard let found = AudibleBridgePlayer.player(assetId, from: plugin.bridge), let item = found.player.currentItem else {
+            guard waited < NaviliteSpectrum.warmDeadline else {
+                answer(buffered: false, seconds: 0, ready: false, reason: "the slot holds no item on the player")
+                return
+            }
+            waited += NaviliteSpectrum.warmStep
+            DispatchQueue.main.asyncAfter(deadline: .now() + NaviliteSpectrum.warmStep) { [weak self] in
+                self?.start(plugin: plugin, seconds: seconds)
+            }
+            return
+        }
+        item.preferredForwardBufferDuration = max(1, seconds)
+        found.player.preroll(atRate: 1.0) { [weak self] ready in
+            guard let self, !self.answered else { return }
+            let held = NaviliteSpectrum.bufferedSeconds(item)
+            self.answer(
+                buffered: held >= self.minSeconds,
+                seconds: held,
+                ready: ready,
+                reason: ready ? "asked for the media data needed to start" : "the player did not answer that it is ready to start"
+            )
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + NaviliteSpectrum.warmDeadline) { [weak self] in
+            guard let self, !self.answered else { return }
+            let held = NaviliteSpectrum.bufferedSeconds(item)
+            self.answer(
+                buffered: held >= self.minSeconds,
+                seconds: held,
+                ready: false,
+                reason: "the player did not answer within \(NaviliteSpectrum.warmDeadline) s"
+            )
+        }
+    }
+
+    private func answer(buffered: Bool, seconds: Double, ready: Bool, reason: String) {
+        guard !answered else { return }
+        answered = true
+        call.resolve([
+            "buffered": buffered,
+            "seconds": seconds,
+            "ready": ready,
+            "reason": reason,
+            "assetId": assetId
+        ])
     }
 }
 

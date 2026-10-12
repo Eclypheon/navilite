@@ -6,9 +6,11 @@
  * latency, mobile-class throughput. Two client-side answers, neither of which needs a server change:
  *
  *   - **`maxBitRate` on the stream request.** Subsonic streams the original unless the client says
- *     otherwise; Navidrome transcodes on demand. It is *never* a silent cap: it starts modest on an
- *     unmeasured link, steps down when a start was slow, steps back up when a start was quick, and
- *     disappears entirely at the top of the ladder (the original plays).
+ *     otherwise; Navidrome transcodes on demand. It is *never* a silent cap, and since v1.9.8 it is
+ *     never on the path of the track the listener is waiting for either: nothing is capped until a
+ *     start has been measured slow, and what the cap then covers is the **background preparation**
+ *     of the *next* track — a transcode the owner is not waiting behind. It disappears entirely at
+ *     the top of the ladder (the original plays).
  *   - **queue-ahead**, which is `test/queue-ahead.test.ts` — on a high-latency link the number of
  *     round trips matters more than the bandwidth.
  *
@@ -41,34 +43,39 @@ const FAST_START = Math.max(1, FAST_START_MS - 500);
 
 const song = (id: string): Song => ({ id, title: `Track ${id}`, duration: 2 });
 
-test('an unmeasured link starts modest, and asks for the cap rather than guessing fast', () => {
+test('an unmeasured link is asked for nothing at all, so a tap never waits for a transcode', () => {
   const rate = new ByteRate();
   assert.equal(
     rate.maxBitRate,
     STARTING_KBPS,
-    'nothing measured yet is not a licence to ask for the original',
+    'nothing measured yet is no licence to ask the server for a smaller stream',
+  );
+  assert.equal(
+    rate.maxBitRate,
+    null,
+    'and "nothing" is the original file rather than a guess at a bitrate — the owner\'s rule is that a transcode is spawned only for a track he is not waiting for',
   );
   assert.equal(rate.lastStartMs, null, 'and no number is shown until a start has actually been timed');
   assert.equal(rate.count, 0);
-  assert.ok(
-    STARTING_KBPS < BITRATE_LADDER[BITRATE_LADDER.length - 1]!,
-    'the start is not the top of the ladder',
-  );
-  // Every stream request therefore carries the parameter — see test/queue-ahead.test.ts, which
-  // asserts the URL a real tap produces.
+  // The URL a play asks for therefore carries no parameter at all — see test/queue-ahead.test.ts,
+  // which asserts the URL a real tap produces.
   const url = new URL(
     new Library(
       new SubsonicClient({ serverUrl: 'https://navilite.example', username: 'k', password: 'p' }),
-    ).streamUrl(song('song-1'), STARTING_KBPS),
+    ).streamUrl(song('song-1')),
   );
-  assert.equal(url.searchParams.get('maxBitRate'), String(STARTING_KBPS));
+  assert.equal(url.searchParams.get('maxBitRate'), null, 'no maxBitRate on the stream request, so Navidrome streams the file as it is');
 });
 
-test('a slow start steps the cap down, a fast one steps it up, and the top of the ladder is the original', () => {
+test('a slow start caps what is prepared next, a fast one lifts the cap, and the top of the ladder is the original', () => {
   const slow = new ByteRate();
   slow.noteStart(SLOW_START);
   assert.equal(slow.lastStartMs, SLOW_START, 'the number the app shows is the one it measured');
-  assert.equal(slow.maxBitRate, 96, 'one slow start asks for 96 kbps — below what the last start managed');
+  assert.equal(
+    slow.maxBitRate,
+    320,
+    'one slow start caps the *next track\'s background preparation* one rung below the top — never the track that was just tapped',
+  );
 
   let rate = new ByteRate();
   for (let i = 0; i < BITRATE_LADDER.length; i += 1) rate.noteStart(FAST_START);
@@ -81,7 +88,7 @@ test('a slow start steps the cap down, a fast one steps it up, and the top of th
   rate = new ByteRate();
   rate.noteStart(SLOW_START);
   rate.noteStart(FAST_START);
-  assert.equal(rate.maxBitRate, 128, 'a fast start after a slow one puts the cap back where it started');
+  assert.equal(rate.maxBitRate, null, 'a fast start after a slow one puts the cap back where it started — nowhere at all');
 });
 
 test('a sample that is not a measurement is not one — the rung stands, and no number is invented', () => {

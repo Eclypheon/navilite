@@ -32,13 +32,16 @@ const queueOf = (...ids: string[]) => ids.map((id) => ({ song: song(id), context
 const urlOf = (id: string): string => `http://127.0.0.1:4599/rest/stream?id=${id}`;
 
 /**
- * The URL these tests expect: the same stream, asked for at the rate the app starts at.
+ * The URL these tests expect for a **warm** track: the same stream, asked for at the rate the app
+ * has decided to prepare with.
  *
- * Since v1.9.0 *every* stream request carries a bitrate, and an unmeasured link starts modest
- * (`STARTING_KBPS`); a link the app has measured as fast drops the parameter and gets the original.
- * So the URL is part of the change under test, not noise in it.
+ * v1.9.8 — an unmeasured link is asked for **nothing at all**, so the plain URL is what both a tap
+ * and its neighbourhood use: the ladder only ever decides what is *prepared*, and a `maxBitRate` is
+ * a request for Navidrome to spawn a transcode, which is not something a tap may wait for. The
+ * helper stays because the assertions are about which URLs the two paths agree on, and that has to
+ * keep working the moment the ladder does move.
  */
-const cappedUrlOf = (id: string, kbps = 128): string => `${urlOf(id)}&maxBitRate=${kbps}`;
+const cappedUrlOf = (id: string, kbps: number | null = null): string => (kbps == null ? urlOf(id) : `${urlOf(id)}&maxBitRate=${kbps}`);
 
 interface Prefetch {
   url: string;
@@ -173,7 +176,8 @@ test('a tap paints the selection and the loading state before anything is reques
   void queue.start();
   await tick();
   assert.equal(plays.length, 1, 'the request for the stream follows the paint, not the other way round');
-  assert.equal(plays[0]!.url, cappedUrlOf('song-1'), 'and it is the stream of the track he tapped');
+  assert.equal(plays[0]!.url, urlOf('song-1'), 'and it is the stream of the track he tapped, asked for as the original file — no maxBitRate, so no transcode in front of the first note');
+  assert.equal(plays[0]!.url.includes('maxBitRate'), false, 'the tap path carries no bitrate parameter at all');
   assert.equal(queue.isLoading, true, 'still loading while the engine has not answered');
 
   releasePlay();
@@ -205,7 +209,7 @@ test('the next track is requested before the current one ends', async () => {
    * what has to be true of every entry is that it was asked for under the exact URL the play path
    * will use, which is the pair of expressions the boundary's adoption depends on.
    */
-  const kbps = queue.streamKbps ?? 128;
+  const kbps = queue.streamKbps ?? null;
   assert.deepEqual(
     prepares.map((prepare) => prepare.url),
     [cappedUrlOf('song-2', kbps), cappedUrlOf('song-3', kbps)],
@@ -283,7 +287,7 @@ test('a rapid double tap prepares the track after the one he chose', async () =>
   releasePlay();
   await tick();
   await tick();
-  const kbps = queue.streamKbps ?? 128;
+  const kbps = queue.streamKbps ?? null;
   assert.deepEqual(
     prepares.map((prepare) => prepare.url),
     [cappedUrlOf('song-2', kbps), cappedUrlOf('song-3', kbps)],
