@@ -395,9 +395,18 @@ export class PlaybackQueue {
   async seek(positionMs: number): Promise<void> {
     await this.engine.seek(positionMs);
     this.lastPositionMs = positionMs;
-    // A seek is the one position change worth writing immediately: it is the difference between
-    // coming back at the right second and coming back where the listener left off.
-    this.persistSnapshot(true);
+    /*
+     * v1.9.7 — **the ordinary throttle, not a forced write.**
+     *
+     * This asked for `persistSnapshot(true)` on every commit, and the seek bar commits while a finger
+     * is still moving: that is a synchronous `JSON.stringify` of the whole queue plus a
+     * `localStorage.setItem` roughly eight times a second during a drag, on the gesture where the
+     * screen has to keep up. Five seconds is the throttle the position stream already writes under,
+     * and the forced writes are not lost — a track change forces one, and so does the way into the
+     * background (`flushSnapshot`). Coming back at the right second does not need eight answers
+     * during one drag.
+     */
+    this.persistSnapshot();
   }
 
   /** Shuffle on/off. Turning it on keeps the current track; turning it off keeps the order. */
@@ -536,15 +545,34 @@ export class PlaybackQueue {
      * "latency" says nothing about the link.
      */
     const startedAt = Date.now();
-    await this.engine.play(request, startMs);
-    let failed = this.engine.startDidFail?.() === true;
-    if (!failed && warmedUrl === null) this.rate.noteStart(Date.now() - startedAt);
-    if (failed && token === this.playToken) {
-      this.rate.demote();
-      const retry = this.trackRequest(song, null, artworkUrl);
-      this.onChanged?.();
-      await this.engine.play(retry, startMs);
+    /*
+     * v1.9.7 — **a start that throws is a start that failed, not a screen stuck on "loading…".**
+     *
+     * Everything below used to be unwrapped: a rejection from `engine.play` — and the engine's own
+     * `ensureNative` round trip is the one that can reject before any of its internal handlers exist
+     * — escaped into `void this.queue.play(...)` at the call sites, which swallowed it. `loading` was
+     * never cleared, so the row and the bar sat on "loading…" for the rest of the session with
+     * nothing playing, nothing said, and no tap that could clear it: the one ending this app must
+     * never have. The failure path is the one that already exists two branches down, taken with the
+     * same five steps, so a throw lands exactly where an honest "no sound" answer lands: waiting off,
+     * the failure on screen, the row free again, the look-ahead re-armed, and a tap to try again.
+     */
+    let failed: boolean;
+    try {
+      await this.engine.play(request, startMs);
       failed = this.engine.startDidFail?.() === true;
+      if (!failed && warmedUrl === null) this.rate.noteStart(Date.now() - startedAt);
+      if (failed && token === this.playToken) {
+        this.rate.demote();
+        const retry = this.trackRequest(song, null, artworkUrl);
+        this.onChanged?.();
+        await this.engine.play(retry, startMs);
+        failed = this.engine.startDidFail?.() === true;
+      }
+    } catch (error) {
+      // The same silence the engine reports by itself, except that here it arrived as a rejection.
+      console.warn('[navilite] starting a track failed', error);
+      failed = true;
     }
     this.inFlightSongId = null;
     if (token !== this.playToken) return;

@@ -4,6 +4,31 @@ import type { Album, AlbumWithSongs, Artist, ArtistWithAlbums, Playlist, Playlis
 
 export type AlbumListType = 'alphabeticalByName' | 'newest' | 'recent' | 'frequent' | 'starred';
 
+/**
+ * How many entries each detail cache may hold (v1.9.7).
+ *
+ * `albumCache`, `artistDetailCache` and `playlistCache` were evicted only by {@link Library.invalidate}
+ * — i.e. on a sign-out or a change of server — so a session that browsed enough albums, artists and
+ * playlists held every one of them, with its whole song list, for the rest of the session. Thirty is
+ * more than a screen's worth of back-and-forth, which is the whole of what the cache is for.
+ */
+const DETAIL_CACHE_LIMIT = 30;
+
+/**
+ * Insert into a detail cache, dropping the oldest entry when it is full (v1.9.7).
+ *
+ * Insertion order is the eviction order, and re-setting an existing key leaves it where it was —
+ * deliberately, because nothing here needs more than "the cache does not grow for ever".
+ */
+function remember<K, V>(cache: Map<K, V>, key: K, value: V): void {
+  cache.set(key, value);
+  while (cache.size > DETAIL_CACHE_LIMIT) {
+    const oldest = cache.keys().next();
+    if (oldest.done) return;
+    cache.delete(oldest.value);
+  }
+}
+
 export class Library {
   client: SubsonicClient;
   private artistCache: Artist[] | null = null;
@@ -79,7 +104,7 @@ export class Library {
     const cached = this.albumCache.get(id);
     if (cached) return cached;
     const album = await this.client.getAlbum(id);
-    this.albumCache.set(id, album);
+    remember(this.albumCache, id, album);
     return album;
   }
 
@@ -87,7 +112,7 @@ export class Library {
     const cached = this.artistDetailCache.get(id);
     if (cached) return cached;
     const artist = await this.client.getArtist(id);
-    this.artistDetailCache.set(id, artist);
+    remember(this.artistDetailCache, id, artist);
     return artist;
   }
 
@@ -99,7 +124,7 @@ export class Library {
     const cached = this.playlistCache.get(id);
     if (cached) return cached;
     const playlist = await this.client.getPlaylist(id);
-    this.playlistCache.set(id, playlist);
+    remember(this.playlistCache, id, playlist);
     return playlist;
   }
 

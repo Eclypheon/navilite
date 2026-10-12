@@ -158,6 +158,17 @@ export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine,
   const draw = (timestamp?: number): void => {
     frame = requestAnimationFrame(draw);
     if (!ctx) return;
+    /*
+     * v1.9.7 — **a canvas nobody can see is not painted.**
+     *
+     * The now screen is `display: none` when it is closed (`styles.css`, `.now.hidden`), and the
+     * loop went on clearing, refilling a full-canvas gradient and running the 64-bar pass sixty
+     * times a second for a surface with no pixels: a client width of zero is the DOM's own statement
+     * that none of that can be seen. The loop is *kept* alive — the rAF above has already been
+     * re-armed and nothing else here is stopped — so the bars are simply there, in step, the moment
+     * the screen is opened again; only the paint is skipped.
+     */
+    if (canvas.clientWidth === 0) return;
     const now = typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : performance.now();
     const elapsed = now - lastDrawnAt;
     // The frame budget: a callback that arrives early is not a paint.

@@ -916,6 +916,52 @@ test('moving to another track is one load, one play, and the spectrum follows th
 });
 
 
+/* --------------------------- v1.9.7: a start concluded from the track it replaces */
+
+test('a report about the track being replaced does not start the track that replaces it', async () => {
+  /*
+   * The defect Sage found in v1.9.6, made runnable.
+   *
+   * A load is an unload + a preload, and the plugin's own ~100 ms `currentTime` timer goes on
+   * reporting the item it is holding — the OUTGOING one — until that `unload` is processed. The
+   * engine's anchor test (`|ms - startAnchorMs| <= START_ANCHOR_SLACK_MS`, three seconds) could not
+   * tell such a report from the item being fetched, so a start that had fetched **nothing** was
+   * concluded on the previous track's position: the bar said `playing`, `startFailed` stayed false,
+   * and a load that then failed was never shown and never retried. This is the same report the
+   * outgoing item's timer produces, delivered inside the load bracket.
+   */
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    assert.equal(engine.status().state, 'playing', 'the first track is playing');
+    await settle(40);
+
+    // The tap on the next row, and the outgoing item still reporting 1.4 s into the load.
+    const starting = engine.play(OTHER_TRACK);
+    await settle(20);
+    record.events?.onPosition(1.4);
+    say(`the replaced track's own report: state ${engine.status().state} — calls ${record.calls.join(', ')}`);
+    assert.equal(
+      engine.status().state,
+      'loading',
+      'a report about the track being replaced is not evidence that this start has sound',
+    );
+    assert.equal(engine.startDidFail(), false, 'and it is not a failure either: the load is still running');
+
+    await starting;
+    assert.equal(engine.status().state, 'playing', 'and the start still concludes from the item it did fetch');
+    assert.equal(engine.currentTrack?.id, OTHER_TRACK.id, 'which is the track that was asked for');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+
 /* -------------------------------------------------------------- the v1.7.5 gaps */
 
 test('two different tracks pressed in quick succession leave the second one playing and the first one silent', async () => {

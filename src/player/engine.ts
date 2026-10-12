@@ -305,6 +305,15 @@ const SPECTRUM_POLL_MS = 33;
 /** The clock is reported while playing at this rate, so the display never sits still. */
 const CLOCK_TICK_MS = 200;
 /**
+ * How recently a player report has to have arrived for the clock tick to skip its own redraw (v1.9.7).
+ *
+ * The player reports its position roughly every 100 ms, and every one of those reports already
+ * redraws the screen through `emit()`. The tick is there so the clock keeps moving when nothing else
+ * is arriving — it is not a second repaint on top of reports that are. A tick that lands within this
+ * window of the player's own word does nothing but the end-of-track check.
+ */
+const CLOCK_TICK_QUIET_MS = 250;
+/**
  * How long the engine waits before asking again about a tap that is on the wrong item.
  *
  * v1.8.0 — much shorter than {@link SPECTRUM_RECHECK_MS}, because this is not a tap that is broken,
@@ -488,7 +497,16 @@ export class AudioEngine {
    */
   private reportsMutedUntil = 0;
   /**
-   * True from just before a load until it has returned (v1.9.1).
+   * When the player last reported anything — a position or a state (v1.9.7).
+   *
+   * The player reports its own position about every 100 ms while it plays, and each of those reports
+   * already redraws the screen. {@link startClockTick} reads this so its own tick does not do the
+   * same work again a fraction of a second later: the tick exists to keep the clock moving when
+   * nothing else is, not to repaint on top of the reports that are arriving anyway.
+   */
+  private lastPlayerReportAt = 0;
+  /**
+   * The generation of the load that is in flight, or `null` when no load is (v1.9.7).
    *
    * A load is an unload + preload: the outgoing asset stops **on purpose**, and the plugin reports
    * that stop. Throughout the load the player is still holding the outgoing item, so a report
@@ -496,8 +514,40 @@ export class AudioEngine {
    * wrong item. This is a bracket rather than a deadline because the load's own length is what the
    * window is, and because a deadline that outlived the load would swallow the *next* honest report —
    * which is exactly what a six-second window did to a track ending a moment after a tap.
+   *
+   * v1.9.7 — **and the bracket is one start's, not the engine's.** It was a single boolean, so two
+   * overlapping starts (two taps on two rows, which this file's own notes say race) shared it: the
+   * first one's `finally` cleared it while the second was still loading, and the outgoing item's own
+   * reports then reached the machine unfiltered — including the one that concludes a start. Holding
+   * the generation it was opened under makes it exact per start, exactly as the load's own
+   * staleness check already is (`this.track`, below).
    */
-  private loadInFlight = false;
+  private loadInFlight: number | null = null;
+  /**
+   * The generation whose **audible item is still the outgoing one** — no play has been asked for
+   * yet (v1.9.7).
+   *
+   * A load is an unload + a preload, and from the moment it opens until the player has been asked
+   * to make *this* start's item audible (`bridge.play` on a cold load, `bridge.adopt` on one that
+   * was warm) the slot the listener is hearing still holds the item being replaced — so the
+   * plugin's own 100 ms `currentTime` timer goes on reporting **that** item's position under the
+   * audible asset id. A report from a track that is on its way out is not evidence about the item
+   * being started, and it is exactly what concluded a start that had fetched nothing (see the
+   * anchor test in `onPosition`): the bar said `playing`, `startFailed` stayed false, and a load
+   * that then failed was neither shown nor retried.
+   *
+   * **Deliberately narrower than {@link loadInFlight}, and the difference is load-bearing.** The
+   * load bracket also covers the play call itself, but the report that *does* conclude a start —
+   * the player's own word about the item just started — arrives from inside that call: that is the
+   * whole of v1.9.2's start proof (`awaitStart`, below), and the engine's `test/engine-native.test.ts`
+   * drives exactly that ordering in twenty-odd tests. Gating this branch on the whole bracket would
+   * therefore swallow the start it exists to protect, and every cold start would sit in `loading`
+   * until {@link START_DEADLINE_MS} ran out and then be reported as a failure — a track that *did*
+   * start, called a failure on screen, which is worse than the report this release is fixing.
+   *
+   * Held per start, like `loadInFlight`: two overlapping starts share neither.
+   */
+  private audibleIsOutgoing: number | null = null;
   /**
    * The tracks the bridge is holding warm: `songId -> the exact URL it was warmed under` (v1.9.5,
    * one prepared slot since v1.9.1).
@@ -879,6 +929,9 @@ export class AudioEngine {
       if (this.state !== 'playing') return;
       // The end the player never announced (v1.9.5) — see {@link watchForPinnedEnd}.
       this.watchForPinnedEnd();
+      // v1.9.7 — the tick does not redraw on top of the player's own reports (see
+      // {@link CLOCK_TICK_QUIET_MS}). The end-of-track check above still runs on every tick.
+      if (this.clockNow() - this.lastPlayerReportAt < CLOCK_TICK_QUIET_MS) return;
       this.emit();
     }, CLOCK_TICK_MS);
   }
@@ -903,7 +956,7 @@ export class AudioEngine {
    * deadline is what the counter used to be — and what could leak.
    */
   private inTransition(): boolean {
-    return this.loadInFlight || this.clockNow() < this.reportsMutedUntil;
+    return this.loadInFlight !== null || this.clockNow() < this.reportsMutedUntil;
   }
 
   /** Open that window for `ms` from now — as far out as any window already running, never shorter. */
@@ -1077,6 +1130,7 @@ export class AudioEngine {
       this.nativeReady = this.nativeFactory(this.os, {
         onPosition: (seconds) => {
           if (this.backend !== 'native') return;
+          this.lastPlayerReportAt = this.clockNow();
           const ms = seconds * 1000;
           this.setNativePosition(ms);
           /*
@@ -1098,8 +1152,19 @@ export class AudioEngine {
            * about the item it holds, so the guess is replaced by it and the start is concluded on
            * that report. Outside a wait there is nothing to conclude: the report is an ordinary
            * position report about the item playing, and an anchor can be as stale as it likes.
+           *
+           * v1.9.7 — **and a report from a track that is on its way out is not evidence about the
+           * item being started.** During `bridge.load` the audible slot still holds the OUTGOING
+           * item (the plugin's 100 ms timer for it runs with the audible `assetId` until the
+           * `unload` is processed) and `startWait` is still null, so a report from the track being
+           * replaced reached this same anchor test and concluded a start that had fetched nothing:
+           * the bar claimed `playing`, `startFailed` stayed false, and a load that then failed was
+           * never retried and never shown. The gate is the window in which that is true —
+           * {@link audibleIsOutgoing}, a per-start token like `loadInFlight`, and deliberately
+           * narrower than the load bracket itself, which would swallow the item's own report (see
+           * that field for why).
            */
-          if (Math.abs(ms - this.startAnchorMs) <= START_ANCHOR_SLACK_MS) {
+          if (this.audibleIsOutgoing === null && Math.abs(ms - this.startAnchorMs) <= START_ANCHOR_SLACK_MS) {
             this.concludeStart('player');
           } else if (this.startWait !== null) {
             this.startAnchorMs = ms;
@@ -1110,6 +1175,7 @@ export class AudioEngine {
         },
         onState: (state, isPlaying, facts) => {
           if (this.backend !== 'native') return;
+          this.lastPlayerReportAt = this.clockNow();
           /*
            * What the plugin said, kept as it said it (v1.9.5).
            *
@@ -1683,9 +1749,29 @@ export class AudioEngine {
    * it start at all.
    */
   private async startNative(track: TrackRequest, startMs: number, ready?: NativeBridge): Promise<void> {
-    const bridge = ready ?? (await this.ensureNative());
+    /*
+     * v1.9.7 — **a bridge that cannot be built is a start that did not happen, and it is said here.**
+     *
+     * Getting the bridge is the one round trip in this path that sits outside the load's own `try`,
+     * and it is the one that can still reject on a device (a plugin that is not there, a build that
+     * never answered): the rejection left this method, through `play`, out to the queue's
+     * `void ctx.queue.play(...)` — and the machine was left in `loading` with nothing sounding and
+     * nothing said, which is the ending this release exists to delete. Both words for it now end the
+     * way every other failed start ends: the failure is on the machine (`fail`), the start is marked
+     * as one that produced no sound, and the queue takes its own failed branch — the waiting state
+     * off, the row free again, one retry a rung down the bitrate ladder, and the look-ahead re-armed.
+     */
+    let bridge: NativeBridge | null = ready ?? null;
+    try {
+      bridge ??= await this.ensureNative();
+    } catch (cause) {
+      this.fail(cause);
+      this.startFailed = true;
+      return;
+    }
     if (!bridge) {
       this.fail(new Error('the native audio engine is not available in this build'));
+      this.startFailed = true;
       return;
     }
     this.backend = 'native';
@@ -1731,9 +1817,13 @@ export class AudioEngine {
       'native playback (AVFoundation / ExoPlayer) — this is the engine that keeps going when you leave the app and the one the lock screen drives; the spectrum is an FFT of the same stream, read from the native audio tap';
     // A load is an unload + preload: the outgoing asset's stop must not be read as a track ending,
     // and until the load has returned the player is still on the outgoing item — so both the
-    // report gate and the tap's verify are closed for exactly that long, and no longer.
-    this.loadInFlight = true;
+    // report gate and the tap's verify are closed for exactly that long, and no longer. (v1.9.7: the
+    // gate is this start's generation, not a shared boolean — see `loadInFlight`.)
     const generation = this.generation;
+    this.loadInFlight = generation;
+    // And the audible slot holds the outgoing item until this start is asked for, out of the same
+    // fact and for a shorter window (v1.9.7 — see `audibleIsOutgoing`).
+    this.audibleIsOutgoing = generation;
     // Nothing is audible yet: the clock holds the offset until the player reports a position.
     this.positionReported = false;
     /*
@@ -1782,6 +1872,11 @@ export class AudioEngine {
     let adopted = false;
     try {
       if (adoptable) {
+        // v1.9.7 — this is the call that makes this start's item the audible one, so from here a
+        // report about it is news rather than a leftover from the item being replaced (see
+        // `audibleIsOutgoing`). Conditional on the token: an older start's adopt must not open the
+        // window on a newer start's behalf.
+        if (this.audibleIsOutgoing === generation) this.audibleIsOutgoing = null;
         adopted = (await bridge.adopt?.(track.id)) === true;
         // The bridge's own words when it has them ('nothing prepared', 'play refused (…)',
         // 'timed out'), and an honest fallback when it does not.
@@ -1816,6 +1911,9 @@ export class AudioEngine {
          * the app says is playing.
          */
         if (this.track !== track) return;
+        // v1.9.7 — the same statement for the cold path: the player is being asked for *this*
+        // item, so its next report is about the track being started (see `audibleIsOutgoing`).
+        if (this.audibleIsOutgoing === generation) this.audibleIsOutgoing = null;
         await bridge.play(startMs / 1000);
       }
       /*
@@ -1838,8 +1936,19 @@ export class AudioEngine {
     } catch (cause) {
       this.fail(cause);
     } finally {
-      // The load is over: reports arriving from here on are news again, and the tap can be checked.
-      this.loadInFlight = false;
+      /*
+       * The load is over: reports arriving from here on are news again, and the tap can be checked.
+       *
+       * v1.9.7 — **only if this start is still the one holding the bracket.** Two starts can overlap
+       * (two taps on two rows), and the older one's `finally` runs while the newer one is still
+       * loading; clearing unconditionally would open the gate on the newest start's behalf and let a
+       * *playing* report from the outgoing item reach `onState` unfiltered.
+       */
+      if (this.loadInFlight === generation) this.loadInFlight = null;
+      // And the audible-item window closes with the load, whatever the load did: a start that
+      // returned early, or threw, must not leave it open for a later report to be read under
+      // (v1.9.7 — see `audibleIsOutgoing`).
+      if (this.audibleIsOutgoing === generation) this.audibleIsOutgoing = null;
       /*
        * **An adopted item gets its own verify (v1.9.5).**
        *
@@ -1951,7 +2060,7 @@ export class AudioEngine {
      * resume has nothing to do with which item the player is on, and gating this on their window
      * meant a resume a moment after a pause could not confirm the tap it already had (v1.9.1).
      */
-    if (!this.loadInFlight) this.verifySpectrum();
+    if (this.loadInFlight === null) this.verifySpectrum();
     void this.pollSpectrum();
   }
 
@@ -2012,7 +2121,28 @@ export class AudioEngine {
         this.modeReason = 'the tap is on the item the player has moved off — re-attaching it to the track that is playing';
         this.emit();
       }
-      if (this.clockNow() - this.lastSpectrumRecheckAt >= SPECTRUM_ORPHAN_RECHECK_MS) this.verifySpectrum();
+      /*
+       * v1.9.7 — **and the chip's third word closes here too.** This branch used to return with
+       * `spectrumArming` still true and with the re-check counter untouched, so a tap that stayed on
+       * the item the player had left — a tap that never moves — left the engine saying "the spectrum
+       * is coming" for the whole track, with dead bars and no sentence anywhere. The re-checks are
+       * the budget that ends it, the same one the dead-tap branch and {@link MAX_SPECTRUM_RECHECKS}
+       * already use: once this branch has spent it, the tap has been given its chance and the chip
+       * may say *native audio*.
+       */
+      if (this.clockNow() - this.lastSpectrumRecheckAt >= SPECTRUM_ORPHAN_RECHECK_MS) {
+        this.spectrumRechecks += 1;
+        if (this.spectrumRechecks >= MAX_SPECTRUM_RECHECKS) {
+          this.spectrumRechecks = 0;
+          if (this.spectrumArming) {
+            this.spectrumArming = false;
+            this.modeReason =
+              'the tap is on the item the player has moved off and would not re-attach — the bars are on the album-art theme, and the audio is untouched';
+            this.emit();
+          }
+        }
+        this.verifySpectrum();
+      }
       return;
     }
     const playing = this.state === 'playing' && frame.playing;

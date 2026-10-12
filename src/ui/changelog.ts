@@ -265,4 +265,15 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The line under the bar no longer counts a hand-over that worked as a lost message from the phone: the "playing" report for the song that took over was being thrown away as if it belonged to the song before it.',
       ],
     },
+    {
+      version: '1.9.7',
+      date: '2026-10-12',
+      items: [
+        'A song no longer shows as playing before it has started. The report the app took as "this track is sounding" could come from the song it was replacing, so a track that had fetched nothing looked like it was playing - and if it then failed, nothing was ever said and nothing tried again. Only the song you actually started can now say it is playing, and one that does not start says so and is retried.',
+        'If a song cannot be started at all, the row stops waiting and says so instead of sitting on the loading state for the rest of the session.',
+        'A track that ends is no longer missed while the app is getting the next one ready: the song being replaced saying "I have finished" was being ignored because a track was still being loaded.',
+        'The bars are only drawn while the now screen is open, and dragging the seek bar no longer rewrites your saved session about eight times a second - both were work you could not see, on the screens that have to keep up with your finger.',
+        'If the bars cannot re-attach to the song that is playing, the chip stops saying "spectrum…" and says the bars are on the album-art theme, which is what was actually happening.',
+      ],
+    },
   ];

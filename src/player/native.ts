@@ -375,8 +375,17 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
      * unloaded — one stream per track), or the listener moves the chain (`load`/`discard` clear it).
      */
     const warm = new Map<string, { songId: string; url: string }>();
-    /** When a slot was last written. See {@link SLOT_WRITE_GRACE_MS}. */
-    let slotWrittenAt = 0;
+    /**
+     * When each slot was last written, by slot. See {@link SLOT_WRITE_GRACE_MS}.
+     *
+     * v1.9.7 — **per slot, not one engine-wide timestamp.** The grace exists to swallow the
+     * completion the plugin emits for the asset `unload` just stopped; as one timestamp it was set by
+     * a write to *any* slot, including the silent ones, and a warm to a silent slot therefore
+     * suppressed the AUDIBLE item's real completion for 800 ms. Every start fires up to three warms
+     * on the slots that are not audible, so that was the common case rather than a corner. A slot's
+     * own stamp can only ever be about that slot's own unload.
+     */
+    const slotWrittenAt = new Map<string, number>();
     /**
      * The prepare epoch (v1.9.2). See {@link NativeBridge.invalidatePrepared}.
      *
@@ -434,8 +443,12 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     });
     await NativeAudio.addListener('complete', (event) => {
       if (!isAudible(event)) return;
-      // A slot we wrote a moment ago: this completion is the plugin stopping the asset we replaced.
-      if (Date.now() - slotWrittenAt < SLOT_WRITE_GRACE_MS) {
+      /*
+       * A slot we wrote a moment ago: this completion is the plugin stopping the asset we replaced.
+       * v1.9.7 — the stamp is the *audible* slot's, so a warm that was just written into a silent
+       * slot can no longer swallow the item the listener is hearing.
+       */
+      if (Date.now() - (slotWrittenAt.get(audibleId) ?? 0) < SLOT_WRITE_GRACE_MS) {
         droppedSlotGrace += 1;
         return;
       }
@@ -484,7 +497,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
 
     /** Put `info` into `slot`, replacing whatever it held. Best-effort: the plugin rejects both on an empty slot. */
     const fillSlot = async (slot: string, info: NativeTrackInfo): Promise<void> => {
-      slotWrittenAt = Date.now();
+      slotWrittenAt.set(slot, Date.now());
       try {
         await NativeAudio.unload({ assetId: slot });
       } catch {
@@ -495,7 +508,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
 
     /** Give a slot's asset back to the player. Best-effort: an empty slot rejects. */
     const unloadSlot = async (slot: string): Promise<void> => {
-      slotWrittenAt = Date.now();
+      slotWrittenAt.set(slot, Date.now());
       try {
         await NativeAudio.unload({ assetId: slot });
       } catch {
@@ -711,7 +724,8 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         // the item it was prepared as is a different one by the time it is heard (v1.9.2).
         await configureBuffer();
         await startService();
-        slotWrittenAt = Date.now();
+        // The slot that was just emptied is the one written here (v1.9.7: the stamp is per slot).
+        slotWrittenAt.set(to, Date.now());
         await bounded(
           inAssetLane(async () => {
             try {

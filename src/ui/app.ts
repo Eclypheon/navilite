@@ -2129,15 +2129,20 @@ function songRow(
  * The playing track is marked wherever it appears in a list. Cheap and to the point: one
  * class toggle per visible row, driven from the player-bar update that already runs.
  */
-function updateRowHighlight(ctx: AppContext, shell: Shell): void {
+function updateRowHighlight(ctx: AppContext, shell: Shell, status?: EngineStatus): void {
   const current = ctx.queue?.currentSong?.id ?? null;
   /*
    * v1.9.0: while a tap is being answered, the row it landed on says so. The loading state has to
    * be visible *in the paint the tap produces* — a tap that shows nothing for seconds reads as a
    * dead screen — and `queue.isLoading` is true from that same synchronous paint until the engine
    * has the stream.
+   *
+   * v1.9.7 — the status is *handed in* when the caller has one. `updatePlayerBar` is called with the
+   * status on every event the engine emits (a dozen a second while playing) and then asked the
+   * engine for the same object again here; the render paths that call this without one still read
+   * it for themselves, because they have no status to pass.
    */
-  const loading = (ctx.queue?.isLoading ?? false) || ctx.engine.status().state === 'loading';
+  const loading = (ctx.queue?.isLoading ?? false) || (status ?? ctx.engine.status()).state === 'loading';
   if (current === shell.highlighted && loading === shell.highlightedLoading) {
     if (current !== null) markRows(ctx, current);
     return;
@@ -2179,7 +2184,7 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   shell.playerBar.classList.toggle('loading', loading);
   shell.nowOverlay.classList.toggle('loading', loading);
   shell.playerBar.classList.toggle('hidden', !visible);
-  updateRowHighlight(ctx, shell);
+  updateRowHighlight(ctx, shell, status);
   if (!visible) return;
 
   const coverUrl = ctx.library?.coverUrl(song.coverArt ?? song.albumId, 256) ?? null;
@@ -2199,8 +2204,20 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   shell.nowSubtitle.textContent = [song.artist, song.album].filter(Boolean).join(' · ');
   shell.nowContext.textContent = contextLine(ctx.queue);
 
-  replace(shell.barPlay, playIcon(status.state === 'playing'));
-  replace(shell.nowPlay, playIcon(status.state === 'playing', 26));
+  /*
+   * v1.9.7 — **the play glyph is rebuilt only when the playing-ness changed.**
+   *
+   * This runs on every status event, and while a track plays the player reports a dozen of those a
+   * second: two `replace()` calls (a `replaceChildren` and a fresh SVG each) to draw the same glyph
+   * again. The repeat button below already shows the pattern — the state is kept in `dataset` and the
+   * icon is rebuilt on the change, not on the event.
+   */
+  const playing = status.state === 'playing';
+  if (shell.barPlay.dataset.playing !== String(playing)) {
+    shell.barPlay.dataset.playing = String(playing);
+    replace(shell.barPlay, playIcon(playing));
+    replace(shell.nowPlay, playIcon(playing, 26));
+  }
 
   // Shuffle and repeat are state, not icons that lie: pressed = on, and repeat cycles
   // off → all → one with the icon following.
@@ -2274,8 +2291,19 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
     `adopt: ${status.adoptOutcome} · warm: ${status.warmedIds.length} · ` +
     `dropped: ${status.droppedEvents.inaudible} inaudible, ${status.droppedEvents.slotGrace} in a slot write · ${status.modeReason}`;
   const abnormal = status.state !== 'playing' || !status.spectrum;
-  shell.barChip.title = detail;
-  shell.barReason.textContent = abnormal ? detail : '';
+  /*
+   * v1.9.7 — **both writes are made only when the sentence changed.**
+   *
+   * This function runs on every status event and the player emits a dozen of them a second, so a
+   * playing track rewrote the same tooltip and the same (hidden) reason line sixty times a minute.
+   * The string itself is assembled in memory and costs nothing; the *writes* are what cost — the
+   * tooltip is one attribute write and the reason line is a text mutation the moment it is visible,
+   * which is exactly the state the reason line exists for. Compared against what is already set, and
+   * assigned only on a difference.
+   */
+  if (shell.barChip.title !== detail) shell.barChip.title = detail;
+  const reason = abnormal ? detail : '';
+  if (shell.barReason.textContent !== reason) shell.barReason.textContent = reason;
   shell.barReason.classList.toggle('hidden', !abnormal);
 
   shell.lyrics.position(positionMs);
