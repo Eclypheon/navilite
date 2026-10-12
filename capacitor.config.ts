@@ -32,4 +32,22 @@ const config: CapacitorConfig = {
   },
 };
 
+/*
+ * **The probe hook (v1.9.9).**
+ *
+ * `tools/device-probe.mjs --app <App.app>` drives the *installed app* inside the simulator, and the
+ * probe page it runs against is served by the mock (`node tools/mock-subsonic.mjs`). For the web view
+ * to be that page rather than the bundle, the build has to be made with `server.url` pointing at it —
+ * which is why the native-shell run has always needed a build of its own (docs/verification.md §12.6).
+ *
+ * Until now that meant editing this file and remembering to edit it back. It is an environment
+ * variable instead: the release builds (`npm run ipa:unsigned`, `npm run apk`) never set it, and
+ * `NAVILITE_PROBE_URL=http://localhost:4599 npm run ipa:simulator` is the whole of the probe build.
+ * The shipped bundle is checked for it after the fact all the same — see docs/verification.md.
+ */
+const probeUrl = process.env.NAVILITE_PROBE_URL;
+if (probeUrl) {
+  config.server = { url: probeUrl, cleartext: true };
+}
+
 export default config;

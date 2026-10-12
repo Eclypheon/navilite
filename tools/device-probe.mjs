@@ -307,6 +307,24 @@ function buildProbeBundle() {
           return partial;
         });
       }
+      if (cfg.scenario === 'queue' || cfg.scenario === 'queue-restored') {
+        /*
+         * v1.9.9 — the queue, the boundary with the app really away, and the two buttons.
+         *
+         * "queue" does the whole sequence (tap, next, previous twice, and a track end with the
+         * harness backgrounding the app). "queue-restored" only reads, and it is run after the
+         * harness has terminated the app and launched it again: the launch must be inert (nothing
+         * fetched, nothing played) and must not crash, which is what open-on-the-last-track did.
+         */
+        partial = { device: audit.DEVICE, environment: audit.environment(), states: {}, queueOnly: true };
+        beat('connected; ' + (cfg.scenario === 'queue' ? 'driving the queue and the transport' : 'reading a cold launch'));
+        var run = cfg.scenario === 'queue' ? audit.queueProbe() : audit.restoredProbe();
+        return run.then(function (probe) {
+          partial.queue = probe;
+          beat('the queue readings are taken');
+          return partial;
+        });
+      }
       if (cfg.scenario === 'focus') {
         /*
          * The owner's two reports, in real WebKit, on their own.

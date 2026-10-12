@@ -1180,6 +1180,284 @@
       });
   }
 
+  /**
+   * The queue, the boundary and the two buttons, from inside the shipping app (v1.9.9).
+   *
+   * The paths this reads exist only in the wrapped build with the native player: a tap that goes to
+   * AVFoundation, a track that ends **while the app is not running**, and the two transport buttons.
+   * It is run from the *app* in the simulator (`tools/device-probe.mjs --app …`), and the harness
+   * behind it (`tools/spectrum-roundtrip.mjs`) is what really backgrounds and relaunches the app in
+   * the middle — the beat it waits for is posted from here.
+   *
+   * What it records, in the order a person would do it:
+   *
+   *   (a) tap a row, and how long the first note took;
+   *   (b) the next button, and how long that took;
+   *   (c) previous inside the first three seconds — a different track;
+   *   (d) previous past three seconds — the same track, seeked back to its start (the rule that was
+   *       dead code in v1.9.8);
+   *   (e) a track end **with the app sent to the background by the harness**: the reading before the
+   *       gap and the reading after it, which is where a boundary taken by the phone's player shows
+   *       up as a different track.
+   */
+  function queueProbe(options) {
+    var opts = options || {};
+    var roundTripTimeoutMs = opts.roundTripTimeoutMs || 60000;
+    var result = { startedAt: new Date().toISOString(), tap: {}, next: {}, previous: {}, roundTrip: {} };
+    queueProbe.lastResult = result;
+
+    function sleep(ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    }
+
+    function api() {
+      return window.__navilite || null;
+    }
+
+    function status() {
+      var seam = api();
+      return seam ? seam.status() : null;
+    }
+
+    function track() {
+      var seam = api();
+      return seam && seam.playingRow ? seam.playingRow() : null;
+    }
+
+    function contextLine() {
+      var seam = api();
+      return seam && seam.context ? seam.context() : null;
+    }
+
+    /** Everything the report needs to say what was playing, in one place. */
+    function reading(label) {
+      var state = status();
+      return {
+        label: label,
+        at: Date.now(),
+        track: track(),
+        context: contextLine(),
+        state: state ? state.state : null,
+        backend: state ? state.backend : null,
+        positionMs: state ? Math.round(state.positionMs) : null,
+        durationMs: state ? Math.round(state.durationMs) : null,
+        reason: state ? state.modeReason : null,
+        nativeBoundary: state ? state.nativeBoundary : null,
+        warmedIds: state ? state.warmedIds : null,
+      };
+    }
+
+    function button(label) {
+      var node = document.querySelector('.playerbar button[aria-label="' + label + '"]') || document.querySelector('button[aria-label="' + label + '"]');
+      if (!node) return false;
+      node.click();
+      return true;
+    }
+
+    /** Set the seek bar's value and commit it, the way a finger lifting off it does. */
+    function seekTo(ratio) {
+      var input = document.querySelector('.playerbar input.progress') || document.querySelector('input.progress');
+      if (!input) return false;
+      input.value = String(Math.round(Math.max(0, Math.min(1, ratio)) * 1000));
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    /** Wait until the engine says it is playing, or the deadline runs out. */
+    function waitPlaying(deadlineMs) {
+      var started = Date.now();
+      return new Promise(function (resolve) {
+        var timer = setInterval(function () {
+          var state = status();
+          if (state && state.state === 'playing') {
+            clearInterval(timer);
+            resolve(Date.now() - started);
+            return;
+          }
+          if (Date.now() - started > deadlineMs) {
+            clearInterval(timer);
+            resolve(-1);
+          }
+        }, 50);
+      });
+    }
+
+    /** Wait until a different track is the one playing, or the deadline runs out. */
+    function waitTrackChange(before, deadlineMs) {
+      var started = Date.now();
+      return new Promise(function (resolve) {
+        var timer = setInterval(function () {
+          var now = track();
+          if (now && now !== before) {
+            clearInterval(timer);
+            resolve(Date.now() - started);
+            return;
+          }
+          if (Date.now() - started > deadlineMs) {
+            clearInterval(timer);
+            resolve(-1);
+          }
+        }, 50);
+      });
+    }
+
+    var realEvents = [];
+    function onVisibility() {
+      realEvents.push({ hidden: document.hidden, at: Date.now() });
+    }
+
+    /** The harness backgrounds and relaunches the app; this resolves when it is back. */
+    function waitForRoundTrip() {
+      var started = Date.now();
+      return new Promise(function (resolve) {
+        var timer = setInterval(function () {
+          var hidden = realEvents.some(function (event) {
+            return event.hidden;
+          });
+          var shownAgain = hidden && realEvents[realEvents.length - 1].hidden === false;
+          if (shownAgain) {
+            clearInterval(timer);
+            resolve({ real: true, events: realEvents.slice(), waitedMs: Date.now() - started });
+            return;
+          }
+          if (Date.now() - started > roundTripTimeoutMs) {
+            clearInterval(timer);
+            resolve({ real: false, events: realEvents.slice(), waitedMs: Date.now() - started });
+          }
+        }, 250);
+      });
+    }
+
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return waitFor("Boolean(window.__navilite && window.__navilite.libraryReady())", 'the library to be connected', 30000)
+      .then(function () {
+        location.hash = '#/album/album-ja-1';
+        return waitFor("document.querySelectorAll('.row.song').length > 0", 'the stress album', 20000);
+      })
+      .then(function () {
+        /* (a) A tap, the way a person does it. */
+        result.tap.tappedAt = Date.now();
+        result.tap.target = playRow(0);
+        return sleep(120).then(function () {
+          result.tap.state120ms = status() ? status().state : null;
+          return waitPlaying(30000);
+        });
+      })
+      .then(function (msToPlaying) {
+        result.tap.msToPlaying = msToPlaying;
+        result.tap.after = reading('after the tap');
+        /* (b) The next button. */
+        result.next.before = reading('before next');
+        result.next.clicked = button('Next');
+        return waitTrackChange(result.next.before.track, 30000);
+      })
+      .then(function (msToChange) {
+        result.next.msToChange = msToChange;
+        result.next.after = reading('after next');
+        /* (c) Previous inside the first three seconds: a different track again. */
+        result.previous.earlyBefore = reading('before previous (inside three seconds)');
+        result.previous.earlyClicked = button('Previous');
+        return waitTrackChange(result.previous.earlyBefore.track, 30000).then(function (ms) {
+          result.previous.earlyMsToChange = ms;
+        });
+      })
+      .then(function () {
+        result.previous.earlyAfter = reading('after previous (inside three seconds)');
+        /*
+         * (d) Now wait until this track is past three seconds and press previous again: the rule is
+         * "restart this one", so the track must NOT change and the position must fall.
+         */
+        return new Promise(function (resolve) {
+          var started = Date.now();
+          var timer = setInterval(function () {
+            var state = status();
+            if ((state && state.positionMs > 3500) || Date.now() - started > 20000) {
+              clearInterval(timer);
+              resolve();
+            }
+          }, 100);
+        });
+      })
+      .then(function () {
+        result.previous.lateBefore = reading('before previous (past three seconds)');
+        result.previous.lateClicked = button('Previous');
+        return sleep(800).then(function () {
+          result.previous.lateAfter = reading('after previous (past three seconds)');
+        });
+      })
+      .then(function () {
+        /*
+         * (e) The boundary, with the app really away. The track is seeked to four seconds from its
+         * end, the harness is told the reading is held, and it backgrounds the app long enough for
+         * the track to end while nothing is looking. What comes back is the reading after the
+         * return: a different track there is a boundary the phone's player took by itself.
+         */
+        result.roundTrip.before = reading('before the app was backgrounded');
+        var duration = status() ? status().durationMs : 0;
+        seekTo(duration > 8000 ? 1 - 4000 / duration : 0.8);
+        return sleep(600).then(function () {
+          result.roundTrip.positionAfterSeek = reading('after the seek');
+          try {
+            fetch('/__report', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ progress: 'ready for the foreground round trip', at: new Date().toISOString() }),
+            });
+          } catch (error) {
+            void error;
+          }
+          return waitForRoundTrip();
+        });
+      })
+      .then(function (events) {
+        result.roundTrip.driver = events.real
+          ? 'the harness, with the app really backgrounded and relaunched'
+          : 'nothing backgrounded the app: no real visibility round trip arrived';
+        result.roundTrip.events = events.events;
+        return sleep(2500);
+      })
+      .then(function () {
+        result.roundTrip.after = reading('after the app came back');
+        result.roundTrip.trackChanged =
+          Boolean(result.roundTrip.before.track) && result.roundTrip.after.track !== result.roundTrip.before.track;
+        document.removeEventListener('visibilitychange', onVisibility);
+        return result;
+      });
+  }
+
+  /**
+   * The same seam, read **without touching anything**: what a cold launch looks like (v1.9.9).
+   *
+   * The launch must be inert — the queue restored, nothing fetched, nothing played, no crash — so
+   * this scenario only reads. It is run after the harness has *terminated* the app and launched it
+   * again, which is exactly the sequence that used to crash-loop.
+   */
+  function restoredProbe() {
+    var result = { startedAt: new Date().toISOString() };
+    return waitFor("Boolean(window.__navilite && window.__navilite.libraryReady())", 'the library to be connected', 30000)
+      .then(function () {
+        return new Promise(function (resolve) {
+          setTimeout(resolve, 3000);
+        });
+      })
+      .then(function () {
+        var state = window.__navilite.status();
+        result.state = state.state;
+        result.backend = state.backend;
+        result.positionMs = Math.round(state.positionMs);
+        result.durationMs = Math.round(state.durationMs);
+        result.playingRow = window.__navilite.playingRow();
+        result.context = window.__navilite.context();
+        result.reason = state.modeReason;
+        result.nativeBoundary = state.nativeBoundary;
+        return result;
+      });
+  }
+
   /** A gesture in progress: finger down, moved sideways, not yet lifted. */
   function beginSwipe(selector) {
     var target = document.querySelector(selector);
@@ -2398,6 +2676,9 @@
     spectrumSnapshot: spectrumSnapshot,
     silenceAudio: silenceAudio,
     nativeSpectrumProbe: nativeSpectrumProbe,
+    // v1.9.9: the queue, the two buttons and the boundary taken with the app really away.
+    queueProbe: queueProbe,
+    restoredProbe: restoredProbe,
     waitFor: waitFor,
     walk: walk,
     // v1.4: the scroll-containment readings and the self-driven scenario.
