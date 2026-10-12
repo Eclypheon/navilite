@@ -844,7 +844,19 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         if !entry.artist.isEmpty { info[MPMediaItemPropertyArtist] = entry.artist }
         if !entry.album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = entry.album }
         let player = found.player
-        let duration = player.currentItem?.duration.seconds ?? 0
+        /*
+         * The duration, and **only from an item that has already been inspected (v1.9.11)**.
+         *
+         * `AVPlayerItem.duration` on an item whose asset has not been loaded is a synchronous
+         * question to the media server over XPC, on the thread that asks it — and this method runs on
+         * the main thread, is written once and then re-written every 150 ms for up to `cardDeadline`
+         * seconds after every start. That is the main thread held across a network round trip at
+         * every boundary and every skip, which is the hang and the `0x8BADF00D` kill in the log the
+         * owner sent. A card with no duration is the state this method already handles — it answers
+         * `known: false`, which is what keeps the refresh going until AVFoundation has one.
+         */
+        let item = player.currentItem
+        let duration = item?.status == .readyToPlay ? (item?.duration.seconds ?? 0) : 0
         let known = duration.isFinite && duration > 0
         if known { info[MPMediaItemPropertyPlaybackDuration] = duration }
         let elapsed = player.currentTime().seconds

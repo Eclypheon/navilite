@@ -308,4 +308,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The lock screen shows how long the song is, from the moment it starts — the scrubber is right without you pressing anything first. The card it had carried the name and the artist but no length at all: the length is asked for in the same breath as the song starting, before the player knows it, and nothing ever went back for it.',
       ],
     },
+    {
+      version: '1.9.11',
+      date: '2026-10-13',
+      items: [
+        "A song that ends goes straight into the next one, with nothing thrown away in between. At the end of every song the app was emptying the phone's player and fetching the next song from the beginning — that is the moment you described, where it pauses and then sits there with no songs loaded — and it dropped the songs it had already got ready while it did it, which is the prewarming you asked for being spent for nothing. The next song is handed over from what is already loaded on the player now, and the song it replaces is only let go once the new one is playing, so the player is never empty and the lock screen never has to show nothing.",
+        "No more freezing, and no more being closed by the phone, when you skip ahead a few songs quickly. The app was asking the phone's player about the incoming song — how long it is, which track it is — in a way that waits for an answer from your server, and it was asking on the one thread that must never wait for anything. It asks those questions the way that does not wait now, so a fast run of skips can no longer lock the app up.",
+      ],
+    },
   ];

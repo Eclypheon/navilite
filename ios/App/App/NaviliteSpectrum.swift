@@ -198,31 +198,34 @@ final class AudibleSpectrumTap {
     /* -------------------------------------------------------------------- the track */
 
     /**
-     * The audio track of `item`, **awaited** — never blocking the calling thread (v1.9.1).
+     * The audio track of `item`, **awaited** — and the only track list this file ever reads (v1.9.11).
      *
-     * The item's own track list is the cheap answer and the one used first: it is populated as the
-     * item becomes ready, so on a player that is already playing it costs nothing and needs no
-     * network round trip of its own. The asset's track list is the fallback for an item that is
-     * ready but whose `tracks` has not been built yet.
-     *
-     * Until v1.9.1 that fallback was `item.asset.tracks(withMediaType:)` — the deprecated
+     * Until v1.9.1 the fallback below was `item.asset.tracks(withMediaType:)` — the deprecated
      * **synchronous** accessor, which blocks until AVFoundation has loaded the asset, over the
-     * network, on the very stream that is starting. Called from `install` on the main thread, that
-     * one line put every JS callback, every tap and the plugin's own `play` call behind a cold fetch
-     * of the new track, which is why an autoplay after a finished track was *slower* than a tap from
-     * cold and why the bars stayed dark while it was. Nothing in this file blocks any more: the
-     * modern `loadTracks` is awaited, so the main thread carries on and the bars arrive when the
-     * track is known.
+     * network, on the very stream that is starting. Called from `install`, that one line put every JS
+     * callback, every tap and the plugin's own `play` call behind a cold fetch of the new track, which
+     * is why an autoplay after a finished track was *slower* than a tap from cold and why the bars
+     * stayed dark while it was.
+     *
+     * v1.9.1 replaced that with `loadTracks`, but kept `AVPlayerItem.tracks` in front of it as "the
+     * free half" — the item's own list, which is populated as the item becomes ready. **It is not
+     * free, and it is what took the app down**: the owner's own device log shows the main thread
+     * inside a synchronous round trip to the media server,
+     *
+     *     AVPlayerItem.tracks -> AVAsset tracksWithMediaType: -> AVURLAsset tracks
+     *       -> AVFigAssetInspector trackCount -> remoteXPCAsset_CopyProperty
+     *       -> xpc_connection_send_message_with_reply_sync -> mach_msg2_trap
+     *
+     * which on a remote item that has not been inspected yet is a network round trip that never
+     * answers, and FRONTBOARD then kills the app for it (`0x8BADF00D`, "failed to terminate
+     * gracefully"). So there is no shortcut any more: every track list this app reads comes from the
+     * **async** property API (`load(_:)` / `loadTracks`), which yields instead of blocking, and the
+     * item's own list is never touched. Nothing in this file reads a property of a remote asset
+     * synchronously.
      */
     static func audioTrack(of item: AVPlayerItem) async -> AVAssetTrack? {
-        if let track = knownAudioTrack(of: item) { return track }
         let tracks = try? await item.asset.loadTracks(withMediaType: .audio)
         return tracks?.first
-    }
-
-    /// The item's own track list, when it has already been built — the free half of the above.
-    static func knownAudioTrack(of item: AVPlayerItem) -> AVAssetTrack? {
-        item.tracks.compactMap({ $0.assetTrack }).first(where: { $0.mediaType == .audio })
     }
 
     /* ------------------------------------------------------------------ attachment */
@@ -782,6 +785,15 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
          * kept — an item that has just been created genuinely has no track list for a moment —
          * but every step of it yields the main thread instead of holding it, which is what put
          * the new stream's cold fetch in front of the play call that was waiting on it.
+         *
+         * v1.9.11 — **and the executor is deliberately left exactly as it was.** The synchronous
+         * accessor above is gone, so there is no longer any call on this path that blocks the thread
+         * it runs on: the install now awaits an async property load and nothing else. Moving this hop
+         * (`Task` -> `Task.detached`) would change *which* thread writes `item.audioMix`, and a second
+         * writer of that property is a race this app has already diagnosed once — the install writing
+         * the mix while `stop`/`detach` clears it. The rule the owner set is that nothing may block the
+         * main thread, and the way it is kept here is by removing the blocking call rather than by
+         * relocating the code around it.
          */
         Task { [weak self] in
             await self?.install(call: call, player: player, assetId: assetId, requested: requested, generation: generation, waited: 0)
@@ -991,6 +1003,24 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
      * as a promise about the future.
      */
     static func hasEnded(_ item: AVPlayerItem) -> Bool {
+        /*
+         * **And it is only asked of an item that has already been inspected (v1.9.11).**
+         *
+         * `item.duration` is not a stored number: on an item whose asset has not been loaded it is a
+         * question put to the media server, and on a remote item that question is asked
+         * *synchronously* — the same `remoteXPCAsset_CopyProperty` round trip over XPC that the
+         * track list costs, in the crash report the owner sent. This function is called from the
+         * main thread by `WarmAttempt` and by `NaviliteRemote.playSlot`, on items that may have only
+         * just been created, so it was the app asking that question on the main thread at every
+         * boundary and every skip.
+         *
+         * `.readyToPlay` is the fact that says the question has already been answered: an item is not
+         * ready until AVFoundation has inspected its asset. So an item that is not ready is answered
+         * here without touching the asset at all — and it is the right answer, because an item that
+         * cannot be started cannot have ended. Every caller keeps its own ready-to-play precondition
+         * as well, so this changes nothing about which items are refused.
+         */
+        guard item.status == .readyToPlay else { return false }
         let duration = item.duration.seconds
         guard duration.isFinite, duration > 0 else { return false }
         let position = item.currentTime().seconds

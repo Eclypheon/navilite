@@ -2248,9 +2248,19 @@ export class AudioEngine {
          * `load` clears the bridge's own pool for the same reason — so the claim map is cleared with
          * it. What is left is nothing claiming anything, which is the state a selection has to
          * leave behind; the queue warms the new neighbourhood as soon as this start has sound.
+         *
+         * v1.9.11 — **and the load is no longer a cold fetch by definition.** It is asked, and then
+         * the reason line is written from its own answer: the bridge hands over to a slot that already
+         * holds this track (the armed next item becoming current from its own buffered state, which is
+         * the boundary this release is about), it writes the incoming track beside the one being heard
+         * when it has to fetch, or it finds the track already audible and has nothing to do. The
+         * engine's own claim being gone — a timed-out prepare, a prune — is no longer the same thing as
+         * the player not holding the track, and reporting it as a fetch was the last place the app
+         * still described the boundary as a reload.
          */
         this.warmed.clear();
         await bridge.load(track);
+        this.adoptOutcome = bridge.loadOutcome?.() ?? this.adoptOutcome;
         /*
          * **The guard the review found missing: two rapid plays of two different tracks race here.**
          *
