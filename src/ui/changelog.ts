@@ -300,4 +300,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The next and previous buttons on the lock screen now work while the app is in the background, and going back works more than once.',
       ],
     },
+    {
+      version: '1.9.10',
+      date: '2026-10-13',
+      items: [
+        'The app no longer closes itself on your way back into it after a song ended while it was in your pocket, and no longer closes when you skip ahead a few songs in a row. Both were one fault: it was asking the phone\'s player for something about a song the player had already moved on from — one that had finished, one that had failed to load, or one the next song had already replaced — and a question like that is answered by taking the app down. Nothing is asked of a song now unless the player itself says that song is loaded, has not already been played to its end, and is still the song the player is holding.',
+        'The lock screen shows how long the song is, from the moment it starts — the scrubber is right without you pressing anything first. The card it had carried the name and the artist but no length at all: the length is asked for in the same breath as the song starting, before the player knows it, and nothing ever went back for it.',
+      ],
+    },
   ];

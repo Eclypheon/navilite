@@ -200,3 +200,8 @@ Plain language, user-visible changes only. The app shows this same list under
 - A song you are waiting for is never a smaller copy of the file on your server. The app was still asking for a lower-quality version for the next songs and then playing it, so on a slow connection the song you tapped was quietly the reduced one.
 - Opening the app no longer starts playing by itself. It comes up where you left it — same queue, same song, same second — and one tap on play carries on from there.
 - The next and previous buttons on the lock screen now work while the app is in the background, and going back works more than once.
+
+## 1.9.10 — 2026-10-13
+
+- The app no longer closes itself on your way back into it after a song ended while it was in your pocket, and no longer closes when you skip ahead a few songs in a row. Both were one fault: it was asking the phone's player for something about a song the player had already moved on from — one that had finished, one that had failed to load, or one the next song had already replaced — and a question like that is answered by taking the app down. Nothing is asked of a song now unless the player itself says that song is loaded, has not already been played to its end, and is still the song the player is holding.
+- The lock screen shows how long the song is, from the moment it starts — the scrubber is right without you pressing anything first. The card it had carried the name and the artist but no length at all: the length is asked for in the same breath as the song starting, before the player knows it, and nothing ever went back for it.

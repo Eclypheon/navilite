@@ -12,8 +12,10 @@ import MediaPlayer
  * publishes the Now Playing card and targets `MPRemoteCommandCenter` — for **play, pause, stop,
  * toggle, skip-15s and scrub**. It does not enable `nextTrackCommand` / `previousTrackCommand`, so a
  * lock screen driven by that plugin alone has no next/previous buttons. Those two buttons are what
- * this plugin added first, and nothing else: it must not touch the session category or the Now
- * Playing card, because two writers on one session is exactly how the transport goes dead.
+ * this plugin added first, and — since v1.9.10 — the Now **Playing** card as well (see the v1.9.10
+ * section below), because the vendor's own writer publishes a duration in the same turn as the play,
+ * before the item has one, and never comes back to correct it. It still never touches the session
+ * *category*: two writers on the session is exactly how the transport goes dead.
  *
  * `activateSession()` is the second half: after a call, Siri, or another app taking the session, iOS
  * deactivates ours, and re-activating it is the documented fix for "playback looks fine but the
@@ -61,6 +63,39 @@ import MediaPlayer
  *     `advanceFailed` with the reason, both of which the app adopts or recovers from. A boundary that
  *     happens without the app knowing is a boundary the app must be able to catch up with, which is
  *     what `now()` is for.
+ *
+ * ## v1.9.10 — every precondition, and a duration on the card
+ *
+ * The owner's two reports off 1.9.9 — *"it crashes when i go back to the app after the song ends in
+ * the background"*, and *"sometimes skipping ahead a few songs in a row causes the app to crash"* —
+ * are one shape: an AVFoundation operation issued against an item whose state has moved on. A guard
+ * that excludes only `.failed` is not that guard. So **every** call this file makes against an item
+ * or a player is now conditional on the whole precondition at once:
+ *
+ *   - the item must be `.readyToPlay` **and** the player must be (the pair `preroll` and a start
+ *     need, and the pair 1.9.8 played without looking at);
+ *   - the item must **not have played to its end** — `status` stays `.readyToPlay` for the whole life
+ *     of an item, so by status alone an item that finished an hour ago reads like a fresh one;
+ *   - the item must still be **the player's own item** (a slot is replaced under a warm when a new
+ *     track goes into it, and the item then belongs to nothing this side is holding);
+ *   - and the work must belong to the **statement it was started under**. `setQueue` carries a
+ *     generation the app bumps on every statement; it is captured when a boundary is taken and
+ *     re-checked at each call that follows, including at every rung of the fetch's own poll, so a
+ *     queue the app has replaced can never be advanced, fetched or played by work that predates it.
+ *
+ * The checks are made in the same turn, on the main thread, immediately before the call they guard,
+ * which is what makes this *impossible* rather than merely unlikely: nothing can run between the
+ * check and the call it protects.
+ *
+ * The card is the third fix. The vendor publishes `MPNowPlayingInfoCenter` once, in the same turn as
+ * its own `play`, with a duration read from an item that has not resolved one yet — and it never
+ * republishes, so the scrubber shows dashes until something else happens to fill it in. This side now
+ * publishes the card itself: the entry it is playing (the same list the boundary is walked over), the
+ * item's own duration when it is known, the player's own position, and its own rate. It **merges**
+ * into the existing dictionary (artwork and everything else the vendor put there survive), it
+ * republishes for a short window afterwards so the vendor's own zero-duration write cannot be the
+ * last word, and it keeps republishing while the duration is still indefinite — which is the one
+ * fact that arrives late.
  *
  * The play itself goes through the audio plugin's **own** method (`play(assetId:time:)`), through
  * the Objective-C runtime: that call is what keeps the plugin's bookkeeping — the asset it believes
@@ -113,7 +148,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private var index = -1
     /// `off` | `all` | `one`, as the app's repeat button says.
     private var repeatMode = "off"
-    /// The number of the statement this queue came from, for the reason line only.
+    /// The number of the statement this queue came from (v1.9.10: **compared**, not merely kept).
+    ///
+    /// The app bumps it on every statement it publishes, and every boundary taken here captures it.
+    /// It is re-checked immediately before each AVFoundation call that follows — the fetch's preload,
+    /// every rung of its readiness poll, and the play itself — so work that belongs to a queue the app
+    /// has since replaced can never reach an item (v1.9.10).
     private var generation = 0
     /// The slot the app last told us is playing, and the track it holds. A **statement**, re-made by
     /// the app after every start, every warm and every visibility change — see `setQueue`.
@@ -143,6 +183,20 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private static let fetchDeadline = 12.0
     /// How often a fetched slot is asked whether it can start yet.
     private static let fetchStep = 0.1
+
+    /* --------------------------------------------------- the lock-screen card (v1.9.10) */
+
+    /// How often the card is refreshed after a state change, and at least how long it is refreshed
+    /// for. The grace is what makes this side's write the last one: the vendor's own writer publishes
+    /// a duration-less card in the same turn as its `play`, and a single write here could land under
+    /// it.
+    private static let cardStep = 0.25
+    private static let cardGrace = 0.75
+    /// The outside of the refresh — long enough for an indefinite item to resolve a duration, short
+    /// enough that nothing here writes to the card for a whole track.
+    private static let cardDeadline = 8.0
+    /// Which refresh is current; a newer one retires the older one's ladder.
+    private var cardTicket = 0
 
     private static let playSelector = NSSelectorFromString("play:")
     private static let preloadSelector = NSSelectorFromString("preload:")
@@ -228,6 +282,10 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      * start, every warm and every lifecycle change, so nothing here can be left half-applied by a
      * message that did not arrive — and there is no flag that could stick. An empty list is how the
      * app says "there is no queue" (it stopped, or it was cleared), and it disarms the boundary.
+     *
+     * It is also the app's own answer to "which track is on", which is what makes it the moment to
+     * write the lock-screen card (v1.9.10): the entry, the item's own duration, the position and the
+     * rate, from the list the boundary is walked over. Every state change the app reports re-writes it.
      */
     @objc func setQueue(_ call: CAPPluginCall) {
         let entries = (call.getArray("list") as? [[String: Any]]) ?? []
@@ -276,6 +334,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                     : self.awake
                         ? "the app is on screen, so the web layer takes the track boundary and this side is only told what follows"
                         : "the native player will play this queue itself if a track ends while the app is away (\(self.queue.count) entries, entry \(self.index + 1) playing)"
+            // The lock-screen card, written from the statement the app has just made (v1.9.10).
+            self.refreshNowPlaying()
             call.resolve([
                 "queued": self.queue.count,
                 "index": self.index,
@@ -359,7 +419,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             reason = "the app was on screen, so the web layer took the track boundary as it always has"
             return
         }
-        takeNext(how: "the track ended while the app was away", automatic: true)
+        /*
+         * The statement in force at this moment travels with the boundary (v1.9.10). Everything the
+         * advance goes on to do — a fetch, each rung of its readiness poll, the play — re-checks it, so
+         * a queue the app replaces while this is in flight can no longer be advanced into.
+         */
+        takeNext(how: "the track ended while the app was away", automatic: true, token: generation)
     }
 
     /// The lock screen's next button, when there is a published queue to take it with.
@@ -370,7 +435,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          * A button is not the end of a queue: on the last entry it wraps to the top, which is the
          * rule the app's own `next` has always had ("a button should always do something").
          */
-        return takeNext(how: "the lock screen's next", automatic: false)
+        return takeNext(how: "the lock screen's next", automatic: false, token: generation)
     }
 
     /// And its back button. With the app awake the web layer's own rule applies (under three seconds
@@ -379,17 +444,19 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// press, so a second press on the lock screen did nothing at all.
     private func previousIfAble() -> Bool {
         guard !awake, index >= 0, index < queue.count else { return false }
+        let token = generation
         guard index > 0 else {
             // At the top of the queue: previous restarts this track rather than wrapping.
             let entry = queue[index]
-            guard playSlot(entry: entry, slot: audible?.assetId, time: 0, how: "the lock screen's previous") else {
+            guard playSlot(entry: entry, slot: audible?.assetId, time: 0, how: "the lock screen's previous", token: token) else {
                 return false
             }
             reason = "the lock screen asked for the previous track; this is the first entry of the queue, so the native player restarted it"
             notifyListeners("advanced", data: ["songId": entry.songId, "assetId": audible?.assetId ?? "", "index": index])
+            refreshNowPlaying()
             return true
         }
-        return take(entry: index - 1, how: "the lock screen's previous")
+        return take(entry: index - 1, how: "the lock screen's previous", token: token)
     }
 
     /// Take the boundary: the next entry in the published order, or a reason it could not be taken.
@@ -397,7 +464,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// This is the whole of "no boundary is uncrossable": the target is an entry of a list this side
     /// holds, so the only thing that can stop it is the entry itself failing to load — and that says
     /// so, on the screen, instead of silence.
-    private func takeNext(how: String, automatic: Bool) -> Bool {
+    private func takeNext(how: String, automatic: Bool, token: Int) -> Bool {
         guard index >= 0, index < queue.count else {
             fail("\(how): no track was published as playing, so there was nothing to advance from")
             return false
@@ -407,7 +474,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             switch repeatMode {
             case "one":
                 // The same entry again, which is what the app's own repeat-one advance does.
-                return take(entry: index, how: "\(how) (repeat one)", restart: true)
+                return take(entry: index, how: "\(how) (repeat one)", restart: true, token: token)
             case "all":
                 target = 0
             default:
@@ -419,7 +486,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 target = 0
             }
         }
-        return take(entry: target, how: how)
+        return take(entry: target, how: how, token: token)
     }
 
     /**
@@ -427,7 +494,14 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      * this side's own fetched one), and, when nothing holds it, by **fetching it here**.
      */
     @discardableResult
-    private func take(entry target: Int, how: String, restart: Bool = false) -> Bool {
+    private func take(entry target: Int, how: String, restart: Bool = false, token: Int) -> Bool {
+        /*
+         * **The statement this boundary came from is checked before anything is issued (v1.9.10).**
+         * The app re-states the queue — and with it the index and the slots — on every start and every
+         * visibility change, so a boundary that was taken under one statement may not still be a
+         * boundary under the next one.
+         */
+        guard current(token: token) else { return false }
         guard target >= 0, target < queue.count else {
             fail("\(how): the entry it points at is not in the published queue")
             return false
@@ -435,7 +509,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         let entry = queue[target]
         let slot = holding(entry.songId)
         if let slot {
-            if playSlot(entry: entry, slot: slot, time: 0, how: how) {
+            if playSlot(entry: entry, slot: slot, time: 0, how: how, token: token) {
                 commit(target: target, slot: slot, entry: entry, how: how)
                 return true
             }
@@ -452,7 +526,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             fail("\(how): there is nothing on the player to restart")
             return false
         }
-        return fetch(entry: target, how: how)
+        return fetch(entry: target, how: how, token: token)
     }
 
     /// The slot holding an entry, if anything does: the app's own warm slot for it, or this side's
@@ -475,7 +549,13 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      * the state 1.9.8 played without looking at (which is the crash: a play issued on an item that
      * was not ready).
      */
-    private func fetch(entry target: Int, how: String) -> Bool {
+    private func fetch(entry target: Int, how: String, token: Int) -> Bool {
+        /*
+         * A fetch loads a track into a slot of this side's own, over the network (v1.9.10): if the
+         * statement that asked for it has been replaced, the slot it would fill belongs to a queue
+         * nobody is walking any more, so nothing is loaded at all.
+         */
+        guard current(token: token) else { return false }
         guard let plugin = bridge?.plugin(withName: Self.audioPluginName) else {
             fail("\(how): the audio plugin is not on the bridge, so the next track could not be fetched here")
             return false
@@ -488,7 +568,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         }
         fetchWindow = (slot, entry.songId)
         reason = "\(how): nothing held \(entry.songId), so the native player is fetching it here"
-        awaitReady(slot: slot, entry: entry, target: target, how: how, waited: 0)
+        awaitReady(slot: slot, entry: entry, target: target, how: how, waited: 0, token: token)
         return true
     }
 
@@ -508,14 +588,26 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      * round: instead of `preroll` on an item that has not resolved, this is a plain poll of the two
      * states AVFoundation exposes, and the play happens when they say they are ready.
      */
-    private func awaitReady(slot: String, entry: Entry, target: Int, how: String, waited: Double) {
+    private func awaitReady(slot: String, entry: Entry, target: Int, how: String, waited: Double, token: Int) {
+        /*
+         * **Every rung of this poll is checked against the statement it started under (v1.9.10).**
+         * This is the one place in the file where a fetch is in flight across turns of the run loop,
+         * so it is the one place the app can genuinely get in first: `setQueue` is a statement, not an
+         * increment, and a statement that has landed means the slot, the index and the entry this poll
+         * is holding are all from a queue nobody is playing. Nothing is played, and the fetch is
+         * reported as the boundary it no longer is.
+         */
+        guard current(token: token) else {
+            reason = "\(how): the app stated a new queue while \(entry.songId) was being fetched here, so nothing was played"
+            return
+        }
         guard let found = AudibleBridgePlayer.player(slot, from: bridge), let item = found.player.currentItem else {
             if waited >= Self.fetchDeadline {
                 fail("\(how): \(entry.songId) could not be fetched here within \(Self.fetchDeadline) s (the player holds no item for it)")
                 return
             }
             after(Self.fetchStep) { [weak self] in
-                self?.awaitReady(slot: slot, entry: entry, target: target, how: how, waited: waited + Self.fetchStep)
+                self?.awaitReady(slot: slot, entry: entry, target: target, how: how, waited: waited + Self.fetchStep, token: token)
             }
             return
         }
@@ -530,11 +622,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 return
             }
             after(Self.fetchStep) { [weak self] in
-                self?.awaitReady(slot: slot, entry: entry, target: target, how: how, waited: waited + Self.fetchStep)
+                self?.awaitReady(slot: slot, entry: entry, target: target, how: how, waited: waited + Self.fetchStep, token: token)
             }
             return
         }
-        if playSlot(entry: entry, slot: slot, time: 0, how: how) {
+        if playSlot(entry: entry, slot: slot, time: 0, how: how, token: token) {
             commit(target: target, slot: slot, entry: entry, how: how)
         } else {
             fail("\(how): \(entry.songId) was fetched here but the player refused to play it")
@@ -546,13 +638,19 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     }
 
     /// The entry played. The index, the audible slot and the app's own view of it all move together.
+    ///
+    /// No statement check of its own (v1.9.10): every caller reaches here in the **same turn of the
+    /// main thread** as the `playSlot` that succeeded — which is where the statement was checked — so
+    /// the check that let the play through is the check that applies here.
     private func commit(target: Int, slot: String, entry: Entry, how: String) {
         index = target
         audible = (slot, entry.songId)
         advances += 1
         reason = "\(how) — the native player is playing \(entry.songId) (entry \(target + 1) of \(queue.count))"
         notifyListeners("advanced", data: ["songId": entry.songId, "assetId": slot, "index": target])
-        preloadAhead()
+        // The card names the track that has just started, with the position and rate it starts at.
+        refreshNowPlaying()
+        preloadAhead(token: generation)
     }
 
     /**
@@ -560,7 +658,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      * fetch. This is the treadmill v1.9.8 was missing in the other direction: 1.9.8 waited for the
      * app to arm the next slot and had nothing to do when the app could not.
      */
-    private func preloadAhead() {
+    private func preloadAhead(token: Int) {
+        guard current(token: token) else { return }
         guard !awake, index >= 0, index < queue.count else { return }
         var target = index + 1
         if target >= queue.count {
@@ -605,18 +704,35 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         return true
     }
 
-    /// Play one entry from one named slot, **through the audio plugin's own `play(assetId:time:)`**.
-    ///
-    /// The runtime call is deliberate and it is the mirror image of the reflective read the spectrum
-    /// does: the slot is the plugin's asset, and the plugin's method is what keeps its own record of
-    /// which asset is playing, the Now Playing card and its position timer in step with the sound. A
-    /// write straight to the `AVPlayer` would make the lock screen name the track that just ended.
-    ///
-    /// The item's own state is checked first (v1.9.9): a slot that is not `.readyToPlay` is not
-    /// played, because issuing a start against an unready item is the class of call that took 1.9.8
-    /// down. A slot that cannot be played here answers `false`, and the caller fetches the entry
-    /// instead — never a silent stop.
-    private func playSlot(entry: Entry, slot: String?, time: Double, how: String) -> Bool {
+    /**
+     * Play one entry from one named slot, **through the audio plugin's own `play(assetId:time:)`**.
+     *
+     * The runtime call is deliberate and it is the mirror image of the reflective read the spectrum
+     * does: the slot is the plugin's asset, and the plugin's method is what keeps its own record of
+     * which asset is playing, the Now Playing card and its position timer in step with the sound. A
+     * write straight to the `AVPlayer` would make the lock screen name the track that just ended.
+     *
+     * **The whole precondition is checked first, in the same turn as the call (v1.9.10).** v1.9.9
+     * excluded only a `.failed` player or item, which is not the state a start needs and does not
+     * cover the two states that actually took the app down:
+     *
+     *   - the statement this play belongs to must still be the app's current one (`token`);
+     *   - the player and the item must both be `.readyToPlay` — the pair a start needs, and the pair
+     *     1.9.8 played without looking at;
+     *   - the item must still be **the player's own item**;
+     *   - the item must **not have played to its end**: `.readyToPlay` stays true for the whole life
+     *     of an item, so by status alone a finished track reads like a fresh one, and the owner's
+     *     "it crashes when i go back to the app after the song ends in the background" is exactly a
+     *     start issued against one.
+     *
+     * A slot that cannot be played here answers `false`, and the caller fetches the entry instead —
+     * never a silent stop.
+     */
+    private func playSlot(entry: Entry, slot: String?, time: Double, how: String, token: Int) -> Bool {
+        guard current(token: token) else {
+            reason = "\(how): the app has stated a new queue since this boundary was taken, so the player was not asked for \(entry.songId)"
+            return false
+        }
         guard let plugin = bridge?.plugin(withName: Self.audioPluginName) else {
             reason = "the audio plugin is not on the bridge, so \(how) could not be taken here"
             return false
@@ -629,8 +745,20 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             reason = "the slot the app named for \(entry.songId) holds no item, so \(how) could not be taken from it"
             return false
         }
-        guard item.status != .failed, found.player.status != .failed else {
-            reason = "the slot the app named for \(entry.songId) failed to load, so \(how) could not be taken from it"
+        /*
+         * The four facts that decide whether this item may be started, asked together and named in the
+         * reason: which state the player and the item are actually in, whether the item has ended, and
+         * whether it is still the player's own.
+         */
+        guard found.player.currentItem === item,
+              found.player.status == .readyToPlay,
+              item.status == .readyToPlay,
+              !NaviliteSpectrum.hasEnded(item) else {
+            reason = found.player.currentItem !== item
+                ? "the slot the app named for \(entry.songId) holds a different item now, so \(how) could not be taken from it"
+                : NaviliteSpectrum.hasEnded(item)
+                    ? "the slot the app named for \(entry.songId) has already played to its end, so \(how) could not be taken from it"
+                    : "the slot the app named for \(entry.songId) is not ready to start (player \(NaviliteSpectrum.statusName(found.player.status)), item \(NaviliteSpectrum.statusName(item.status))), so \(how) could not be taken from it"
             return false
         }
         guard plugin.responds(to: Self.playSelector), let method = plugin.method(for: Self.playSelector) else {
@@ -649,6 +777,81 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         play(plugin, Self.playSelector, call)
         reason = "\(how) — the native player was asked for \(entry.songId)"
         return true
+    }
+
+    /* ------------------------------------------------------ the statement, and the card */
+
+    /// Whether the statement a piece of work was started under is still the app's current one.
+    ///
+    /// Every boundary taken here captures `generation` and re-checks it immediately before the call it
+    /// guards — the fetch's preload, each rung of its readiness poll, the play — and the check and the
+    /// call are in the same turn of the main thread, so nothing can run between them (v1.9.10).
+    private func current(token: Int) -> Bool {
+        token == generation
+    }
+
+    /**
+     * Write the lock-screen card, and keep writing it until the one fact that arrives late has
+     * arrived (v1.9.10).
+     *
+     * The vendor's own writer publishes the card once, in the same turn as its `play`, with the
+     * duration of an item that has not resolved one yet — and never comes back. So the card showed no
+     * length at all until something else happened to fill it in, which is the owner's *"the lock
+     * screen could not show a duration"*. Two things fix it here: the write is repeated over a short
+     * window (so the vendor's duration-less write cannot be the last word), and it keeps being
+     * repeated while the duration is still indefinite, which is what makes it appear by itself the
+     * moment AVFoundation knows it — no seek button needed.
+     */
+    private func refreshNowPlaying() {
+        cardTicket += 1
+        let ticket = cardTicket
+        publishCard()
+        stepCard(ticket: ticket, waited: 0)
+    }
+
+    /// One rung of the refresh: write the card, and either stop or come back.
+    private func stepCard(ticket: Int, waited: Double) {
+        guard ticket == cardTicket, waited < Self.cardDeadline else { return }
+        after(Self.cardStep) { [weak self] in
+            guard let self, ticket == self.cardTicket else { return }
+            let known = self.publishCard()
+            // Everything is on the card once the duration is known and the grace has passed.
+            if known && waited >= Self.cardGrace { return }
+            self.stepCard(ticket: ticket, waited: waited + Self.cardStep)
+        }
+    }
+
+    /**
+     * One write of the card: the entry that is playing, the item's own duration when it has one, the
+     * player's own position, and its own rate.
+     *
+     * **Merged** into whatever is already there rather than replacing it, so the artwork the vendor
+     * loaded and anything else on the card survive this write. Answers whether the duration is known,
+     * which is what the refresh above stops on; a card with nothing to say is answered as known, so
+     * the refresh stops rather than writing nothing eight seconds long.
+     */
+    @discardableResult
+    private func publishCard() -> Bool {
+        guard let entry = (index >= 0 && index < queue.count) ? queue[index] : nil else { return true }
+        /*
+         * The player the card is about is the slot the app named as **audible** — never a warm slot and
+         * never a guess. Without one nothing here writes at all, and the card the vendor published
+         * stays exactly as it is, which is what every build before this one did.
+         */
+        guard let audible, let found = AudibleBridgePlayer.player(audible.assetId, from: bridge) else { return true }
+        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
+        if !entry.title.isEmpty { info[MPMediaItemPropertyTitle] = entry.title }
+        if !entry.artist.isEmpty { info[MPMediaItemPropertyArtist] = entry.artist }
+        if !entry.album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = entry.album }
+        let player = found.player
+        let duration = player.currentItem?.duration.seconds ?? 0
+        let known = duration.isFinite && duration > 0
+        if known { info[MPMediaItemPropertyPlaybackDuration] = duration }
+        let elapsed = player.currentTime().seconds
+        if elapsed.isFinite { info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed }
+        info[MPNowPlayingInfoPropertyPlaybackRate] = player.timeControlStatus == .playing ? 1.0 : 0.0
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        return known
     }
 
     /// A boundary that could not be taken, always with a reason (v1.9.9): the one thing this side may

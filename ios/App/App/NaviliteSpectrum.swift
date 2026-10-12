@@ -719,6 +719,12 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     /// to load cannot install itself over a newer one.
     private var generation = 0
 
+    /// Whether work that captured the generation `token` still belongs to the current request
+    /// (v1.9.10) — the test a `warmSlot` in flight makes before it asks the player for anything.
+    func isCurrent(generation token: Int) -> Bool {
+        token == generation
+    }
+
     /**
      * Begin analysing the audio the player is playing.
      *
@@ -929,7 +935,11 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
                 call.reject("the spectrum plugin is gone")
                 return
             }
-            WarmAttempt(call: call, assetId: assetId, minSeconds: minSeconds).start(plugin: self, seconds: seconds)
+            /*
+             * The generation goes with the attempt (v1.9.10): `start` and `stop` both bump it, and a
+             * warm that predates either is a warm for a slot nobody is on any more.
+             */
+            WarmAttempt(call: call, assetId: assetId, minSeconds: minSeconds, generation: self.generation).start(plugin: self, seconds: seconds)
         }
     }
 
@@ -963,6 +973,29 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
         default: return "not ready yet"
         }
     }
+
+    /// How close to its own duration an item's clock has to be before it counts as finished (v1.9.10).
+    static let endEpsilon = 0.05
+
+    /**
+     * Whether an item has already played to its end (v1.9.10).
+     *
+     * This is the precondition `status` cannot express. AVFoundation leaves an item at `.readyToPlay`
+     * for the whole of its life, so by status alone an item that finished an hour ago and an item that
+     * has not loaded a byte look the same — and both take the same code path into `preroll` or into a
+     * start, which is the class of call that took the app down twice for the owner. The two facts that
+     * do describe the end are the item's own clock and its own duration: a duration that is known, and
+     * a clock that has reached it. An item whose duration is not known yet cannot have ended.
+     *
+     * Every caller uses it the same way: as a refusal, in the same turn as the call it guards, never
+     * as a promise about the future.
+     */
+    static func hasEnded(_ item: AVPlayerItem) -> Bool {
+        let duration = item.duration.seconds
+        guard duration.isFinite, duration > 0 else { return false }
+        let position = item.currentTime().seconds
+        return position.isFinite && position >= duration - endEpsilon
+    }
 }
 
 /**
@@ -972,18 +1005,26 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
  * appearing (a preload that is still resolving), AVFoundation's own answer to `preroll`, and the
  * deadline. Whichever speaks first wins, the others are no-ops, and the answer always carries the
  * seconds of media the slot actually holds — never a claim about a player that was merely created.
+ *
+ * Since v1.9.10 it also carries the **generation** of the spectrum request it belongs to, and asks
+ * the plugin whether that is still the current one before it issues anything: `preroll` raises an
+ * exception rather than reporting an error, and the one thing that must never happen here is asking a
+ * player something on behalf of a request that has been superseded.
  */
 private final class WarmAttempt {
     private let call: CAPPluginCall
     private let assetId: String
     private let minSeconds: Double
+    /// The spectrum generation this attempt belongs to — see `NaviliteSpectrum.isCurrent(generation:)`.
+    private let generation: Int
     private var answered = false
     private var waited = 0.0
 
-    init(call: CAPPluginCall, assetId: String, minSeconds: Double) {
+    init(call: CAPPluginCall, assetId: String, minSeconds: Double, generation: Int) {
         self.call = call
         self.assetId = assetId
         self.minSeconds = minSeconds
+        self.generation = generation
     }
 
     func start(plugin: NaviliteSpectrum, seconds: Double) {
@@ -997,6 +1038,60 @@ private final class WarmAttempt {
             DispatchQueue.main.asyncAfter(deadline: .now() + NaviliteSpectrum.warmStep) { [weak self] in
                 self?.start(plugin: plugin, seconds: seconds)
             }
+            return
+        }
+        /*
+         * **The statement check comes first (v1.9.10)**, before a single property is written or a
+         * single call is made: `start` and `stop` both bump the generation, and a warm that belongs to
+         * a request the app has already superseded is a warm for a slot nobody is on any more. Answered
+         * rather than dropped, so the caller is told instead of waiting out its own timeout.
+         */
+        guard plugin.isCurrent(generation: generation) else {
+            answer(
+                buffered: false,
+                seconds: NaviliteSpectrum.bufferedSeconds(item),
+                ready: false,
+                reason: "a newer spectrum request superseded this warm, so nothing was asked of the player"
+            )
+            return
+        }
+        /*
+         * **And the item this attempt is holding must still be the slot's own item (v1.9.10).** A slot
+         * is replaced under a warm — a new track is loaded into it, or the app unloads it — and an item
+         * that has been replaced is not the item any of this is about: the player would be asked about
+         * one item and judged on another. Not an answer, a wait: the slot is re-read next rung and the
+         * item that is there now is judged then, under the same deadline as everything else here.
+         */
+        guard found.player.currentItem === item else {
+            guard waited < NaviliteSpectrum.warmDeadline else {
+                answer(
+                    buffered: false,
+                    seconds: NaviliteSpectrum.bufferedSeconds(item),
+                    ready: false,
+                    reason: "the slot's item was replaced while it was being warmed, so it was never asked to start"
+                )
+                return
+            }
+            waited += NaviliteSpectrum.warmStep
+            DispatchQueue.main.asyncAfter(deadline: .now() + NaviliteSpectrum.warmStep) { [weak self] in
+                self?.start(plugin: plugin, seconds: seconds)
+            }
+            return
+        }
+        /*
+         * **And it must not have finished already (v1.9.10).** `.readyToPlay` does not describe this at
+         * all — it stays true for the whole life of an item, so an item whose track played to its end
+         * an hour ago reads exactly like a fresh one — and asking `preroll` of a player whose item has
+         * already reached its end is asking for something it cannot give: the same class of call that
+         * took 1.9.8 down. Answered, never asked.
+         */
+        guard !NaviliteSpectrum.hasEnded(item) else {
+            answer(
+                buffered: false,
+                seconds: NaviliteSpectrum.bufferedSeconds(item),
+                ready: false,
+                reason: "the slot's item has already played to its end, so it was never asked to start"
+            )
             return
         }
         item.preferredForwardBufferDuration = max(1, seconds)
@@ -1022,6 +1117,12 @@ private final class WarmAttempt {
          *
          * This is the same shape as the rest of this plugin: a measurement, or a reason, never a
          * crash and never a silence.
+         *
+         * v1.9.10 adds the three refusals above this one — the request this warm belongs to, an item
+         * that has already played to its end, and an item that is no longer the slot's own — because
+         * this state is not the whole of the precondition. All four are asked in the same turn as the
+         * `preroll` below, so there is no instant between the check and the call for any of them to
+         * change.
          */
         guard found.player.status == .readyToPlay, item.status == .readyToPlay else {
             if item.status == .failed || found.player.status == .failed {
