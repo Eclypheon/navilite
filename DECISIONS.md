@@ -125,3 +125,39 @@ doesn't, not *never*).
 
 - Moving the iOS build onto a paid account / TestFlight.
 - Offline caching of albums (past v1).
+
+## Queued for 1.9.12 (owner's request, 2026-10-13 — do NOT start until he has tested 1.9.11 and collated issues)
+
+**Make the play queue visible, as a fourth pager page.**
+His words: "perhaps it should be made visible to the user so swiping left from lyrics would bring you to the
+queue page instead of back to the playlist page."
+
+Today the pager is playlist | spectrum | lyrics and swiping left from lyrics wraps back to the playlist. The
+queue exists as a real model (`PlaybackQueue` in src/state/queue.ts, with its own order array, shuffle and
+repeat) but it has no user-facing surface, so what will play next is invisible. The request is to add the
+queue as a page so a swipe left from lyrics lands there (and presumably wraps back to the playlist beyond).
+
+Open questions for whoever designs it: is it a fourth page or does it replace the playlist page in the ring;
+does it show the queue order with the current item marked; can it be reordered / appended to / jumped from;
+and how shuffle and repeat read on that page (they act on the queue order, not the playlist, and that should
+be visible there).
+
+## v2.0 scope (owner's list, 2026-10-13). RESEARCH AND DESIGN ONLY - do not build any of it yet.
+
+1. **The play queue made visible** - a queue page so a swipe left from lyrics lands on the queue rather than
+   the playlist. Today the pager is playlist | spectrum | lyrics; the queue exists as a model with its own
+   order array, shuffle and repeat, but has no surface.
+2. **Reduce the background auto-advance delay** - 1.9.11 works in foreground and background; the background
+   gap is described as "pretty much imperceptible ... if it can't be resolved it's fine". Low priority,
+   investigate only.
+3. **Crossfade between tracks**, foreground AND background. Open design questions: two players with volume
+   ramps, and what is legal for a ramp while backgrounded/locked (a JS or Timer tick probably is not);
+   interaction with the spectrum tap, the lock-screen fields, gapless same-album playback, and the
+   seek/backtrack model; memory, battery and data cost of two overlapping streams.
+4. **Multi-user permissions** - per-user playlist visibility plus an admin panel for the admin user to
+   control what added users can see. Touches Navidrome's user/playlist/sharing model, the Subsonic
+   user-management endpoints, and the app's own (currently absent) auth: today the app uses one Navidrome
+   account. Security-sensitive - admin credentials must never live in a client.
+
+Status: research commissioned (crossfade, multi-user, background latency floor). Design to follow the
+research, then the owner decides what is built. **If all four land, this is v2.0.**
