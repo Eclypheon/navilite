@@ -172,4 +172,8 @@ research, then the owner decides what is built. **If all four land, this is v2.0
   surface: compact, and it shows **the total size of all songs in the playlist being downloaded**, so
   the owner knows the space it will take on his phone.
 - Release shape: **1.9.11 is the current stable; the build carrying this feature is 1.9.12 (nightly).**
+- **Lyrics are part of the download (owner's addition, later the same day):** a downloaded playlist
+  includes each song's lyrics, so they render offline and **still highlight the current line wherever
+  timestamps are present**; a song with no lyrics or untimed lyrics must degrade gracefully.
+  **The lyrics bytes are included in the playlist's total size estimate.**
 - Ownership: research (Mugger) → design + review (Sage) → implementation (Nerd).
