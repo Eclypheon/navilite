@@ -204,6 +204,12 @@ test('a download killed mid-flight reconciles as partial and resumes only the mi
     ['b'],
     'and only the missing track is re-enqueued',
   );
+
+  // The on-foreground reconcile runs again on every visibility change: it must not restart the
+  // transfers that are already running.
+  second.enqueued.length = 0;
+  await two.hydrate();
+  assert.equal(second.enqueued.length, 0, 'a later reconcile does not re-enqueue a live download');
 });
 
 test('a cancelled download is not resumed on the next boot — only the owner asks again', async () => {

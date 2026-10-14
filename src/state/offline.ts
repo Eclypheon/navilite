@@ -223,6 +223,8 @@ export class OfflineStore {
   private readonly unlisteners: Array<() => void> = [];
   private readonly changeListeners = new Set<() => void>();
   private listening = false;
+  /** True once this process has done its boot reconcile; only that first pass may re-enqueue. */
+  private bootReconciled = false;
 
   /**
    * Subscribe to index/playlist changes, so the UI can redraw. Returns the unsubscribe — a
@@ -378,7 +380,14 @@ export class OfflineStore {
       if (row.state === 'staging') this.rows.delete(songId);
     }
     this.rebuildPlaylists(mirror?.playlists);
-    const resume = this.resumable();
+    /*
+     * Resume only on this process's **first** reconcile. `hydrate()` is also the on-foreground
+     * reconcile, and re-enqueueing a transfer that is already in `nsurlsessiond` would restart it
+     * from zero every time the owner switches apps — the transfers that are still running land as
+     * `done` events, and `list()` remains the truth for everything else.
+     */
+    const resume = this.bootReconciled ? [] : this.resumable();
+    this.bootReconciled = true;
     this.saveMirror();
     this.notify();
     // Only a manifest still marked `downloading` is resumed — a cancelled one stays `partial`
