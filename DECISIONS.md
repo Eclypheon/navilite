@@ -161,3 +161,15 @@ be visible there).
 
 Status: research commissioned (crossfade, multi-user, background latency floor). Design to follow the
 research, then the owner decides what is built. **If all four land, this is v2.0.**
+
+## Owner's re-prioritisation, 2026-10-15 (the day 1.9.11 was tagged stable)
+
+- **Crossfade (item 3 above) is SHELVED for now** — not abandoned, just not the next thing built.
+  Its v2.0 research stays on file for whenever it is picked back up. Do not design or build around it.
+- **New priority: offline playlist downloads.** A playlist must be downloadable to the device so it
+  plays with no connection, and **when a local copy of a song exists the app plays the device copy
+  instead of fetching it** — faster, and no data burnt. The download control lives on the playlist
+  surface: compact, and it shows **the total size of all songs in the playlist being downloaded**, so
+  the owner knows the space it will take on his phone.
+- Release shape: **1.9.11 is the current stable; the build carrying this feature is 1.9.12 (nightly).**
+- Ownership: research (Mugger) → design + review (Sage) → implementation (Nerd).
