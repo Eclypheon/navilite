@@ -41,4 +41,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         config.delegateClass = SceneDelegate.self
         return config
     }
+
+    /// A background download finished while the app was not running: hand the completion handler to
+    /// the downloads plugin, which has already moved the file into place natively (v1.9.12).
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        NaviliteDownloads.backgroundCompletionHandler = completionHandler
+    }
 }

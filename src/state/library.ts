@@ -4,6 +4,9 @@ import type { Album, AlbumWithSongs, Artist, ArtistWithAlbums, Playlist, Playlis
 
 export type AlbumListType = 'alphabeticalByName' | 'newest' | 'recent' | 'frequent' | 'starred';
 
+/** Resolves a song id to a local `file://` path when a complete offline copy exists, else null. */
+export type OfflinePathResolver = (songId: string) => string | null;
+
 /**
  * How many entries each detail cache may hold (v1.9.7).
  *
@@ -37,9 +40,11 @@ export class Library {
   private artistDetailCache = new Map<string, ArtistWithAlbums>();
   private playlistCache = new Map<string, PlaylistWithEntries>();
   private starredCache: Starred2 | null = null;
+  private readonly resolveOffline: OfflinePathResolver;
 
-  constructor(client: SubsonicClient) {
+  constructor(client: SubsonicClient, resolveOffline: OfflinePathResolver = () => null) {
     this.client = client;
+    this.resolveOffline = resolveOffline;
   }
 
   get crossOrigin(): boolean {
@@ -62,6 +67,17 @@ export class Library {
    * same request instead of missing on a string that was never seen before.
    */
   streamUrl(song: Song, maxBitRate?: number | null): string {
+    /*
+     * Local-first resolution (v1.9.12). When the index holds a complete row for this song, the
+     * local copy is played — no stream fetch, no data. Synchronous and null-safe: an unhydrated
+     * index resolves to `null` and the stream URL is returned unchanged, never `undefined`.
+     *
+     * A local path ignores `maxBitRate`: it is already a file, and asking for a transcode of a
+     * local file is meaningless. This one edit serves the audible load, the warm pool *and* the
+     * queue published to the native side, which is what makes offline playback survive suspension.
+     */
+    const local = this.resolveOffline(song.id);
+    if (local !== null) return local;
     return this.client.streamUrl(song.id, maxBitRate == null ? {} : { maxBitRate });
   }
 

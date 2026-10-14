@@ -42,5 +42,6 @@ class ViewController: CAPBridgeViewController {
         super.capacitorDidLoad()
         bridge?.registerPluginInstance(NaviliteRemote())
         bridge?.registerPluginInstance(NaviliteSpectrum())
+        bridge?.registerPluginInstance(NaviliteDownloads())
     }
 }

@@ -328,7 +328,8 @@ function fail(response, code, message, status = 200) {
 function songPayload(song) {
   const { audioIndex, ...rest } = song;
   void audioIndex;
-  return { ...rest, starred: state.starred.has(song.id) ? '2026-01-01T00:00:00Z' : undefined };
+  // The exact byte length of the original file, so the offline size estimate (§4) is exact.
+  return { ...rest, size: wavFor(song).length, starred: state.starred.has(song.id) ? '2026-01-01T00:00:00Z' : undefined };
 }
 
 function albumPayload(album) {
@@ -607,6 +608,21 @@ function handleRest(response, method, params, url) {
         'content-length': String(wav.length),
         'x-content-duration': String(song.duration),
       }, { cors: !NO_CORS_STREAM });
+      return;
+    }
+
+    case 'download': {
+      // v1.9.12: the original, untranscoded file with an exact Content-Length, so the offline
+      // size estimate and the byte-count check are honest.
+      const song = songs.find((item) => item.id === params.id);
+      if (!song) return fail(response, 70, 'Song not found');
+      const wav = wavFor(song);
+      send(response, 200, wav, {
+        'content-type': 'audio/wav',
+        'accept-ranges': 'bytes',
+        'content-length': String(wav.length),
+        'x-content-duration': String(song.duration),
+      });
       return;
     }
 

@@ -16,21 +16,25 @@ import { fetchLyrics, type LyricsDoc, type LyricsSource } from '../api/lyrics.ts
 import type { SidecarSource } from '../api/sidecar.ts';
 import type { Song } from '../api/types.ts';
 import type { LyricsStore } from '../storage/lyrics.ts';
+import type { OfflineStore } from '../state/offline.ts';
 
 export class LyricsService {
   private readonly cache: LyricsStore;
   private readonly library: () => LyricsSource | null;
   private readonly sidecar: () => SidecarSource | null;
+  private readonly offline: () => OfflineStore | null;
   private readonly inflight = new Map<string, Promise<LyricsDoc | null>>();
 
   constructor(
     cache: LyricsStore,
     library: () => LyricsSource | null,
     sidecar: () => SidecarSource | null = () => null,
+    offline: () => OfflineStore | null = () => null,
   ) {
     this.cache = cache;
     this.library = library;
     this.sidecar = sidecar;
+    this.offline = offline;
   }
 
   /** Lyrics for a track, from the device cache when it has them. Null = none to show. */
@@ -58,6 +62,22 @@ export class LyricsService {
   }
 
   private async load(song: Song): Promise<LyricsDoc | null> {
+    /*
+     * Step ② (v1.9.12): the durable offline copy, between the view cache and the network. A
+     * `present` row reads the stored body off disk and parses it with the same `fromSidecar` the
+     * route's bytes go through — no network, and the timing already lives in the doc. A `none` row
+     * inside its freshness window returns `null` with no request at all; anything else falls
+     * through to today's sources unchanged.
+     */
+    const offline = this.offline();
+    if (offline) {
+      const resolution = await offline.lyricsDoc(song.id);
+      if (resolution.kind === 'present') {
+        this.cache.set(song.id, resolution.doc);
+        return resolution.doc;
+      }
+      if (resolution.kind === 'none-fresh') return null;
+    }
     try {
       const doc = await fetchLyrics(song, this.library(), this.sidecar());
       this.cache.set(song.id, doc);

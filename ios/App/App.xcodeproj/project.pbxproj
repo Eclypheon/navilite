@@ -19,6 +19,7 @@
 		9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9582B6822FE993A50072D4E8 /* SceneDelegate.swift */; };
 		B1A4C0DE1F1F000000000003 /* NaviliteRemote.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A4C0DE1F1F000000000004 /* NaviliteRemote.swift */; };
 		B1A4C0DE1F1F000000000005 /* NaviliteSpectrum.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A4C0DE1F1F000000000006 /* NaviliteSpectrum.swift */; };
+		B1A4C0DE1F1F000000000007 /* NaviliteDownloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A4C0DE1F1F000000000008 /* NaviliteDownloads.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +36,7 @@
 		9582B6822FE993A50072D4E8 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		B1A4C0DE1F1F000000000004 /* NaviliteRemote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NaviliteRemote.swift; sourceTree = "<group>"; };
 		B1A4C0DE1F1F000000000006 /* NaviliteSpectrum.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NaviliteSpectrum.swift; sourceTree = "<group>"; };
+		B1A4C0DE1F1F000000000008 /* NaviliteDownloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NaviliteDownloads.swift; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
@@ -73,6 +75,7 @@
 				9582B6822FE993A50072D4E8 /* SceneDelegate.swift */,
 				B1A4C0DE1F1F000000000004 /* NaviliteRemote.swift */,
 				B1A4C0DE1F1F000000000006 /* NaviliteSpectrum.swift */,
+				B1A4C0DE1F1F000000000008 /* NaviliteDownloads.swift */,
 				50379B222058CBB4000EE86E /* capacitor.config.json */,
 				504EC3071FED79650016851F /* AppDelegate.swift */,
 				B1A4C0DE1F1F000000000001 /* ViewController.swift */,
@@ -172,6 +175,7 @@
 				9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */,
 				B1A4C0DE1F1F000000000003 /* NaviliteRemote.swift in Sources */,
 				B1A4C0DE1F1F000000000005 /* NaviliteSpectrum.swift in Sources */,
+				B1A4C0DE1F1F000000000007 /* NaviliteDownloads.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -312,14 +316,14 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.9.11;
+				MARKETING_VERSION = 1.9.12;
 				OTHER_SWIFT_FLAGS = "$(inherited) \"-D\" \"COCOAPODS\" \"-DDEBUG\"";
 				PRODUCT_BUNDLE_IDENTIFIER = app.navilite;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -334,14 +338,14 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.9.11;
+				MARKETING_VERSION = 1.9.12;
 				PRODUCT_BUNDLE_IDENTIFIER = app.navilite;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";

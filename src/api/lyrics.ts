@@ -206,7 +206,7 @@ export async function fetchLyrics(
   }
 }
 
-function sameSong(lyrics: LegacyLyrics, song: Song): boolean {
+export function sameSong(lyrics: LegacyLyrics, song: Song): boolean {
   const norm = (value: string | undefined): string => (value ?? '').trim().toLowerCase();
   const title = norm(lyrics.title);
   const artist = norm(lyrics.artist);

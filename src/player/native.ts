@@ -29,6 +29,7 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import type { PluginListenerHandle } from '@capacitor/core';
 import type { OsName } from '../platform.ts';
+import type { DownloadsBridge, IndexRow } from '../state/offline.ts';
 
 interface BackgroundAudioPlugin {
   start(): Promise<void>;
@@ -1556,6 +1557,83 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     };
   } catch (error) {
     console.warn('[navilite] native audio plugin unavailable; staying on Web Audio', error);
+    return null;
+  }
+}
+
+/* ----------------------------------------------------------------- downloads */
+
+const NAVILITE_DOWNLOADS = 'NaviliteDownloads';
+
+/**
+ * Our own iOS download plugin (v1.9.12): a background `URLSession` transfer, a staging write, an
+ * atomic move and a byte-count check — none of it on the audio bridge or the `AssetLanes` queue.
+ * A download may never `prepareNext`, `warmedUrl`, `discardPrepared` or `yieldToAudible`.
+ */
+interface NaviliteDownloadsPlugin {
+  configure(options: { allowsCellular: boolean; maxConcurrent: number }): Promise<void>;
+  enqueue(options: {
+    songId: string;
+    url: string;
+    suffix: string;
+    bytes: number;
+    refs: string[];
+    title: string;
+    artist: string;
+    album: string;
+    durationSec: number;
+  }): Promise<void>;
+  cancel(options: { songId: string }): Promise<void>;
+  remove(options: { songId: string }): Promise<void>;
+  list(): Promise<{ rows: IndexRow[] }>;
+  freeBytes(): Promise<{ free: number }>;
+  readLyrics(options: { songId: string }): Promise<{ body: string }>;
+  writeLyrics(options: { songId: string; text: string }): Promise<void>;
+  addListener(
+    eventName: 'progress' | 'done' | 'failed',
+    listener: (event: { songId: string; path?: string; bytes?: number; total?: number; error?: string; kind?: 'audio' | 'lyrics' }) => void,
+  ): Promise<PluginListenerHandle>;
+}
+
+/**
+ * The download lane, built separately from the audio bridge. On a platform without the plugin (the
+ * browser, Android in 1.9.12) it returns `null` and offline download is simply absent — playback,
+ * the resolver and the queue are all unchanged.
+ */
+export async function createDownloadsBridge(os: OsName): Promise<DownloadsBridge | null> {
+  if (os === 'web') return null;
+  try {
+    const plugin = Capacitor.isPluginAvailable(NAVILITE_DOWNLOADS)
+      ? registerPlugin<NaviliteDownloadsPlugin>(NAVILITE_DOWNLOADS)
+      : null;
+    if (!plugin) return null;
+    return {
+      configure: (options) => bounded(plugin.configure(options), undefined, 'downloads-configure'),
+      enqueue: (job) => bounded(plugin.enqueue(job), undefined, 'downloads-enqueue'),
+      cancel: (songId) => bounded(plugin.cancel({ songId }), undefined, 'downloads-cancel'),
+      remove: (songId) => bounded(plugin.remove({ songId }), undefined, 'downloads-remove'),
+      list: async () => {
+        const answer = await bounded(plugin.list(), null, 'downloads-list');
+        return (answer?.rows ?? []).map((row) => ({ ...row }));
+      },
+      freeBytes: async () => {
+        const answer = await bounded(plugin.freeBytes(), null, 'downloads-freeBytes');
+        const free = answer?.free;
+        return free !== undefined && Number.isFinite(free) ? free : -1;
+      },
+      readLyrics: async (songId) => {
+        const answer = await bounded(plugin.readLyrics({ songId }), null, 'downloads-readLyrics');
+        const body = answer?.body;
+        return typeof body === 'string' && body !== '' ? body : null;
+      },
+      writeLyrics: (songId, text) => bounded(plugin.writeLyrics({ songId, text }), undefined, 'downloads-writeLyrics'),
+      addListener: (eventName, listener) =>
+        plugin
+          .addListener(eventName, (event) => listener(event))
+          .then((handle) => () => void handle.remove().catch(() => undefined)),
+    };
+  } catch (error) {
+    console.warn('[navilite] downloads plugin unavailable', error);
     return null;
   }
 }

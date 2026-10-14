@@ -12,6 +12,7 @@
  */
 import { SubsonicClient, SubsonicError } from '../api/subsonic.ts';
 import { LyricsRoute, type SidecarSource } from '../api/sidecar.ts';
+import { sameSong } from '../api/lyrics.ts';
 import type { Album, Artist, Playlist, QueueContext, QueueItem, Song } from '../api/types.ts';
 import { DEFAULT_SERVER_URL, SERVER_URL_PLACEHOLDER } from '../config.ts';
 import { AudioEngine, type EngineStatus } from '../player/engine.ts';
@@ -21,6 +22,8 @@ import { platformInfo, type PlatformInfo } from '../platform.ts';
 import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
+import { OfflineStore, estimateBytes, formatBytes } from '../state/offline.ts';
+import { createDownloadsBridge } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
 import { loadSettings, saveSettings, type Settings } from '../storage/settings.ts';
@@ -164,6 +167,8 @@ interface AppContext {
   engine: AudioEngine;
   library: Library | null;
   queue: PlaybackQueue | null;
+  /** Offline downloads: the synchronous resolver and the per-playlist records (v1.9.12). */
+  offline: OfflineStore | null;
   /** The library's own lyric route (`/lyrics`), once a library has been reached. */
   sidecar: SidecarSource | null;
   lyrics: LyricsService;
@@ -196,6 +201,7 @@ export async function boot(root: HTMLElement): Promise<void> {
     new LyricsCache(),
     () => ctx.library?.client ?? null,
     () => ctx.sidecar,
+    () => ctx.offline,
   );
   const ctx: AppContext = {
     platform,
@@ -204,6 +210,7 @@ export async function boot(root: HTMLElement): Promise<void> {
     engine,
     library: null,
     queue: null,
+    offline: null,
     sidecar: null,
     lyrics,
     rows: new Map(),
@@ -211,6 +218,31 @@ export async function boot(root: HTMLElement): Promise<void> {
     render: () => renderRoute(ctx, shell),
     toast: (message, kind = 'info') => toast(shell, message, kind),
   };
+  /*
+   * Offline downloads (v1.9.12). The store is built once and its resolver handed to `Library` when
+   * `connect` runs, so the audible path and the download store are the same object. Hydration is
+   * kicked off here and re-run on the way back to the foreground — the reconcile that makes a
+   * download finished in the background visible.
+   */
+  const offline = new OfflineStore(await createDownloadsBridge(platform.os), {
+    downloadUrl: (song) => ctx.library?.client.downloadUrl(song.id) ?? `download?id=${song.id}`,
+    lyricsUrl: (song) => ctx.sidecar?.urlFor?.(song) ?? null,
+    lyricsFallback: async (song) => {
+      // The route had no URL for this track: fall back to the legacy getLyrics blob, stored raw
+      // behind the same artist/title guard the lyrics service uses today.
+      const client = ctx.library?.client ?? null;
+      if (!client) return null;
+      try {
+        const blob = await client.getLyrics({ artist: song.artist, title: song.title });
+        if (!blob || typeof blob.value !== 'string' || blob.value === '') return null;
+        return sameSong(blob, song) ? blob.value : null;
+      } catch {
+        return null;
+      }
+    },
+  });
+  ctx.offline = offline;
+  void offline.hydrate();
   shell.lyrics = createLyricsView(lyrics);
   shell.lyricsHost.append(shell.lyrics.element);
   shell.lyrics.show(null);
@@ -238,6 +270,9 @@ export async function boot(root: HTMLElement): Promise<void> {
   const onLifecycle = (hidden: boolean): void => {
     void ctx.engine.handleVisibility(hidden);
     if (hidden) ctx.queue?.flushSnapshot();
+    // §S4: on the way back, `list()` is the truth — a download that finished in the background is
+    // picked up here, not from a progress event that may never have arrived.
+    else void ctx.offline?.hydrate();
   };
   /*
    * Every lifecycle input, into the one machine.
@@ -1361,7 +1396,8 @@ interface Credentials {
 
 function connect(ctx: AppContext, shell: Shell, credentials: Credentials, applyPalette: ApplyPalette, options: { silent?: boolean } = {}): void {
   const client = new SubsonicClient(credentials);
-  const library = new Library(client);
+  // The offline resolver is the one `streamUrl` consults first (local-first playback, v1.9.12).
+  const library = new Library(client, (songId) => ctx.offline?.pathFor(songId) ?? null);
   const queue = new PlaybackQueue(ctx.engine, library);
   ctx.library = library;
   ctx.queue = queue;
@@ -1866,6 +1902,66 @@ function playlistRow(ctx: AppContext, playlist: Playlist): HTMLElement {
   return row;
 }
 
+/**
+ * The playlist page's download control (v1.9.12): one compact button in the header action row that
+ * shows the total size and drives the §5 state machine. It renders its label from the index
+ * synchronously and updates only its own label from the store's change listener — never a poll, and
+ * never a re-render of the list behind it.
+ */
+function downloadControl(ctx: AppContext, playlistId: string, songs: Song[]): HTMLElement {
+  const offline = ctx.offline;
+  // The estimate uses the store's rows so lyric bytes are counted (§"Offline lyrics") and a
+  // playlist sharing tracks is exact on its first open; no rows → the audio-only fallback.
+  const estimate = offline ? offline.estimate(songs) : estimateBytes(songs);
+  const button = h('button', { class: 'button', 'aria-label': '' });
+  const sizeLabel = (): string => {
+    const prefix = estimate.exact ? '' : 'up to ';
+    return `${prefix}${formatBytes(estimate.total)}`;
+  };
+  const label = (): string => {
+    const record = offline?.record(playlistId);
+    if (!record || record.state === 'idle') {
+      return songs.length === 0 ? 'Nothing to download' : `↓ ${sizeLabel()}`;
+    }
+    switch (record.state) {
+      case 'estimating':
+        return '…';
+      case 'downloading':
+        return `${record.done} of ${record.total} · ${sizeLabel()}`;
+      case 'partial':
+        return `${record.done} of ${record.total} · retry`;
+      case 'complete':
+        return `✓ ${sizeLabel()}`;
+      case 'failed':
+        return 'Retry';
+    }
+  };
+  const paint = (): void => {
+    const text = label();
+    button.textContent = text;
+    button.setAttribute('aria-label', text);
+    button.disabled = songs.length === 0;
+  };
+  paint();
+  button.addEventListener('click', () => {
+    if (!offline || songs.length === 0) return;
+    const record = offline.record(playlistId);
+    if (!record || record.state === 'idle' || record.state === 'failed' || record.state === 'partial') {
+      void (async () => {
+        // Wi-Fi only by default: the native side enforces `allowsCellularAccess = false`.
+        const result = await offline.download(playlistId, songs, { allowsCellular: false });
+        if (result.kind === 'no-space') ctx.toast(`Not enough free space — ${formatBytes(result.needed)} needed`, 'error');
+      })();
+    } else if (record.state === 'downloading' || record.state === 'estimating') {
+      void offline.cancel(playlistId);
+    } else if (record.state === 'complete') {
+      void offline.remove(playlistId);
+    }
+  });
+  if (offline) offline.onChange = paint;
+  return button;
+}
+
 async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
   loading(shell);
   const playlist = await ctx.library!.playlist(id);
@@ -1873,7 +1969,7 @@ async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promis
   const items: QueueItem[] = songs.map((song) => ({ song, context: { kind: 'playlist', id, name: playlist.name } }));
   const playAll = h('button', { class: 'button primary', text: 'Play playlist' }, [icon(ICONS.play, 16)]);
   playAll.addEventListener('click', () => void ctx.queue!.play(items, 0, items[0]?.context ?? null));
-  pageTitle(shell, playlist.name, `${songs.length} tracks · ${formatDuration(playlist.duration)}`, [playAll]);
+  pageTitle(shell, playlist.name, `${songs.length} tracks · ${formatDuration(playlist.duration)}`, [playAll, downloadControl(ctx, id, songs)]);
   replace(
     shell.view,
     shell.view.firstElementChild ?? h('div'),
@@ -2011,6 +2107,20 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
     ctx.toast('Cached lyrics cleared');
   });
 
+  // §S11: how much the owner's downloaded music takes, and the one action that removes all of it.
+  const downloadSummary = h('p', { class: 'muted', text: '' });
+  const paintDownloads = (): void => {
+    const bytes = ctx.offline?.totalBytes() ?? 0;
+    const tracks = ctx.offline?.totalTracks() ?? 0;
+    downloadSummary.textContent = `Downloaded music: ${formatBytes(bytes)} · ${tracks} track${tracks === 1 ? '' : 's'}`;
+  };
+  paintDownloads();
+  const removeDownloads = h('button', { class: 'button danger', text: 'Remove all downloads' });
+  removeDownloads.addEventListener('click', () => {
+    void ctx.offline?.removeAll().then(() => ctx.toast('All downloads removed'));
+  });
+  if (ctx.offline) ctx.offline.onChange = paintDownloads;
+
   const forget = h('button', { class: 'button danger', text: 'Forget credentials' });
   forget.addEventListener('click', () => {
     void (async () => {
@@ -2045,6 +2155,9 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
       h('h2', { class: 'section', text: 'Lyrics' }),
       h('p', { class: 'muted small', text: `Lyrics come from your own library — the lyrics file that sits next to the song — and are cached on this device only (${ctx.lyrics.cachedTracks} track${ctx.lyrics.cachedTracks === 1 ? '' : 's'} right now). Nothing is bundled with the app and nothing is fetched from anyone else.` }),
       h('div', { class: 'row' }, [clearLyrics]),
+      h('h2', { class: 'section', text: 'Downloads' }),
+      downloadSummary,
+      h('div', { class: 'row' }, [removeDownloads]),
       h('h2', { class: 'section', text: 'About' }),
       h('p', { class: 'muted', text: `Navilite ${BUILD_ID} · Subsonic API 1.16.1 · ${ctx.platform.native ? `wrapped ${ctx.platform.os} build` : 'browser / PWA'}` }),
       h('div', { class: 'row' }, [whatsNew, forget]),

@@ -316,4 +316,14 @@ export const CHANGELOG: ChangelogRelease[] = [
         "No more freezing, and no more being closed by the phone, when you skip ahead a few songs quickly. The app was asking the phone's player about the incoming song — how long it is, which track it is — in a way that waits for an answer from your server, and it was asking on the one thread that must never wait for anything. It asks those questions the way that does not wait now, so a fast run of skips can no longer lock the app up.",
       ],
     },
+    {
+      version: '1.9.12',
+      date: '2026-10-16',
+      items: [
+        'Download a playlist to your phone and it plays without a connection — the download button shows how much space it will take before you start.',
+        'Songs you have downloaded play from your phone instead of over the network: faster to start, and it uses no data.',
+        'Downloading keeps going while the app is in the background, and a playlist you have downloaded still plays from your phone on the lock screen.',
+        'Playlists you download bring their lyrics with them: the words and the line highlight still work with no connection, and the download size includes them.',
+      ],
+    },
   ];

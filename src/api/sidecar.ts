@@ -50,6 +50,8 @@ export type SidecarFetch = (url: string, timeoutMs: number) => Promise<SidecarAn
 export interface SidecarSource {
   /** The lyric body for this track, or null when there is none / the route could not answer. */
   lyricsFor(song: Song): Promise<string | null>;
+  /** The URL the route is asked at, or null when the track carries no library path (v1.9.12). */
+  urlFor?(song: Song): string | null;
 }
 
 /** The route's path on the door, next to `/rest/*` and the app shell. */

@@ -340,6 +340,14 @@ export class SubsonicClient {
     return this.url('stream', { id, maxBitRate: options.maxBitRate, format: options.format });
   }
 
+  /**
+   * The download URL for offline storage (v1.9.12): the **original, untranscoded file** with an
+   * exact `Content-Length`, which is what makes the size estimate and the byte check honest.
+   */
+  downloadUrl(id: string): string {
+    return this.url('download', { id });
+  }
+
   coverArtUrl(id: string, size = 512): string {
     return this.url('getCoverArt', { id, size });
   }
