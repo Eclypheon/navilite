@@ -358,6 +358,27 @@ export class OfflineStore {
    */
   async hydrate(): Promise<void> {
     const mirror = loadMirror(this.store);
+    /*
+     * The rows of the transfers that are **still running**, kept across the rebuild below.
+     *
+     * `list()` only ever reports what native has already finished (the index row is written on
+     * completion), so on this — the on-foreground — pass those songs are simply absent from its
+     * answer; and only the process's first reconcile may re-enqueue, so nothing else re-creates
+     * them. Drop them and the `done`/`failed` event of every transfer that lands afterwards finds
+     * no row (`if (!row) return`): the file is on disk, the index and the mirror never hear about
+     * it, the playlist never reconciles and the control freezes on `n of m · retry`.
+     *
+     * The coverage that keeps a row alive is the manifest's, not the row's: a song is in flight
+     * only while the playlist that asked for it is still `downloading` (the owner did not cancel
+     * it). Everything else — a cancelled or finished download — keeps nothing alive.
+     */
+    const inFlight = new Map<string, IndexRow>();
+    if (this.bootReconciled) {
+      for (const [songId, row] of this.rows) {
+        if (row.state !== 'staging') continue;
+        if (row.refs.some((playlistId) => this.manifests.get(playlistId)?.state === 'downloading')) inFlight.set(songId, row);
+      }
+    }
     if (this.bridge) {
       try {
         const rows = await this.bridge.list();
@@ -379,12 +400,18 @@ export class OfflineStore {
     for (const [songId, row] of [...this.rows]) {
       if (row.state === 'staging') this.rows.delete(songId);
     }
+    // …and put back the ones that are still transferring (`inFlight`), unless `list()` has just
+    // reported the song itself — a row native already finished is the better row. The event that
+    // lands for a live transfer has to find a row here, or it is thrown away.
+    for (const [songId, row] of inFlight) {
+      if (!this.rows.has(songId)) this.rows.set(songId, row);
+    }
     this.rebuildPlaylists(mirror?.playlists);
     /*
      * Resume only on this process's **first** reconcile. `hydrate()` is also the on-foreground
      * reconcile, and re-enqueueing a transfer that is already in `nsurlsessiond` would restart it
      * from zero every time the owner switches apps — the transfers that are still running land as
-     * `done` events, and `list()` remains the truth for everything else.
+     * `done` events instead, which is the row the pass above keeps for them.
      */
     const resume = this.bootReconciled ? [] : this.resumable();
     this.bootReconciled = true;
@@ -436,12 +463,23 @@ export class OfflineStore {
       requestedAt: Date.now(),
     };
     this.playlists.set(playlistId, record);
+    /*
+     * Persist before the first byte — and before the first `await`. `enqueueSongs` takes a bridge
+     * call per track (plus a serial `lyricsFallback` fetch for a track with no sidecar route), and a
+     * kill inside that loop would otherwise leave no manifest at all: the next boot would find
+     * nothing to rebuild from and would derive the record from the files that happened to land —
+     * `done === total`, the item-2 defect this manifest exists to prevent.
+     */
+    this.saveMirror();
     this.notify();
 
     const free = await this.bridge.freeBytes();
     if (free >= 0 && free < estimate.total + FREE_SPACE_MARGIN) {
       record.state = 'idle';
       this.manifests.delete(playlistId);
+      // The abort has to reach the mirror too, or the next boot would resume a download the owner
+      // was just told there is no room for.
+      this.saveMirror();
       this.notify();
       return { kind: 'no-space', free, needed: estimate.total + FREE_SPACE_MARGIN };
     }
@@ -750,8 +788,22 @@ export class OfflineStore {
       const lyricFailed = manifest.songs.some((song) => this.rows.get(song.id)?.lyrics?.state === 'failed');
       const estimate = this.estimate(manifest.songs);
       this.playlists.set(playlistId, {
-        // Not all there is `partial` — never `complete` from the files that happened to land.
-        state: allAudio ? (lyricPending ? 'downloading' : lyricFailed ? 'partial' : 'complete') : 'partial',
+        /*
+         * Never `complete` from the files that happened to land. Missing songs are `partial` — the
+         * label that offers `retry` — **unless** the manifest is still `downloading`, i.e. the owner
+         * asked and did not cancel: then the transfers are in flight (or the boot resume is about to
+         * re-enqueue them), and a `retry` label on a live download is a trap, because a tap on it
+         * re-enqueues and native `enqueue` cancels the task it is replacing.
+         */
+        state: allAudio
+          ? lyricPending
+            ? 'downloading'
+            : lyricFailed
+              ? 'partial'
+              : 'complete'
+          : manifest.state === 'downloading'
+            ? 'downloading'
+            : 'partial',
         done,
         total: manifest.songs.length,
         bytes: estimate.total,

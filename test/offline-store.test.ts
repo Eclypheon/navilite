@@ -11,9 +11,24 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { OfflineStore } from '../src/state/offline.ts';
 import type { DownloadEvent, DownloadJob, DownloadsBridge, IndexRow } from '../src/state/offline.ts';
+import { OFFLINE_MIRROR_KEY, loadMirror } from '../src/storage/offline.ts';
 import type { Song } from '../src/api/types.ts';
 
 const song = (id: string, size = 1000): Song => ({ id, title: `Track ${id}`, artist: 'Someone', album: 'Something', duration: 10, size });
+
+/** A completed row as `list()` reports one, which is also what the native index writes on completion. */
+const indexRow = (id: string, refs: string[] = ['pl-1']): IndexRow => ({
+  songId: id,
+  path: `file:///${id}.mp3`,
+  suffix: 'mp3',
+  bytes: 1000,
+  state: 'complete',
+  refs,
+  title: `Track ${id}`,
+  artist: '',
+  album: '',
+  durationSec: 10,
+});
 
 interface MemoryStore {
   getItem(key: string): string | null;
@@ -270,4 +285,99 @@ test('onChange is a list: both subscribers are told, and an unsubscribed one goe
   calls.length = 0;
   bridge.emit('failed', { songId: 'a' });
   assert.deepEqual(calls, [], 'and the store keeps nothing when both are gone');
+});
+
+/* ------------------------------- the on-foreground reconcile (review round 1) */
+
+test('a foreground reconcile keeps the rows of the transfers still running, so their done event lands', async () => {
+  const rows: IndexRow[] = [];
+  const bridge = fakeBridge(rows);
+  const store = new OfflineStore(bridge, { store: memoryStore() });
+  await store.hydrate(); // boot
+  await store.download('pl-1', [song('a'), song('b')]);
+  rows.push(indexRow('a')); // the audio that landed wrote its index row; b is still transferring
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+  assert.equal(store.record('pl-1')?.state, 'downloading');
+
+  // Back into the foreground: `list()` answers with the one finished file and nothing about b.
+  await store.hydrate();
+  // A live download is not offered as `retry`: a tap on that label re-enqueues, and the native
+  // enqueue cancels the task it replaces — restarting a transfer that was nearly done.
+  assert.equal(store.record('pl-1')?.state, 'downloading', 'the still-transferring track is not a retry');
+
+  rows.push(indexRow('b'));
+  bridge.emit('done', { songId: 'b', path: 'file:///b.mp3', bytes: 1000 });
+  assert.equal(store.pathFor('b'), 'file:///b.mp3', 'the track that landed while the app was out is resolvable');
+  assert.equal(store.record('pl-1')?.state, 'complete');
+  assert.equal(store.record('pl-1')?.done, 2);
+});
+
+test('a cancelled download keeps no row alive across a reconcile', async () => {
+  const rows: IndexRow[] = [];
+  const bridge = fakeBridge(rows);
+  const store = new OfflineStore(bridge, { store: memoryStore() });
+  await store.hydrate();
+  await store.download('pl-1', [song('a'), song('b')]);
+  await store.cancel('pl-1');
+  await store.hydrate();
+  assert.equal(store.record('pl-1')?.state, 'partial', 'a cancelled download is retry, never a running one');
+
+  bridge.emit('done', { songId: 'b', path: 'file:///b.mp3', bytes: 1000 });
+  assert.equal(store.record('pl-1')?.state, 'partial', 'and a late event does not claim it completed');
+});
+
+test('the manifest is durable before the first enqueue, so a kill inside the loop still resumes (E2)', async () => {
+  const store = memoryStore();
+  const bridge = fakeBridge();
+  const enqueue = bridge.enqueue.bind(bridge);
+  bridge.enqueue = async (job) => {
+    await enqueue(job);
+    // The app is killed while this enqueue is in flight: the loop never reaches the next track.
+    if (job.songId === 'b') await new Promise<never>(() => undefined);
+  };
+  const one = new OfflineStore(bridge, { store });
+  void one.download('pl-1', [song('a'), song('b')]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    loadMirror(store)?.playlists?.['pl-1']?.state,
+    'downloading',
+    'both transfers are enqueued and the manifest is already persisted',
+  );
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+
+  // A force-quit here, then the next boot, which lists the one file that landed.
+  const second = fakeBridge([indexRow('a')]);
+  const two = new OfflineStore(second, { store });
+  await two.hydrate();
+  const record = two.record('pl-1');
+  assert.ok(record, 'the manifest rebuilt the record without a completed file for both tracks');
+  assert.equal(record.total, 2, 'the manifest is the total, not the files that happened to land');
+  assert.notEqual(record.state, 'complete', 'a kill inside the enqueue loop never reconciles as complete');
+  assert.deepEqual(
+    second.enqueued.filter((job) => job.suffix !== 'lyrics').map((job) => job.songId),
+    ['b'],
+    'and only the missing track is re-enqueued',
+  );
+  one.dispose();
+});
+
+test('a no-space abort takes its own manifest back out of the mirror', async () => {
+  const store = memoryStore();
+  const bridge = fakeBridge();
+  let atSpaceCheck: string | null = null;
+  bridge.freeBytes = async () => {
+    atSpaceCheck = store.getItem(OFFLINE_MIRROR_KEY);
+    return 0;
+  };
+  const one = new OfflineStore(bridge, { store });
+  const result = await one.download('pl-1', [song('a')]);
+  assert.equal(result.kind, 'no-space');
+  assert.match(atSpaceCheck ?? '', /"downloading"/, 'the manifest was persisted before the space check');
+
+  assert.equal(loadMirror(store)?.playlists, undefined, 'the abort removed it again');
+  const second = fakeBridge();
+  const two = new OfflineStore(second, { store });
+  await two.hydrate();
+  assert.equal(two.record('pl-1'), null, 'so the next boot has no download to resume');
+  assert.equal(second.enqueued.length, 0, 'and nothing is fetched behind the owner back');
 });
