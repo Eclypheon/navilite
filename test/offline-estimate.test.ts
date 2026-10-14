@@ -7,8 +7,10 @@
  *      `up to`);
  *   3. zero entries is `0 B`, exact.
  *
- * And the §5 resume rule: a staging row whose written bytes match the expected length is promoted
- * to `complete`; anything else is `partial` and re-fetched.
+ * And the §5 resume rule — a staging row whose written bytes match the expected length is promoted
+ * to `complete`, anything else is `partial` and re-fetched — lives in `NaviliteDownloads.swift`'s
+ * boot reconcile, where the bytes are (JS never touches the filesystem); `test/download-lane.test.ts`
+ * asserts the native implementation reads as that rule.
  *
  * Plus the offline-lyrics axis (§"Offline lyrics"): a `present` lyric adds its measured bytes, a
  * `none` adds zero, and an unresolved lyric adds `LYRICS_ASSUMED_BYTES` and makes the figure
@@ -17,7 +19,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateBytes, formatBytes, reconcileStaging, LYRICS_ASSUMED_BYTES, type IndexRow } from '../src/state/offline.ts';
+import { estimateBytes, formatBytes, LYRICS_ASSUMED_BYTES, type IndexRow } from '../src/state/offline.ts';
 import type { Song } from '../src/api/types.ts';
 
 const song = (id: string, size: number | undefined, duration: number | undefined): Pick<Song, 'id' | 'size' | 'duration'> => ({ id, size, duration });
@@ -61,13 +63,6 @@ test('formatBytes gives the owner the size he asked to see', () => {
   assert.equal(formatBytes(1024), '1 KB');
   assert.equal(formatBytes(999), '999 B');
   assert.equal(formatBytes(-5), '0 B');
-});
-
-test('reconcileStaging promotes only a byte-exact match', () => {
-  assert.equal(reconcileStaging(31_204_321, 31_204_321), 'complete');
-  assert.equal(reconcileStaging(31_204_321, 31_204_322), 'partial');
-  // No expected length to check against: never promoted.
-  assert.equal(reconcileStaging(31_204_321, 0), 'partial');
 });
 
 /* ---------------------------------------------------- the offline-lyrics axis */

@@ -16,7 +16,15 @@
  * local on the first start without waiting for `list()`.
  */
 import { fromSidecar, type LyricsDoc } from '../api/lyrics.ts';
-import { clearMirror, loadMirror, saveMirror, type MirrorStore, mirrorStore } from '../storage/offline.ts';
+import {
+  clearMirror,
+  loadMirror,
+  saveMirror,
+  type MirrorStore,
+  type OfflineMirror,
+  type OfflinePlaylistManifest,
+  mirrorStore,
+} from '../storage/offline.ts';
 import type { Song } from '../api/types.ts';
 
 export type DownloadState = 'complete' | 'staging' | 'failed';
@@ -73,6 +81,8 @@ export interface DownloadEvent {
   bytes?: number;
   total?: number;
   error?: string;
+  /** The HTTP status when the response got that far — `404` on the lyrics route is "no sidecar". */
+  status?: number;
 }
 
 /** The native side of a download: transfer, staging write, atomic move, byte verification. */
@@ -97,12 +107,15 @@ export interface PlaylistRecord {
   state: PlaylistDownloadState;
   /** How many of `songs` are complete. */
   done: number;
+  /** The manifest's length — the songs the download was *asked* for, never the completed row count. */
   total: number;
   /** The size the control promises, in bytes (§4). */
   bytes: number;
   /** True when every entry carried a `size`, so the figure is the real one. */
   exact: boolean;
   songs: Song[];
+  /** When the download was requested; present on every record rebuilt from a manifest. */
+  requestedAt?: number;
 }
 
 export interface SizeEstimate {
@@ -189,26 +202,50 @@ export function formatBytes(bytes: number): string {
  * §5 resume rule, the half that is pure: a `staging` row whose written bytes equal the expected
  * `Content-Length` is promoted to `complete` (the bytes arrived, only the callback was lost);
  * otherwise it is `partial` and re-fetched. "Correct or re-fetch", never "trust a partial".
+ *
+ * The rule lives in `NaviliteDownloads.swift`'s boot reconcile, where the staging bytes are: JS
+ * cannot promote a file (it never touches the filesystem), so a second copy of this arithmetic here
+ * would only be a decoration. `test/download-lane.test.ts` asserts the native implementation reads
+ * as this rule, which is the half that can be checked without a phone.
  */
-export function reconcileStaging(actualBytes: number, expectedBytes: number): 'complete' | 'partial' {
-  return expectedBytes > 0 && actualBytes === expectedBytes ? 'complete' : 'partial';
-}
-
 export type DownloadResult = { kind: 'started' } | { kind: 'no-space'; free: number; needed: number };
 
 export class OfflineStore {
   private readonly rows = new Map<string, IndexRow>();
   private readonly playlists = new Map<string, PlaylistRecord>();
+  /** The durable half of each playlist record: what was asked for, and whether it is still wanted. */
+  private readonly manifests = new Map<string, OfflinePlaylistManifest>();
   private readonly bridge: DownloadsBridge | null;
   private readonly store: MirrorStore;
   private readonly downloadUrl: (song: Song) => string;
   private readonly lyricsUrl: (song: Song) => string | null;
   private readonly lyricsFallback: (song: Song) => Promise<string | null>;
   private readonly unlisteners: Array<() => void> = [];
+  private readonly changeListeners = new Set<() => void>();
   private listening = false;
 
-  /** Fired whenever the index or a playlist record changes, so the UI can redraw the control. */
-  onChange: (() => void) | null = null;
+  /**
+   * Subscribe to index/playlist changes, so the UI can redraw. Returns the unsubscribe — a
+   * **list**, not one slot: the playlist page's control and the settings row are both live at once,
+   * and whichever subscribed last used to silently replace the other.
+   */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  /** Tell every subscriber something changed. One failing listener never blocks the others. */
+  private notify(): void {
+    for (const listener of [...this.changeListeners]) {
+      try {
+        listener();
+      } catch {
+        // A redraw that throws is a UI bug, never a reason to stop telling the others.
+      }
+    }
+  }
 
   constructor(
     bridge: DownloadsBridge | null,
@@ -229,22 +266,27 @@ export class OfflineStore {
     // Seed the in-memory map from the mirror synchronously, so the resolver answers local on the
     // very first start of a session — before `hydrate()` has had a chance to talk to the plugin.
     const mirror = loadMirror(this.store);
-    if (mirror) {
-      for (const [songId, row] of Object.entries(mirror.rows)) {
-        this.rows.set(songId, {
-          songId,
-          path: row.path,
-          suffix: 'mp3',
-          bytes: row.bytes,
-          state: row.state,
-          refs: [],
-          title: '',
-          artist: '',
-          album: '',
-          durationSec: 0,
-          lyrics: row.lyrics ? { state: row.lyrics.state, bytes: row.lyrics.bytes } : undefined,
-        });
-      }
+    if (mirror) this.seedRows(mirror.rows);
+  }
+
+  /** Copy mirror rows into the in-memory index, carrying the lyrics `fetchedAt` with them. */
+  private seedRows(rows: OfflineMirror['rows']): void {
+    for (const [songId, row] of Object.entries(rows)) {
+      this.rows.set(songId, {
+        songId,
+        path: row.path,
+        suffix: 'mp3',
+        bytes: row.bytes,
+        state: row.state,
+        refs: [],
+        title: '',
+        artist: '',
+        album: '',
+        durationSec: 0,
+        lyrics: row.lyrics
+          ? { state: row.lyrics.state, bytes: row.lyrics.bytes, fetchedAt: row.lyrics.fetchedAt }
+          : undefined,
+      });
     }
   }
 
@@ -307,8 +349,10 @@ export class OfflineStore {
   }
 
   /**
-   * Boot and on-visible reconcile: `list()` is the truth. Rebuild the index and the mirror from it,
-   * and reconstruct each playlist record from the rows that still reference it.
+   * Boot and on-visible reconcile: `list()` is the truth about the files, the **manifest** is the
+   * truth about what was asked for. Rebuild the index from `list()`, rebuild each playlist record
+   * from its manifest, and resume the ones that were interrupted — a download killed mid-flight
+   * reads `partial` with the tracks that are still missing, never `complete`.
    */
   async hydrate(): Promise<void> {
     const mirror = loadMirror(this.store);
@@ -326,28 +370,36 @@ export class OfflineStore {
      * native side has nothing yet) but the mirror has rows from a previous session, those rows still
      * name complete files the resolver may trust. They are dropped again on the next real reconcile.
      */
-    if (this.rows.size === 0 && mirror) {
-      for (const [songId, row] of Object.entries(mirror.rows)) {
-        this.rows.set(songId, {
-          songId,
-          path: row.path,
-          suffix: 'mp3',
-          bytes: row.bytes,
-          state: row.state,
-          refs: [],
-          title: '',
-          artist: '',
-          album: '',
-          durationSec: 0,
-          lyrics: row.lyrics ? { state: row.lyrics.state, bytes: row.lyrics.bytes } : undefined,
-        });
-      }
+    if (this.rows.size === 0 && mirror) this.seedRows(mirror.rows);
+    // A `staging` row the native reconcile did not promote is a transfer that came back wrong: the
+    // bytes are not trustworthy, so the row is not either (the native side has already deleted the
+    // staging file). Leaving it named here would keep a track that can never play out of the sweep.
+    for (const [songId, row] of [...this.rows]) {
+      if (row.state === 'staging') this.rows.delete(songId);
     }
-    // Playlist records survive a kill: they are rebuilt from the refs each row carries. A playlist
-    // whose songs were all removed, or whose refs all aged out, simply has no record any more.
-    this.rebuildPlaylists();
+    this.rebuildPlaylists(mirror?.playlists);
+    const resume = this.resumable();
     this.saveMirror();
-    this.onChange?.();
+    this.notify();
+    // Only a manifest still marked `downloading` is resumed — a cancelled one stays `partial`
+    // until the owner asks again (§6 E2, "the user had not cancelled").
+    for (const playlistId of resume) await this.resume(playlistId);
+  }
+
+  /**
+   * The playlists that boot must re-enqueue: a manifest still `downloading` whose songs are not all
+   * on disk. Read before the resume runs, so `saveMirror` records the manifest as it was found.
+   */
+  private resumable(): string[] {
+    const ids: string[] = [];
+    for (const [playlistId, record] of this.playlists) {
+      if (record.requestedAt === undefined) continue;
+      if (record.state !== 'partial' && record.state !== 'downloading') continue;
+      if (record.total === 0 || record.done === record.total) continue;
+      if (this.manifests.get(playlistId)?.state !== 'downloading') continue;
+      ids.push(playlistId);
+    }
+    return ids;
   }
 
   /**
@@ -359,6 +411,12 @@ export class OfflineStore {
     this.ensureListening();
     const estimate = this.estimate(songs);
     const doneInitially = songs.filter((song) => this.rows.get(song.id)?.state === 'complete').length;
+    /*
+     * The manifest is written **before** a byte is fetched: `total` is the list that was asked for,
+     * so a kill mid-transfer, or a track added to the playlist afterwards, can never reconcile as
+     * `done === total` from the completed files alone.
+     */
+    this.manifests.set(playlistId, { songs, requestedAt: Date.now(), state: 'downloading' });
     const record: PlaylistRecord = {
       state: 'estimating',
       done: doneInitially,
@@ -366,19 +424,47 @@ export class OfflineStore {
       bytes: estimate.total,
       exact: estimate.exact,
       songs,
+      requestedAt: Date.now(),
     };
     this.playlists.set(playlistId, record);
-    this.onChange?.();
+    this.notify();
 
     const free = await this.bridge.freeBytes();
     if (free >= 0 && free < estimate.total + FREE_SPACE_MARGIN) {
       record.state = 'idle';
-      this.onChange?.();
+      this.manifests.delete(playlistId);
+      this.notify();
       return { kind: 'no-space', free, needed: estimate.total + FREE_SPACE_MARGIN };
     }
 
     await this.bridge.configure({ allowsCellular: options.allowsCellular === true, maxConcurrent: MAX_CONCURRENT });
     record.state = 'downloading';
+    await this.enqueueSongs(playlistId, songs);
+    this.saveMirror();
+    this.reconcileRecord(playlistId);
+    this.notify();
+    return { kind: 'started' };
+  }
+
+  /**
+   * Boot resume (§5 / §6 E2): re-enqueue the songs of a manifest that is not finished. The playlist
+   * stays `partial` in the sense that it is not complete; each `done` event moves it back to
+   * `downloading` as the transfers land.
+   */
+  private async resume(playlistId: string): Promise<void> {
+    const record = this.playlists.get(playlistId);
+    const manifest = this.manifests.get(playlistId);
+    if (!record || !manifest || !this.bridge) return;
+    this.ensureListening();
+    await this.enqueueSongs(playlistId, manifest.songs);
+    this.reconcileRecord(playlistId);
+    this.saveMirror();
+    this.notify();
+  }
+
+  /** The one place a song list becomes transfers: audio first (the long pole), its lyric second. */
+  private async enqueueSongs(playlistId: string, songs: Song[]): Promise<void> {
+    if (!this.bridge) return;
     for (const song of songs) {
       const existing = this.rows.get(song.id);
       if (existing?.state === 'complete') {
@@ -399,12 +485,9 @@ export class OfflineStore {
           durationSec: song.duration ?? 0,
         });
       }
-      // The long pole (audio) is enqueued first; the lyric rides its own transfer, second.
+      // The lyric rides its own transfer, in the same lane, keyed by its own kind.
       await this.enqueueLyrics(song);
     }
-    this.reconcileRecord(playlistId);
-    this.onChange?.();
-    return { kind: 'started' };
   }
 
   /** Cancel a running download; tracks already complete are kept (§4). */
@@ -413,12 +496,16 @@ export class OfflineStore {
     if (!record || !this.bridge) return;
     for (const song of record.songs) {
       if (this.rows.get(song.id)?.state === 'complete') continue;
+      // `cancel(songId)` stops both of the song's transfers: audio and lyrics.
       await this.bridge.cancel(song.id);
       this.dropRef(song.id, playlistId);
     }
     record.state = record.done > 0 ? 'partial' : 'failed';
+    // A cancelled manifest is never resumed by boot; only the owner's tap asks again.
+    const manifest = this.manifests.get(playlistId);
+    if (manifest) manifest.state = 'partial';
     this.saveMirror();
-    this.onChange?.();
+    this.notify();
   }
 
   /** §S9/S10: drop this playlist's refs; delete a file only when it has no refs left. */
@@ -427,8 +514,9 @@ export class OfflineStore {
     if (!record) return;
     for (const song of record.songs) await this.dropRef(song.id, playlistId);
     this.playlists.delete(playlistId);
+    this.manifests.delete(playlistId);
     this.saveMirror();
-    this.onChange?.();
+    this.notify();
   }
 
   /** §S11: explicit global eviction — remove every download. */
@@ -438,8 +526,24 @@ export class OfflineStore {
     for (const songId of songIds) await this.bridge.remove(songId);
     this.rows.clear();
     this.playlists.clear();
+    this.manifests.clear();
     clearMirror(this.store);
-    this.onChange?.();
+    this.notify();
+  }
+
+  /**
+   * How many of the playlist's *current* songs the download does not cover — the "a track was added
+   * after the download" case. Zero for a playlist whose set is a subset of what was downloaded.
+   */
+  missingCount(playlistId: string, songs: Song[]): number {
+    const manifest = this.manifests.get(playlistId);
+    const covered = new Set((manifest?.songs ?? this.playlists.get(playlistId)?.songs ?? []).map((song) => song.id));
+    if (covered.size === 0) return 0;
+    let missing = 0;
+    for (const song of songs) {
+      if (!covered.has(song.id) || this.rows.get(song.id)?.state !== 'complete') missing += 1;
+    }
+    return missing;
   }
 
   dispose(): void {
@@ -477,20 +581,27 @@ export class OfflineStore {
     }
     for (const playlistId of row.refs) this.reconcileRecord(playlistId);
     this.saveMirror();
-    this.onChange?.();
+    this.notify();
   }
 
   private onFailed(event: DownloadEvent): void {
     const row = this.rows.get(event.songId);
     if (!row) return;
     if (event.kind === 'lyrics') {
-      row.lyrics = { state: 'failed', bytes: 0, fetchedAt: Date.now() };
+      /*
+       * A `404` from the lyrics route is not a failure: it is the library saying this track has no
+       * sidecar, which is a fact worth keeping (`none` — the fresh-miss row §"Offline lyrics" asks
+       * about) rather than a lyric that makes the playlist read `· retry` for ever.
+       */
+      row.lyrics = event.status === 404
+        ? { state: 'none', bytes: 0, fetchedAt: Date.now() }
+        : { state: 'failed', bytes: 0, fetchedAt: Date.now() };
     } else {
       row.state = 'failed';
     }
     for (const playlistId of row.refs) this.reconcileRecord(playlistId);
     this.saveMirror();
-    this.onChange?.();
+    this.notify();
   }
 
   /**
@@ -511,6 +622,12 @@ export class OfflineStore {
         songId: song.id,
         url,
         suffix: 'lyrics',
+        /*
+         * No byte count is known before the transfer starts, and inventing one would be a lie.
+         * Native verifies against the **response's** `Content-Length` (the route always sends one)
+         * and records it on the job as it arrives, so the lyrics axis is checked exactly as the
+         * audio axis is — `bytes: 0` here means "unknown yet", never "do not check".
+         */
         bytes: 0,
         refs: row.refs,
         title: song.title,
@@ -598,14 +715,46 @@ export class OfflineStore {
     } else {
       record.state = done > 0 ? 'partial' : 'failed';
     }
+    // The persisted half: only a manifest still `downloading` is resumed by the next boot, so a
+    // cancelled (`partial`) or finished one is never re-enqueued behind the owner's back.
+    const manifest = this.manifests.get(playlistId);
+    if (manifest) {
+      if (record.state === 'complete') manifest.state = 'complete';
+      else if (record.state === 'downloading') manifest.state = 'downloading';
+      else manifest.state = 'partial';
+    }
   }
 
-  /** Rebuild playlist records from the refs the native rows carry (boot reconcile). */
-  private rebuildPlaylists(): void {
+  /**
+   * Rebuild playlist records at boot. The manifest is the primary source — its song list is the
+   * durable `total` — and the refs the native rows carry are the fallback for a playlist downloaded
+   * before the manifest existed (or whose manifest was dropped as unreadable).
+   */
+  private rebuildPlaylists(manifests?: Record<string, OfflinePlaylistManifest>): void {
     this.playlists.clear();
+    this.manifests.clear();
+    for (const [playlistId, manifest] of Object.entries(manifests ?? {})) this.manifests.set(playlistId, manifest);
+    for (const [playlistId, manifest] of this.manifests) {
+      const done = manifest.songs.filter((song) => this.rows.get(song.id)?.state === 'complete').length;
+      const allAudio = manifest.songs.length > 0 && done === manifest.songs.length;
+      const lyricPending = manifest.songs.some((song) => this.rows.get(song.id)?.lyrics?.state === 'pending');
+      const lyricFailed = manifest.songs.some((song) => this.rows.get(song.id)?.lyrics?.state === 'failed');
+      const estimate = this.estimate(manifest.songs);
+      this.playlists.set(playlistId, {
+        // Not all there is `partial` — never `complete` from the files that happened to land.
+        state: allAudio ? (lyricPending ? 'downloading' : lyricFailed ? 'partial' : 'complete') : 'partial',
+        done,
+        total: manifest.songs.length,
+        bytes: estimate.total,
+        exact: estimate.exact,
+        songs: manifest.songs,
+        requestedAt: manifest.requestedAt,
+      });
+    }
     const byPlaylist = new Map<string, IndexRow[]>();
     for (const row of this.rows.values()) {
       for (const playlistId of row.refs) {
+        if (this.playlists.has(playlistId)) continue;
         const list = byPlaylist.get(playlistId) ?? [];
         list.push(row);
         byPlaylist.set(playlistId, list);
@@ -641,15 +790,18 @@ export class OfflineStore {
   }
 
   private saveMirror(): void {
-    const rows: Record<string, { path: string; bytes: number; state: DownloadState; lyrics?: { state: LyricsState; bytes: number } }> = {};
+    const rows: Record<string, { path: string; bytes: number; state: DownloadState; lyrics?: { state: LyricsState; bytes: number; fetchedAt?: number } }> = {};
     for (const [songId, row] of this.rows) {
       rows[songId] = {
         path: row.path,
         bytes: row.bytes,
         state: row.state,
-        lyrics: row.lyrics ? { state: row.lyrics.state, bytes: row.lyrics.bytes } : undefined,
+        // `fetchedAt` is written or a `none` row answers `miss` again on the next launch.
+        lyrics: row.lyrics ? { state: row.lyrics.state, bytes: row.lyrics.bytes, fetchedAt: row.lyrics.fetchedAt } : undefined,
       };
     }
-    saveMirror({ v: 1, hydratedAt: Date.now(), rows }, this.store);
+    const playlists: Record<string, OfflinePlaylistManifest> = {};
+    for (const [playlistId, manifest] of this.manifests) playlists[playlistId] = manifest;
+    saveMirror({ v: 1, hydratedAt: Date.now(), rows, playlists }, this.store);
   }
 }

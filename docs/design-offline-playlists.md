@@ -156,10 +156,18 @@ Keyed by `songId`. `bytes` is the *actual* bytes written, verified against `Cont
 `song.size` taken on faith. `refs` is the playlist ids that asked for it.
 
 The **JS mirror** is `localStorage["navilite.offline"]`, the same shape as the resume snapshot
-(`src/storage/session.ts:38-42`): `{ v: 1, hydratedAt, rows: { [songId]: { path, bytes, state } } }`.
-It exists for one reason — invariant 1, a synchronous resolver — and it is a *cache*: the native
-`index.json` wins, and the mirror is rewritten after boot reconcile, after every `done`/`failed`
+(`src/storage/session.ts:38-42`): `{ v: 1, hydratedAt, rows: { [songId]: { path, bytes, state, lyrics } },
+playlists: { [playlistId]: { songs, requestedAt, state } } }`.
+It exists for one reason — invariant 1, a synchronous resolver — and it is a *cache* of the rows: the
+native `index.json` wins, and the mirror is rewritten after boot reconcile, after every `done`/`failed`
 event, and after any removal. A stale mirror is a performance bug, never a correctness bug (§6, E3).
+
+**The playlist manifest** (`mirror.playlists[playlistId]`, written before the first byte is fetched) is
+the other half: rows say what is *on disk*, the manifest says what was *asked for*. `PlaylistRecord.total`
+is the manifest's length, never the number of completed rows, so a download killed mid-flight — or a
+playlist a track was added to afterwards — reconciles as `partial` with the missing count, instead of
+deriving `done === total` from the files that happened to land. `state: 'downloading'` is the one value
+that authorises the boot resume; `partial` (cancelled, failed) is never re-enqueued without a tap.
 
 Survives an app restart because both halves are on disk: the native index and the mirror are two
 copies of the same facts, and boot runs `list()` → mirror. If the mirror is missing, empty or corrupt
@@ -213,12 +221,16 @@ Per playlist record: `idle → estimating → downloading → complete | partial
 - **What persists across an app kill:** everything. `index.json` (native, atomic) and the mirror.
   Plus the plugin's `UserDefaults` list of in-flight `songId`s, so a relaunch can reconcile
   `URLSession.getAllTasks` against them.
-- **Resume rule:** on boot, every row still `staging` is re-checked. A staging file whose byte count
-  equals the expected `Content-Length` **is promoted to `complete`** (the bytes arrived, only the
-  callback was lost). Otherwise it is marked `partial` and re-enqueued *only if the playlist record
-  is `downloading`* (i.e. the user had not cancelled) — `URLSession` resumption via `resumeData` is
+- **Resume rule:** on boot — natively in `NaviliteDownloads`' `load()`, before JS exists — every row
+  still `staging` is re-checked. A staging file whose byte count equals the transfer's expected
+  `Content-Length` **is promoted to `complete`** (the bytes arrived, only the callback was lost) and its
+  index row is written there; any other staging file is deleted with its job, so the track is
+  re-fetched. JS then resumes what is missing from the **manifest**, and only while the playlist record
+  is `downloading` (i.e. the user had not cancelled) — `URLSession` resumption via `resumeData` is
   best-effort and never the rule: the rule is "correct or re-fetch", never "trust a partial".
-  Concurrency capped at 3 (research §4.1), enforced natively.
+  The same load pass sweeps the orphans (E7): staging files with no job or older than 24 h, and any
+  file in the offline root the index does not name. Concurrency capped at 3 (research §4.1), enforced
+  natively.
 
 ## 6. Edge cases
 
@@ -354,7 +366,7 @@ Appended 2026-10-15 on the owner's requirement: a downloaded playlist is the son
 
 The existing device cache (`LyricsCache`, `src/storage/lyrics.ts`, `localStorage "navilite.lyrics.v1"`) is a *view* cache: 200 entries (`:22`), hits expire in a week, misses in five minutes (`:28`, `:35`), and it holds a parsed doc, not the file — so a 300-track playlist evicts its own earlier lyrics silently. That is why the durable copy below exists.
 
-**What is downloaded.** One extra transfer per track, in the audio's own lane: `enqueue({songId, url, suffix: 'lyrics'})` (no new write path in `NaviliteDownloads.swift`, §S3), URL from `LyricsRoute.urlFor(song)` (`sidecar.ts:85`), sent with the headers the shipped native path already uses (`accept: text/plain`, `sidecar.ts:126-134`) and with cookies enabled, so the route sees the same session it sees today on the device. Route `null` → fall back to `getLyrics` and store that raw value behind the same `sameSong` guard; both empty → `none`. `getLyricsBySongId` is deliberately **not** downloaded: it is Navidrome's parse of the very sidecar the route serves, and the one payload that cannot be stored raw.
+**What is downloaded.** One extra transfer per track, in the audio's own lane: `enqueue({songId, url, suffix: 'lyrics'})` (no new write path in `NaviliteDownloads.swift`, §S3), URL from `LyricsRoute.urlFor(song)` (`sidecar.ts:85`), sent with the headers the shipped native path already uses (`accept: text/plain`, `sidecar.ts:126-134`) and with cookies enabled, so the route sees the same session it sees today on the device. Route `null` → fall back to `getLyrics` and store that raw value behind the same `sameSong` guard; both empty → `none`. `getLyricsBySongId` is deliberately **not** downloaded: it is Navidrome's parse of the very sidecar the route serves, and the one payload that cannot be stored raw. **The two transfers of one song are keyed `"<kind>:<songId>"`** natively — task description and persisted job alike — so the lyric enqueue can never overwrite, cancel or complete the audio transfer beside it, and `cancel(songId)` (no kind) is the only call that stops both. The lyric's `bytes` are unknown before the transfer starts, so it is sent as `0` and verified against the **response's** `Content-Length`, which the native side records on the job as the bytes arrive.
 
 **Where it is written.** Next to the audio, keyed like it (`<root>` is §3's directory): `<root>/<songId>.lyrics` (the verbatim body bytes) and `<root>/staging/<songId>.lyrics.part`. The native `index.json` row (§3) gains one object, `bytes` verified against `Content-Length` exactly as the audio row is; the JS mirror row gains `lyrics: { state, bytes }` and never the text:
 

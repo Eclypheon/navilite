@@ -22,7 +22,7 @@ import { platformInfo, type PlatformInfo } from '../platform.ts';
 import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
-import { OfflineStore, estimateBytes, formatBytes } from '../state/offline.ts';
+import { OfflineStore, estimateBytes, formatBytes, type SizeEstimate } from '../state/offline.ts';
 import { createDownloadsBridge } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
@@ -1477,6 +1477,10 @@ function routeParts(): string[] {
 
 function renderRoute(ctx: AppContext, shell: Shell): void {
   queueRefRef = shell;
+  // The view is about to be replaced: drop last render's offline redraws with it. The store's
+  // listeners are a list, so the settings row and a playlist control coexist while both are on
+  // screen — and neither outlives the node it paints.
+  clearOfflineSubscriptions();
   const [head = 'artists', id, extra] = routeParts();
   setActiveTab(shell, head);
   const nowOpen = head === 'now';
@@ -1903,21 +1907,48 @@ function playlistRow(ctx: AppContext, playlist: Playlist): HTMLElement {
 }
 
 /**
+ * The offline store's subscribers are a **list** (v1.9.12's fix): the playlist page's download
+ * control and the settings row are both alive, and with a single `onChange` slot whichever
+ * subscribed last silently replaced the other. Each render registers its own listener and the
+ * previous render's are dropped here, so navigating away does not leave a redraw pointed at a
+ * detached node.
+ */
+let offlineSubscriptions: Array<() => void> = [];
+
+function subscribeOffline(store: OfflineStore | null, listener: () => void): void {
+  if (!store) return;
+  offlineSubscriptions.push(store.onChange(listener));
+}
+
+function clearOfflineSubscriptions(): void {
+  for (const unsubscribe of offlineSubscriptions) {
+    try {
+      unsubscribe();
+    } catch {
+      // Nothing to do — a listener that is already gone.
+    }
+  }
+  offlineSubscriptions = [];
+}
+
+/**
  * The playlist page's download control (v1.9.12): one compact button in the header action row that
  * shows the total size and drives the §5 state machine. It renders its label from the index
  * synchronously and updates only its own label from the store's change listener — never a poll, and
- * never a re-render of the list behind it.
+ * never a re-render of the list behind it. The estimate is recomputed inside `paint()`, not captured
+ * at render: the same page reads `up to 312 MB` before a download and the exact figure after it.
  */
 function downloadControl(ctx: AppContext, playlistId: string, songs: Song[]): HTMLElement {
   const offline = ctx.offline;
-  // The estimate uses the store's rows so lyric bytes are counted (§"Offline lyrics") and a
-  // playlist sharing tracks is exact on its first open; no rows → the audio-only fallback.
-  const estimate = offline ? offline.estimate(songs) : estimateBytes(songs);
+  const estimate = (): SizeEstimate => (offline ? offline.estimate(songs) : estimateBytes(songs));
   const button = h('button', { class: 'button', 'aria-label': '' });
   const sizeLabel = (): string => {
-    const prefix = estimate.exact ? '' : 'up to ';
-    return `${prefix}${formatBytes(estimate.total)}`;
+    const current = estimate();
+    const prefix = current.exact ? '' : 'up to ';
+    return `${prefix}${formatBytes(current.total)}`;
   };
+  /** Tracks the downloaded set does not cover — a playlist a song was added to afterwards. */
+  const missing = (): number => offline?.missingCount(playlistId, songs) ?? 0;
   const label = (): string => {
     const record = offline?.record(playlistId);
     if (!record || record.state === 'idle') {
@@ -1931,7 +1962,8 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[]): HT
       case 'partial':
         return `${record.done} of ${record.total} · retry`;
       case 'complete':
-        return `✓ ${sizeLabel()}`;
+        // The playlist changed after it was downloaded: not complete any more, and it says so.
+        return missing() > 0 ? `${songs.length - missing()} of ${songs.length} · retry` : `✓ ${sizeLabel()}`;
       case 'failed':
         return 'Retry';
     }
@@ -1946,7 +1978,9 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[]): HT
   button.addEventListener('click', () => {
     if (!offline || songs.length === 0) return;
     const record = offline.record(playlistId);
-    if (!record || record.state === 'idle' || record.state === 'failed' || record.state === 'partial') {
+    // A `complete` record whose playlist has grown is a resume, not a removal.
+    const grown = record?.state === 'complete' && missing() > 0;
+    if (!record || record.state === 'idle' || record.state === 'failed' || record.state === 'partial' || grown) {
       void (async () => {
         // Wi-Fi only by default: the native side enforces `allowsCellularAccess = false`.
         const result = await offline.download(playlistId, songs, { allowsCellular: false });
@@ -1958,7 +1992,7 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[]): HT
       void offline.remove(playlistId);
     }
   });
-  if (offline) offline.onChange = paint;
+  subscribeOffline(offline, paint);
   return button;
 }
 
@@ -2119,7 +2153,7 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
   removeDownloads.addEventListener('click', () => {
     void ctx.offline?.removeAll().then(() => ctx.toast('All downloads removed'));
   });
-  if (ctx.offline) ctx.offline.onChange = paintDownloads;
+  subscribeOffline(ctx.offline, paintDownloads);
 
   const forget = h('button', { class: 'button danger', text: 'Forget credentials' });
   forget.addEventListener('click', () => {

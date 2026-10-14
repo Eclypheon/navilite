@@ -1591,7 +1591,7 @@ interface NaviliteDownloadsPlugin {
   writeLyrics(options: { songId: string; text: string }): Promise<void>;
   addListener(
     eventName: 'progress' | 'done' | 'failed',
-    listener: (event: { songId: string; path?: string; bytes?: number; total?: number; error?: string; kind?: 'audio' | 'lyrics' }) => void,
+    listener: (event: { songId: string; path?: string; bytes?: number; total?: number; error?: string; status?: number; kind?: 'audio' | 'lyrics' }) => void,
   ): Promise<PluginListenerHandle>;
 }
 

@@ -13,6 +13,8 @@
  * only trusts a row that says `complete`, and the store re-checks it against the native index on
  * boot, dropping rows whose files are gone.
  */
+import type { Song } from '../api/types.ts';
+
 export interface OfflineMirrorRow {
   /** The `file://` URL of the verified file, as the native side reported it. */
   path: string;
@@ -23,8 +25,28 @@ export interface OfflineMirrorRow {
    * The lyrics axis, stored beside the audio row (v1.9.12). Never the text — the `.lyrics` file
    * holds the raw body and is parsed at read time; this is only the state and the measured bytes,
    * so the resolver and the estimator answer synchronously.
+   *
+   * `fetchedAt` is carried for the `none` staleness window: without it a "no lyrics" row answers
+   * `miss` on the first lyrics open of every session and re-asks the network for a fact the store
+   * already recorded.
    */
-  lyrics?: { state: 'pending' | 'present' | 'none' | 'failed'; bytes: number };
+  lyrics?: { state: 'pending' | 'present' | 'none' | 'failed'; bytes: number; fetchedAt?: number };
+}
+
+/**
+ * A playlist's durable manifest, stored beside the rows (v1.9.12). The store's `record()` is
+ * derived from it — `total` is the manifest's length, never the number of completed files, so a
+ * download killed mid-flight (or a playlist a track was added to) can never reconcile as complete.
+ * `state: 'downloading'` is the resume flag: only a manifest the owner did not cancel is re-enqueued
+ * on the next foreground.
+ */
+export interface OfflinePlaylistManifest {
+  /** The songs the playlist held when the download was requested — the durable half of `total`. */
+  songs: Song[];
+  /** When the download was requested, for diagnostics. */
+  requestedAt: number;
+  /** `downloading` until it finishes or is cancelled; `partial`/`complete` never auto-resume. */
+  state: 'downloading' | 'complete' | 'partial';
 }
 
 export interface OfflineMirror {
@@ -32,6 +54,8 @@ export interface OfflineMirror {
   /** When the mirror was written, for diagnostics. */
   hydratedAt: number;
   rows: Record<string, OfflineMirrorRow>;
+  /** One manifest per playlist that was downloaded or is being downloaded. */
+  playlists?: Record<string, OfflinePlaylistManifest>;
 }
 
 /** Just the part of `Storage` this needs, so a test can pass a plain object. */
@@ -83,11 +107,32 @@ export function parseMirror(raw: string | null): OfflineMirror | null {
       (r.lyrics.state === 'pending' || r.lyrics.state === 'present' || r.lyrics.state === 'none' || r.lyrics.state === 'failed') &&
       typeof r.lyrics.bytes === 'number'
     ) {
-      lyrics = { state: r.lyrics.state, bytes: r.lyrics.bytes };
+      lyrics = {
+        state: r.lyrics.state,
+        bytes: r.lyrics.bytes,
+        // Carried, not dropped: a `none` row without it would be re-asked every session.
+        fetchedAt: typeof r.lyrics.fetchedAt === 'number' ? r.lyrics.fetchedAt : undefined,
+      };
     }
     rows[songId] = { path: r.path, bytes: r.bytes, state: r.state, lyrics };
   }
-  return { v: OFFLINE_MIRROR_VERSION, hydratedAt: candidate.hydratedAt ?? Date.now(), rows };
+  return { v: OFFLINE_MIRROR_VERSION, hydratedAt: candidate.hydratedAt ?? Date.now(), rows, playlists: parseManifests(candidate.playlists) };
+}
+
+/** The playlist manifests, kept only where they are well-formed enough to trust. */
+function parseManifests(value: unknown): Record<string, OfflinePlaylistManifest> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const playlists: Record<string, OfflinePlaylistManifest> = {};
+  for (const [playlistId, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const manifest = entry as Partial<OfflinePlaylistManifest>;
+    if (manifest.state !== 'downloading' && manifest.state !== 'complete' && manifest.state !== 'partial') continue;
+    if (!Array.isArray(manifest.songs)) continue;
+    const songs = manifest.songs.filter((song): song is Song => typeof song === 'object' && song !== null && typeof (song as Song).id === 'string');
+    if (songs.length !== manifest.songs.length || songs.length === 0) continue;
+    playlists[playlistId] = { songs, requestedAt: typeof manifest.requestedAt === 'number' ? manifest.requestedAt : Date.now(), state: manifest.state };
+  }
+  return Object.keys(playlists).length > 0 ? playlists : undefined;
 }
 
 export function loadMirror(store: MirrorStore = mirrorStore()): OfflineMirror | null {
