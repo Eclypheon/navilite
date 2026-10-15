@@ -48,6 +48,18 @@ const TRACK: TrackRequest = {
 
 const OTHER_TRACK: TrackRequest = { ...TRACK, id: 'song-2', url: 'http://127.0.0.1:4599/rest/stream?id=song-2', title: 'Track two' };
 
+/**
+ * A **downloaded** track, exactly as the app resolves one: `Library.streamUrl` returns
+ * `offline.pathFor(song.id)` for a complete row (`src/state/library.ts:79`), which is a `file://`
+ * URL, and the same track streamed is `TRACK`. Both are played by the same engine through the same
+ * bridge; only the native side's choice of transport differed (v1.9.16).
+ */
+const LOCAL_TRACK: TrackRequest = {
+  ...TRACK,
+  id: 'song-1-local',
+  url: 'file:///var/mobile/Containers/Data/Application/0F0A-DEAD/navilite-offline/song-1.mp3',
+};
+
 interface Recording {
   calls: string[];
   /** Every URL the bridge was asked to load, in order — which track the one asset holds. */
@@ -600,6 +612,46 @@ test('the spectrum is fed by the engine that is playing: real, varying, proporti
     await settle(200);
     assert.equal(engine.status().state, 'playing');
     assert.equal(engine.status().spectrum, true, 'still playing means still fed — nothing silently switched the visualiser off');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/*
+ * v1.9.16 — the **downloaded** track, on the app's side of the seam.
+ *
+ * The owner: *"the spectrum doesn't seem to work with downloaded songs."* The JS layer already did
+ * its half — it hands the tap the `file://` URL the track resolved to — and the refusal was in the
+ * vendor's choice of transport, which is why `test/local-file-spectrum.test.ts` reads the native
+ * source. What this test holds is the app's half of the same invoice: a local-file track is tapped
+ * like any other, and a track change of *either* kind leaves the tap following the item that is
+ * playing now rather than dead on the one before it.
+ */
+test('a downloaded track feeds the spectrum, and the next item — streamed — is what the tap follows', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const engine = nativeEngine(record);
+    engines.push(engine);
+
+    await engine.play(LOCAL_TRACK);
+    assert.equal(record.loads[0], LOCAL_TRACK.url, 'the player was given the local file the app resolved, not a stream');
+    assert.equal(record.spectrum.started, true, 'and a downloaded track is tapped like any other');
+    assert.equal(record.spectrum.startedUrl, LOCAL_TRACK.url, 'the tap is on that same file');
+    await settle(160);
+    assert.equal(engine.status().spectrum, true, `the bars are live on a local-file track (modeReason: ${engine.status().modeReason})`);
+
+    // Recovery: the queue moves on to a track that is streamed — a different scheme, and the same
+    // requirement. The tap must follow the item that is audible now.
+    record.calls = [];
+    await engine.play(OTHER_TRACK);
+    await settle(200);
+    assert.equal(record.spectrum.startedUrl, OTHER_TRACK.url, 'the tap follows the item that is playing now');
+    assert.equal(engine.status().state, 'playing');
+    assert.equal(engine.status().spectrum, true, `and the bars are live on the streamed one (modeReason: ${engine.status().modeReason})`);
+    say(`v1.9.16 — local ${LOCAL_TRACK.url.slice(-24)} → streamed, tap on ${record.spectrum.startedUrl?.slice(-24)}`);
   } finally {
     fakes.restore();
     await stopAll(engines);

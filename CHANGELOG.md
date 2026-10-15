@@ -233,3 +233,7 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - A track that showed a server message where its words should be, in a playlist you downloaded with an older build, now fixes itself: open that track again and the saved message is thrown away and the real words are fetched in its place — or an honest "no lyrics" if there are none. Deleting the playlist and downloading it again is no longer needed, and it was never what cleared it.
 - Settings → Clear cached lyrics is still there if a track ever looks out of date.
+
+## 1.9.16 — 2026-10-15
+
+- The spectrum works on songs you have downloaded. It sat flat on those tracks — the bars stayed on the album-art theme — while the same song played over the network was fine, because a downloaded song is played by a different part of the player and the spectrum was reading the part a stream uses. A downloaded song now plays through that same one.

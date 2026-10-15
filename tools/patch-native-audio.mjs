@@ -96,6 +96,12 @@ patch({
 
 const SWIFT = 'node_modules/@capgo/capacitor-native-audio/ios/Sources/NativeAudioPlugin/RemoteAudioAsset.swift';
 
+/** The vendor's own plugin: where it decides which transport a track gets. */
+const PLUGIN = 'node_modules/@capgo/capacitor-native-audio/ios/Sources/NativeAudioPlugin/Plugin.swift';
+
+/** The base asset class both transports inherit: where a non-http path is decoded into a player. */
+const ASSET = 'node_modules/@capgo/capacitor-native-audio/ios/Sources/NativeAudioPlugin/AudioAsset.swift';
+
 patch({
   file: SWIFT,
   id: 'ios-precise-duration',
@@ -163,6 +169,92 @@ patch({
                 // be an answer, or it is a promise that never resolves.
                 completion?()
             }`,
+});
+
+/* --------------------------------------------------- iOS: one transport, whichever scheme */
+/*
+ *   5. **A downloaded track is played by the transport every native feature is keyed on**
+ *      (`ios-file-transport`, v1.9.16, the owner's *"the spectrum doesn't seem to work with
+ *      downloaded songs"*).
+ *
+ *      The plugin has exactly two transports and picks between them by URL scheme:
+ *      `RemoteAudioAsset` (`players: [AVPlayer]`, the `http(s)` branch) and `AudioAsset`
+ *      (`channels: [AVAudioPlayer]`, the `file://` branch). Every capability this app has — the
+ *      spectrum tap, the background boundary observer, the warm proof, the lock-screen card — finds
+ *      the player it may not guess at by reflecting `players: [AVPlayer]` on the asset
+ *      (`ios/App/App/NaviliteSpectrum.swift:1286`, `NaviliteRemote.swift`). A downloaded track is a
+ *      `file://` URL (`src/state/library.ts:79`), so on that one the reflection found nothing, the
+ *      tap refused (`NaviliteSpectrum.swift:1286-1291`), and the bars stayed on the album-art theme
+ *      for the whole track while the streamed version of the same track was fine.
+ *
+ *      Only which class the branch builds changes: the existence check, the `resolve()`, and the
+ *      `return` are untouched, and the `AudioAsset` the plugin still builds for a plain path
+ *      (`Plugin.swift:1464-1469`, `:1487-1491`) is not this path.
+ */
+patch({
+  file: PLUGIN,
+  id: 'ios-file-transport',
+  anchor: `                if url.isFileURL {
+                    // Handle local file URL
+                    let fileURL = url
+                    basePath = fileURL.path
+
+                    if let basePath = basePath, FileManager.default.fileExists(atPath: basePath) {
+                        let audioAsset = AudioAsset(
+                            owner: self,
+                            withAssetId: audioId, withPath: basePath, withChannels: channels,
+                            withVolume: volume)
+                        self.audioList[audioId] = audioAsset`,
+  replacement: `                if url.isFileURL {
+                    // <marker>: a downloaded track arrives on the same class a streamed one does,
+                    // because the spectrum tap, the boundary observer and the now-playing card all
+                    // find the audible player by reflecting \`players: [AVPlayer]\` — and an
+                    // \`AudioAsset\` holds \`channels: [AVAudioPlayer]\` instead.
+                    // Handle local file URL
+                    let fileURL = url
+                    basePath = fileURL.path
+
+                    if let basePath = basePath, FileManager.default.fileExists(atPath: basePath) {
+                        let remoteAudioAsset = RemoteAudioAsset(
+                            owner: self,
+                            withAssetId: audioId,
+                            withPath: assetPath,
+                            withChannels: channels,
+                            withVolume: volume,
+                            withHeaders: nil)
+                        self.audioList[audioId] = remoteAudioAsset`,
+});
+
+/*
+ *   6. **And that file is decoded once, not twice** (`ios-single-decode`, v1.9.16).
+ *
+ *      `RemoteAudioAsset` initializes through `AudioAsset.init`, whose `setupBlock` builds an
+ *      `AVAudioPlayer` per channel for every path that is not `http(s)` — including the `file://`
+ *      string patch 5 now hands it, which would decode the whole downloaded file a second time into
+ *      a player nothing ever sends `play()`. The guard is extended to `file://`, a scheme only this
+ *      new caller passes.
+ */
+patch({
+  file: ASSET,
+  id: 'ios-single-decode',
+  anchor: `        let setupBlock = { [weak self] in
+            guard let self else { return }
+            if Self.isRemoteHttpUrl(path) {
+                return
+            }
+            for _ in 0..<channelCount {`,
+  replacement: `        let setupBlock = { [weak self] in
+            guard let self else { return }
+            if Self.isRemoteHttpUrl(path) {
+                return
+            }
+            // <marker>: a \`file://\` path is what a remote asset is given, and the only caller that
+            // passes one here is \`RemoteAudioAsset\` on its way up — decoding it again would be a
+            // second copy of the same file in an \`AVAudioPlayer\` nobody plays.
+            if path.lowercased().hasPrefix("file://") {
+                return
+            }
+            for _ in 0..<channelCount {`,
 });
 
 for (const line of applied) console.log(`[navilite] ${line}`);

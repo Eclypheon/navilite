@@ -351,4 +351,11 @@ export const CHANGELOG: ChangelogRelease[] = [
         'Settings → Clear cached lyrics is still there if a track ever looks out of date.',
       ],
     },
+    {
+      version: '1.9.16',
+      date: '2026-10-15',
+      items: [
+        'The spectrum works on songs you have downloaded. It sat flat on those tracks — the bars stayed on the album-art theme — while the same song played over the network was fine, because a downloaded song is played by a different part of the player and the spectrum was reading the part a stream uses. A downloaded song now plays through that same one.',
+      ],
+    },
   ];
