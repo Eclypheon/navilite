@@ -28,6 +28,12 @@
  *
  * The iOS forward-buffer target is *not* here: that one is reachable from our own plugin
  * (`ios/App/App/NaviliteSpectrum.swift`, `configureBuffer`) and is set from the app.
+ *
+ *   3. **iOS — start on the first seconds that arrive** (`ios-start-eagerly`), and
+ *   4. **iOS — seek to somewhere the item can reach** (`ios-tolerant-seek`, v1.9.13): the plugin
+ *      asked for an *exact* seek, which a progressively downloaded item refuses by flushing every
+ *      byte it holds and starting again from the beginning — the owner's *"seeking anywhere on the
+ *      seek line seems to make the song play from the beginning"*.
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -118,6 +124,45 @@ patch({
                 // <marker>: make a sound on the first seconds that arrive, and keep filling behind.
                 player.automaticallyWaitsToMinimizeStalling = false
                 player.volume = self.initialVolume`,
+});
+
+/*
+ *   4. **iOS — the seek the item can actually perform (v1.9.13).**
+ *
+ *      The owner: *"seeking anywhere on the seek line seems to make the song play from the beginning
+ *      even though on the seek line it shows as if it's playing from where i released it."*
+ *
+ *      `RemoteAudioAsset.setCurrentTime` seeks with `toleranceBefore: .zero, toleranceAfter: .zero`
+ *      — an *exact* seek — which is a demand AVFoundation cannot meet on a progressively downloaded
+ *      (transcoded, streamed) item. It answers `finished == false`, and the completion below is the
+ *      only place the plugin's own `call.resolve()` happens, so the promise the app holds never
+ *      settles either. What the player does with the demand is flush what it had buffered and refill
+ *      from the start of the item — the beginning — while `currentTime()` already reads the position
+ *      that was asked for, which is why the seek bar showed the finger's position and the sound went
+ *      back to the first bar.
+ *
+ *      Half a second of tolerance is a seek AVFoundation can satisfy from the bytes it holds, and it
+ *      is inside the resolution of the thing that asked: the bar is a finger wide and the app asks
+ *      in tenths of a second. The completion is called either way, so a seek that still cannot be
+ *      performed is a *reported* seek rather than a promise that hangs for ever — which is the leak
+ *      the app has been working around since v1.9.1 (`SEEK_TIMEOUT_MS`).
+ */
+patch({
+  file: SWIFT,
+  id: 'ios-tolerant-seek',
+  anchor: `            let target = CMTime(seconds: validTime, preferredTimescale: Self.seekPreferredTimescale)
+            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
+                guard finished else { return }
+                completion?()
+            }`,
+  replacement: `            let target = CMTime(seconds: validTime, preferredTimescale: Self.seekPreferredTimescale)
+            // <marker>: land on the nearest frame the item can render, not on an exact one.
+            let tolerance = CMTime(seconds: 0.5, preferredTimescale: Self.seekPreferredTimescale)
+            player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance) { _ in
+                // Settle the caller either way: a seek that is not reported as finished must still
+                // be an answer, or it is a promise that never resolves.
+                completion?()
+            }`,
 });
 
 for (const line of applied) console.log(`[navilite] ${line}`);

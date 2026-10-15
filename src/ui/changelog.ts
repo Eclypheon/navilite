@@ -326,4 +326,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'Playlists you download bring their lyrics with them: the words and the line highlight still work with no connection, and the download size includes them.',
       ],
     },
+    {
+      version: '1.9.13',
+      date: '2026-10-15',
+      items: [
+        'Seeking works now: drag the seek bar and the song moves to where you let go. Before, the bar followed your finger and the sound started again from the beginning — the bar and the music were reading two different clocks, and there is one clock now.',
+        'And the bar never claims a move the music did not make: the position you see is the position the player itself reports, so a seek that cannot be performed leaves the bar on where the music really is instead of on where you asked it to go.',
+      ],
+    },
   ];

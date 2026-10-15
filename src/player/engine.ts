@@ -278,6 +278,30 @@ const SEEK_MUTE_MS = 1500;
 const SEEK_TIMEOUT_MS = 1500;
 
 /**
+ * How long the engine waits, after a seek, for the **player's own word** on where it is now
+ * (v1.9.13).
+ *
+ * A seek is two statements, and until v1.9.13 the engine only ever made the first one: it asked the
+ * player to move and then wrote the position it had asked for into the clock as if the move had
+ * happened. The bar therefore carried the request — *"on the seek line it shows as if it's playing
+ * from where i released it"* — while the item went wherever it actually went. This is the deadline on
+ * the second statement (`sync()`), which is three plugin calls the player answers immediately or not
+ * at all; a second is more than they take, and a read that does not answer must not be able to hold
+ * `seekInFlight` open, because that is what would take the seek bar away from the listener.
+ */
+const SEEK_VERIFY_TIMEOUT_MS = 1000;
+/**
+ * How far from the position that was asked for the player's own answer may sit and still be *that*
+ * seek (v1.9.13).
+ *
+ * AVFoundation lands on the nearest frame it can render, and the app asks in whole tenths of a
+ * second, so a seek that worked comes back within a frame or two of the request. Anything further
+ * than this is a different statement — the sound is somewhere else and the bar must say so rather
+ * than the request.
+ */
+const SEEK_VERIFY_SLACK_MS = 1500;
+
+/**
  * How long a start has to produce sound before the app says, on screen, that it did not (v1.9.2).
  *
  * This is the end of the road that v1.9.1's bounded calls started: a load whose round trips all
@@ -1889,6 +1913,16 @@ export class AudioEngine {
       const run = (async () => {
         this.generation += 1;
         /*
+         * **This seek's own token (v1.9.13).**
+         *
+         * A seek's second statement (`sync`, below) is a round trip that can outlive the seek it was
+         * made for: the next seek of a drag, a pause, a new track. Every one of those bumps
+         * `generation`, so an answer that comes back under an older token is not this seek's answer
+         * and is dropped — which is the *earlier* seek's completion unable to overwrite the later
+         * one, the other half of latest-wins.
+         */
+        const generation = this.generation;
+        /*
          * **The anchor belongs to a start, and a seek is not one (v1.9.4).**
          *
          * This line used to write `startAnchorMs` — the field a *start's* own gate reads — so a seek
@@ -1902,7 +1936,42 @@ export class AudioEngine {
         if (this.native) {
           await withDeadline(this.native.seek(positionMs / 1000), undefined, SEEK_TIMEOUT_MS, 'native.seek');
         }
-        this.setNativePosition(positionMs, false);
+        /*
+         * **The bar carries the player's own reading, never the request (v1.9.13).**
+         *
+         * This spot used to write the position that was *asked for* into the clock —
+         * `setNativePosition(positionMs, false)` — and the seek bar draws the clock, so a seek the
+         * player never performed was painted as if it had landed: the owner's *"seeking anywhere on
+         * the seek line seems to make the song play from the beginning even though on the seek line
+         * it shows as if it's playing from where i released it."* Two clocks, and the screen was
+         * showing the wrong one.
+         *
+         * So the seek is now a question with an answer. `sync()` reads the **audible** player — the
+         * slot the bridge is playing, its own `currentTime`, its own `isPlaying` — and that reading
+         * is what the clock and the bar get. It is the same read the return from the background has
+         * always used, and it is deliberately *not* the value the caller handed in: a seek that did
+         * not move the item leaves the bar on the position the item is really at, and `modeReason`
+         * says which of the two happened. If the player will not answer at all, nothing is painted —
+         * an unconfirmed position is not the position being heard, and the clock keeps the last
+         * position the player itself reported.
+         */
+        const truth =
+          generation === this.generation
+            ? await withDeadline(this.native?.sync() ?? Promise.resolve(null), null, SEEK_VERIFY_TIMEOUT_MS, 'the player (after a seek)')
+            : null;
+        if (generation !== this.generation) return;
+        const asked = Math.round(positionMs / 1000);
+        if (truth) {
+          this.setNativePosition(truth.positionMs);
+          if (truth.durationMs > 0) this.nativeDurationMs = truth.durationMs;
+          const landed = Math.round(truth.positionMs / 1000);
+          this.modeReason =
+            Math.abs(truth.positionMs - positionMs) <= SEEK_VERIFY_SLACK_MS
+              ? `the seek to ${asked} s landed — the player itself reports ${landed} s`
+              : `the seek to ${asked} s was asked for and the player is at ${landed} s — the bar follows the player, not the request`;
+        } else {
+          this.modeReason = `the seek to ${asked} s was sent and the player would not say where it is — the bar keeps the position the player last reported`;
+        }
         this.emit();
       })();
       this.seekInFlight = run;

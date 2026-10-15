@@ -217,3 +217,8 @@ Plain language, user-visible changes only. The app shows this same list under
 - Songs you have downloaded play from your phone instead of over the network: faster to start, and it uses no data.
 - Downloading keeps going while the app is in the background, and a playlist you have downloaded still plays from your phone on the lock screen.
 - Playlists you download bring their lyrics with them: the words and the line highlight still work with no connection, and the download size includes them.
+
+## 1.9.13 — 2026-10-15
+
+- Seeking works now: drag the seek bar and the song moves to where you let go. Before, the bar followed your finger and the sound started again from the beginning — the bar and the music were reading two different clocks, and there is one clock now.
+- And the bar never claims a move the music did not make: the position you see is the position the player itself reports, so a seek that cannot be performed leaves the bar on where the music really is instead of on where you asked it to go.

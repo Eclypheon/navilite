@@ -76,6 +76,13 @@ interface Recording {
    * of a track was ignored for the rest of the session.
    */
   seekNeverSettles: boolean;
+  /**
+   * v1.9.13 — a seek the player does **not** perform: the call is taken and the item stays where it
+   * is, which is the shape of an exact seek a progressively downloaded item refuses (and the shape of
+   * every seek AVFoundation answers with `finished == false`). The app must not paint the position it
+   * asked for over it.
+   */
+  seekIgnored?: boolean;
   /** True when fakeBridge.play should not immediately emit onPosition. */
   deferPosition?: boolean;
   /** The bridge's own event sink, so a test can make the player report a position or a state. */
@@ -152,7 +159,9 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
       stop: () => action('stop'),
       async seek(seconds: number) {
         record.calls.push(`seek@${Math.round(seconds)}`);
-        record.truth = { ...record.truth, positionMs: seconds * 1000 };
+        // `seekIgnored` is the seek the item does not take (v1.9.13): the player stays where it is,
+        // and its own answer to "where are you" is what the engine must carry.
+        if (!record.seekIgnored) record.truth = { ...record.truth, positionMs: seconds * 1000 };
         // The plugin's own leak, when the test asks for it: the promise never settles.
         if (record.seekNeverSettles) return new Promise<void>(() => {});
         await wait(5);
@@ -1025,6 +1034,80 @@ test('a not-playing report while a seek is in flight is read as ours, not as an 
     assert.equal(engine.status().state, 'playing', 'a transient report during a seek must not stop the sound');
     assert.ok(record.calls.includes('seek@40'), `and the seek was really sent — calls: ${record.calls.join(', ')}`);
     assert.equal(engine.status().spectrum, true, 'and the visualiser is not dropped for it');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.9.13 — **one clock: the bar carries the position being heard.**
+ *
+ * The owner: *"seeking anywhere on the seek line seems to make the song play from the beginning even
+ * though on the seek line it shows as if it's playing from where i released it."* Two statements, and
+ * only one of them was ever made: the engine asked the player to move and then wrote the *requested*
+ * position into the clock the bar draws, so a seek the item never took was painted as if it had. It
+ * asks the player now (`sync()` — the audible slot, its own `currentTime`), and what the player
+ * answers is what the clock carries.
+ *
+ * The fake's `seekIgnored` is that item: the call is taken and the position does not move, which is
+ * what AVFoundation does with an exact seek on a progressively downloaded item.
+ */
+test('a seek the player does not perform is not painted on the bar', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording({ seekIgnored: true });
+    record.truth = { playing: true, positionMs: 0, durationMs: 180_000 };
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(60);
+    assert.equal(engine.status().state, 'playing');
+
+    await engine.seek(90_000);
+    await settle(20);
+    const reported = Math.round(engine.status().positionMs);
+    say(
+      `a seek to 90000 ms the player did not take: sent ${record.calls.filter((call) => call.startsWith('seek@')).join(', ')}, ` +
+        `the player its own position is 0 ms, the engine reports ${reported} ms — modeReason: ${engine.status().modeReason}`,
+    );
+    assert.ok(record.calls.includes('seek@90'), `the seek was really sent — calls: ${record.calls.join(', ')}`);
+    assert.ok(reported < 5_000, `the bar shows where the player really is (${reported} ms), never the 90000 ms that was asked for`);
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.9.13 — **latest wins under rapid seeks**, and the position that settles is the last one's.
+ *
+ * A drag writes a position per frame. The mechanism is the engine's own single-flight coalescing —
+ * one seek in flight, the newest target remembered and issued when the running one has answered (or
+ * when `SEEK_TIMEOUT_MS` has) — plus the generation token a seek's own verification carries, so an
+ * answer that lands after a newer seek (or after a pause) is dropped rather than painted.
+ */
+test('a burst of seeks settles on the last one, and the middle ones are never sent', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(60);
+
+    // One tick, three positions: exactly what a finger moving along the bar produces.
+    const burst = [engine.seek(20_000), engine.seek(40_000), engine.seek(150_000)];
+    await Promise.all(burst);
+    await settle(40);
+    const issued = record.calls.filter((call) => call.startsWith('seek@'));
+    const reported = Math.round(engine.status().positionMs);
+    say(`three seeks in one tick (20 s, 40 s, 150 s): the bridge was asked for ${issued.join(', ')}; the engine reports ${reported} ms`);
+    assert.ok(issued.includes('seek@150'), `the newest target was issued — calls: ${issued.join(', ')}`);
+    assert.ok(!issued.includes('seek@40'), `and the superseded one was never sent — calls: ${issued.join(', ')}`);
+    assert.ok(reported >= 150_000 && reported < 155_000, `the clock settles on the last seek's own position (${reported} ms)`);
   } finally {
     fakes.restore();
     await stopAll(engines);
