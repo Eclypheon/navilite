@@ -12,7 +12,7 @@
  */
 import { SubsonicClient, SubsonicError } from '../api/subsonic.ts';
 import { LyricsRoute, type SidecarSource } from '../api/sidecar.ts';
-import { sameSong } from '../api/lyrics.ts';
+import { sameSong, structuredToBody } from '../api/lyrics.ts';
 import type { Album, Artist, Playlist, QueueContext, QueueItem, Song } from '../api/types.ts';
 import { DEFAULT_SERVER_URL, SERVER_URL_PLACEHOLDER } from '../config.ts';
 import { AudioEngine, type EngineStatus } from '../player/engine.ts';
@@ -228,10 +228,21 @@ export async function boot(root: HTMLElement): Promise<void> {
     downloadUrl: (song) => ctx.library?.client.downloadUrl(song.id) ?? `download?id=${song.id}`,
     lyricsUrl: (song) => ctx.sidecar?.urlFor?.(song) ?? null,
     lyricsFallback: async (song) => {
-      // The route had no URL for this track: fall back to the legacy getLyrics blob, stored raw
-      // behind the same artist/title guard the lyrics service uses today.
+      /*
+       * The route had nothing for this track — no URL at all, or a `404` (v1.9.14). Ask Navidrome
+       * in the order `fetchLyrics` asks it: the id-keyed structured answer first, then the legacy
+       * blob behind the same artist/title guard. A structured answer with timings comes back as an
+       * LRC body, so the highlight survives the round trip; the store keeps it raw either way.
+       */
       const client = ctx.library?.client ?? null;
       if (!client) return null;
+      try {
+        const structured = await client.getLyricsBySongId(song.id);
+        const body = structuredToBody(structured);
+        if (body !== null) return body;
+      } catch {
+        // Not implemented, not found, offline — the older call below still gets its turn.
+      }
       try {
         const blob = await client.getLyrics({ artist: song.artist, title: song.title });
         if (!blob || typeof blob.value !== 'string' || blob.value === '') return null;

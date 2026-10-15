@@ -116,3 +116,38 @@ test('invariant 9 covers the files, not only the directory', () => {
   assert.match(source, /excludeFromBackup\(destination\)/, 'and each file moved into place does too');
   assert.match(source, /excludeFromBackup\(indexPath\)/, 'including the index');
 });
+
+/**
+ * v1.9.14, defect 1 — the one the owner saw from the phone.
+ *
+ * A 4xx from URLSession is a *successful transfer of an error body*: the response arrived, so
+ * `didFinishDownloadingTo` runs and `didCompleteWithError` never does (`error == nil`). At 1.9.13
+ * the only `statusCode` read in the file was inside `didCompleteWithError`, so the lyrics route's
+ * `404` document for a track with no sidecar was staged, counted against its own `Content-Length`
+ * (so the byte check agreed with it), moved to `<songId>.lyrics` and recorded `lyrics: {state:
+ * "present"}` — the JSON blob in the Lyrics pane. Both assertions below fail against that tree.
+ */
+test('the completion handler reads the HTTP status, and only a 200 is ever promoted', () => {
+  const handler = source.slice(source.indexOf('didFinishDownloadingTo'), source.indexOf('didWriteData'));
+  assert.ok(handler.length > 0, 'the finish handler is in the file');
+  assert.match(source, /let status = \(downloadTask\.response as\? HTTPURLResponse\)\?\.statusCode \?\? 0/, 'the response status is read');
+  assert.match(handler, /guard status == 200 else \{/, 'and only a 200 reaches the staging path');
+  assert.doesNotMatch(handler, /expectedContentLength[\s\S]*?\n\s*let status/, 'the status is read *before* the byte count, not after');
+  assert.match(
+    source,
+    /plugin\?\.didFail\(taskKey: taskKey, error: NaviliteDownloads\.statusError\(status\), status: status\)/,
+    'anything else is reported as failed, carrying the status JS maps to a miss',
+  );
+  assert.match(handler, /guard status == 200 else \{\s+try\? FileManager\.default\.removeItem\(at: location\)/, 'the staged bytes are deleted, never promoted');
+  // The audio axis has the same hole (a non-200 body whose length matched would be promoted as
+  // audio), so the guard is on the response, not on the kind.
+  assert.doesNotMatch(handler, /kind == Self\.lyricsKind\) \{\s+let status/, 'the status check is not gated on the lyrics kind');
+});
+
+test('the route’s own error document is never stored as lyrics, wherever the bytes land', () => {
+  assert.match(source, /fileprivate static func looksLikeRouteError\(_ url: URL\) -> Bool/, 'native carries the predicate');
+  assert.ok(source.includes('head.hasPrefix("{\\"error\\"")'), 'the same first test as the parser: a body that opens with {"error"');
+  assert.ok(source.includes('head.contains("no lyrics sidecar for this track")'), 'and the same second: the route’s own wording');
+  assert.match(source, /if kind == Self\.lyricsKind, Self\.looksLikeRouteError\(destination\) \{/, 'the guard runs where the bytes become a row');
+  assert.match(source, /"status": 404/, 'and the body is reported as the 404 it is, so JS records `none`, not `· retry`');
+});

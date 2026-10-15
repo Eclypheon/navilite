@@ -45,6 +45,14 @@ function memoryStore(): MemoryStore {
   };
 }
 
+/**
+ * Let the store's fire-and-forget work finish: the Navidrome capture `onFailed` starts, and the
+ * read-back after a lyric `done`, are both `void`-ed, and both resolve inside a microtask or two.
+ */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 interface FakeBridge extends DownloadsBridge {
   removed: string[];
   enqueued: DownloadJob[];
@@ -162,12 +170,22 @@ test('a playlist is complete only when every audio row is complete and every lyr
 
 test('a lyric the route says does not exist is a stored fact, not a playlist stuck on retry', async () => {
   const bridge = fakeBridge();
-  const store = new OfflineStore(bridge, { store: memoryStore(), lyricsUrl: () => 'https://music.example/lyrics?path=a' });
+  const asked: string[] = [];
+  const store = new OfflineStore(bridge, {
+    store: memoryStore(),
+    lyricsUrl: () => 'https://music.example/lyrics?path=a',
+    lyricsFallback: async (song) => {
+      asked.push(song.id);
+      return null; // Navidrome has nothing either: the track's words are nowhere.
+    },
+  });
   await store.download('pl-1', [song('a')]);
   bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
   // The route answers 404 for a track whose folder holds no sidecar — the normal case.
   bridge.emit('failed', { songId: 'a', kind: 'lyrics', status: 404, error: 'not found' });
-  assert.equal(store.lyricsState('a')?.state, 'none', 'the miss is recorded, not a failure');
+  await settle();
+  assert.deepEqual(asked, ['a'], 'the 404 is not terminal: Navidrome is asked next (v1.9.14)');
+  assert.equal(store.lyricsState('a')?.state, 'none', 'and every source empty is `none` — never `present`');
   assert.equal(store.record('pl-1')?.state, 'complete', 'and the playlist is not held on retry for it');
 
   // A transfer that really failed is still a failure, and still leaves the playlist on retry.
@@ -178,6 +196,89 @@ test('a lyric the route says does not exist is a stored fact, not a playlist stu
   other.emit('failed', { songId: 'a', kind: 'lyrics', status: 500, error: 'boom' });
   assert.equal(second.lyricsState('a')?.state, 'failed', 'a 500 is not a miss');
   assert.equal(second.record('pl-1')?.state, 'partial', 'and it asks for one small retry');
+});
+
+/*
+ * v1.9.14, defect 2: the download lane mirrors the online chain. A track whose words live **inside
+ * the file itself** — an embedded tag Navidrome reads, with no `.lrc`/`.txt` beside the audio — has
+ * no route URL and never 200s, so before this the lane recorded `none` and the owner saw lyrics
+ * online and none offline.
+ */
+test('a lyric the route has no sidecar for is captured from Navidrome instead', async () => {
+  const bridge = fakeBridge();
+  const written: Array<{ songId: string; text: string }> = [];
+  bridge.writeLyrics = async (songId, text) => void written.push({ songId, text });
+  const asked: string[] = [];
+  const store = new OfflineStore(bridge, {
+    store: memoryStore(),
+    lyricsUrl: () => 'https://music.example/lyrics?path=a',
+    lyricsFallback: async (song) => {
+      asked.push(song.id);
+      return '[00:01.00]First line\n[00:02.00]Second line';
+    },
+  });
+  await store.download('pl-1', [song('a')]);
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+  bridge.emit('failed', { songId: 'a', kind: 'lyrics', status: 404, error: 'no sidecar' });
+  await settle();
+  assert.deepEqual(asked, ['a'], 'the fallback ran for the track the route 404s');
+  assert.equal(written.length, 1, 'and its body became the stored lyric file');
+  assert.match(written[0]?.text ?? '', /^\[00:01\.00\]First line/, 'stored raw: LRC stays LRC, timings and all');
+  assert.equal(store.lyricsState('a')?.state, 'present', 'the row is present, not a miss');
+  assert.equal(store.record('pl-1')?.state, 'complete', 'both axes resolved — the playlist is done, not `· retry`');
+});
+
+/*
+ * v1.9.14, defect 3: the mirrors downloaded before the fix hold the route's **404 document** as
+ * their lyric file and still read `present`. Nothing about that file changes by itself, so the
+ * check lives where the body is read — `lyricsDoc`, the one door between the durable copy and the
+ * view.
+ */
+test('a stored route-error body is refused, voided and re-fetched exactly once', async () => {
+  const error = '{"error": "no lyrics sidecar for this track", "path": "x.opus", "tried": [".lrc"]}';
+  const rows = [indexRow('a')];
+  rows[0].lyrics = { state: 'present', file: 'a.lyrics', bytes: error.length, fetchedAt: Date.now() };
+  const bridge = fakeBridge(rows);
+  let body: string | null = error;
+  bridge.readLyrics = async () => body;
+  bridge.writeLyrics = async (_songId, text) => void (body = text);
+  const asked: string[] = [];
+  const store = new OfflineStore(bridge, {
+    store: memoryStore(),
+    lyricsFallback: async (song) => {
+      asked.push(song.id);
+      return '[00:03.00]Real words';
+    },
+  });
+  await store.hydrate();
+  assert.equal(store.lyricsState('a')?.state, 'present', 'the phone holds the row 1.9.13 wrote');
+  assert.equal((await store.lyricsDoc('a')).kind, 'miss', 'the poisoned row is refused');
+  assert.equal((await store.lyricsDoc('a')).kind, 'miss', 'a second read refuses it too');
+  await settle();
+  assert.deepEqual(asked, ['a'], 'one re-fetch, not one per read');
+  assert.equal(store.lyricsState('a')?.state, 'present', 'the good body is now the row');
+  const after = await store.lyricsDoc('a');
+  assert.equal(after.kind, 'present', 'and it is served from the device again');
+  assert.equal(after.kind === 'present' ? after.doc.lines[0]?.text : '', 'Real words');
+});
+
+test('a lyric transfer that lands as the route-error body is not left reading present', async () => {
+  const error = '{"error": "no lyrics sidecar for this track", "path": "x.opus", "tried": [".lrc"]}';
+  const bridge = fakeBridge();
+  let body: string | null = error;
+  bridge.readLyrics = async () => body;
+  bridge.writeLyrics = async (_songId, text) => void (body = text);
+  const store = new OfflineStore(bridge, {
+    store: memoryStore(),
+    lyricsUrl: () => 'https://music.example/lyrics?path=a',
+    lyricsFallback: async () => null,
+  });
+  await store.download('pl-1', [song('a')]);
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+  bridge.emit('done', { songId: 'a', kind: 'lyrics', bytes: error.length });
+  await settle();
+  assert.equal(store.lyricsState('a')?.state, 'none', 'the read-back refused it — the row is a miss, not `present`');
+  assert.equal(await store.lyricsDoc('a').then((r) => r.kind === 'present'), false, 'and nothing serves the JSON');
 });
 
 test('removing the last ref drops the lyric row with the audio row', async () => {

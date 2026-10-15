@@ -334,4 +334,13 @@ export const CHANGELOG: ChangelogRelease[] = [
         'And the bar never claims a move the music did not make: the position you see is the position the player itself reports, so a seek that cannot be performed leaves the bar on where the music really is instead of on where you asked it to go.',
       ],
     },
+    {
+      version: '1.9.14',
+      date: '2026-10-15',
+      items: [
+        'A track with no lyrics file of its own no longer shows a server error where the words should be. It says there are no lyrics for that track instead of printing the server\'s message on the screen.',
+        'Downloaded playlists now bring the tracks whose words live inside the music file itself, not only the ones that have a separate lyrics file next to them. Those tracks used to show their words while streaming and nothing at all in airplane mode.',
+        'One thing to do by hand: delete and download again any playlist you downloaded with an older build. The playlists already on your phone saved that server message as if it were the lyrics, and only a fresh download replaces it.',
+      ],
+    },
   ];

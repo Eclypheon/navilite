@@ -15,7 +15,7 @@
  * `storage/offline.ts` is a cache of that map, written after every change, so a relaunch resolves
  * local on the first start without waiting for `list()`.
  */
-import { fromSidecar, type LyricsDoc } from '../api/lyrics.ts';
+import { fromSidecar, isRouteErrorBody, type LyricsDoc } from '../api/lyrics.ts';
 import {
   clearMirror,
   loadMirror,
@@ -225,6 +225,12 @@ export class OfflineStore {
   private listening = false;
   /** True once this process has done its boot reconcile; only that first pass may re-enqueue. */
   private bootReconciled = false;
+  /**
+   * The songs whose poisoned lyric row has already been re-fetched in this session (§3). A
+   * re-fetch that finds nothing records `none`, so the store cannot ask twice on its own; this
+   * guard is what stops one bad read after another from queueing the same fetch again.
+   */
+  private readonly lyricsRefetched = new Set<string>();
 
   /**
    * Subscribe to index/playlist changes, so the UI can redraw. Returns the unsubscribe — a
@@ -309,13 +315,19 @@ export class OfflineStore {
    * `LYRICS_MISS_TTL_MS`, so nothing is re-asked; anything else → `miss`, and the caller falls
    * through to the network. A `present` row whose file is gone returns `miss` rather than throwing
    * or serving a stale doc (§"Offline lyrics" recovery).
+   *
+   * The body is checked before it is served (§3): a row written by a build before v1.9.14 can hold
+   * the lyrics route's **404 document**, which is not lyrics. Such a row is voided rather than
+   * returned, and the track's lyric is re-fetched once.
    */
   async lyricsDoc(songId: string): Promise<LyricsResolution> {
     const lyric = this.rows.get(songId)?.lyrics;
     if (lyric?.state === 'present' && this.bridge) {
       try {
         const body = await this.bridge.readLyrics(songId);
-        if (body !== null && body !== '') {
+        if (body !== null && body !== '' && isRouteErrorBody(body)) {
+          this.voidErrorBody(songId);
+        } else if (body !== null && body !== '') {
           const doc = fromSidecar(body);
           if (doc) return { kind: 'present', doc };
         }
@@ -620,6 +632,13 @@ export class OfflineStore {
     if (!row) return;
     if (event.kind === 'lyrics') {
       row.lyrics = { state: 'present', file: `${event.songId}.lyrics`, bytes: typeof event.bytes === 'number' ? event.bytes : 0, fetchedAt: Date.now() };
+      /*
+       * …and the body is read back and checked (§3). Native refuses a non-200 body before this
+       * event is ever emitted, so this is the second lock on the same door: a row is never left
+       * reading `present` over the route's error document, whatever wrote it. The read is a few
+       * kilobytes and it does not block the event.
+       */
+      void this.verifyStoredLyrics(event.songId);
     } else {
       row.state = 'complete';
       row.path = event.path ?? row.path;
@@ -639,10 +658,21 @@ export class OfflineStore {
        * A `404` from the lyrics route is not a failure: it is the library saying this track has no
        * sidecar, which is a fact worth keeping (`none` — the fresh-miss row §"Offline lyrics" asks
        * about) rather than a lyric that makes the playlist read `· retry` for ever.
+       *
+       * It is not the end of the lane either (v1.9.14): Navidrome is asked for the body next, the
+       * same way `fetchLyrics` asks it online, because a track whose words live inside the file
+       * itself has no sidecar and would otherwise never be captured. The row stays `pending` while
+       * that runs, so the playlist does not read `complete` before the answer is in.
        */
-      row.lyrics = event.status === 404
-        ? { state: 'none', bytes: 0, fetchedAt: Date.now() }
-        : { state: 'failed', bytes: 0, fetchedAt: Date.now() };
+      if (event.status === 404) {
+        row.lyrics = { state: 'pending', bytes: 0 };
+        for (const playlistId of row.refs) this.reconcileRecord(playlistId);
+        this.saveMirror();
+        this.notify();
+        void this.captureLibraryLyrics(this.songFromRow(row));
+        return;
+      }
+      row.lyrics = { state: 'failed', bytes: 0, fetchedAt: Date.now() };
     } else {
       row.state = 'failed';
     }
@@ -652,9 +682,13 @@ export class OfflineStore {
   }
 
   /**
-   * Enqueue a track's lyric transfer in the audio's own lane. The normal path is the sidecar
-   * route URL; a track the route has no URL for falls back to the injected `getLyrics` body, stored
-   * raw behind the caller's `sameSong` guard. Both empty → `none`, a recorded miss.
+   * Enqueue a track's lyric transfer in the audio's own lane, or — when the route has nothing to
+   * fetch — capture the body from Navidrome instead.
+   *
+   * The normal path is the sidecar route URL. A track the route carries no URL for is asked of
+   * Navidrome directly (`lyricsFallback`: `getLyricsBySongId`, then the legacy blob behind the
+   * caller's `sameSong` guard), and so is a track the route answers `404` for — see `onFailed`.
+   * Both empty → `none`, a recorded miss.
    */
   private async enqueueLyrics(song: Song): Promise<void> {
     if (!this.bridge) return;
@@ -663,30 +697,45 @@ export class OfflineStore {
     const lyric = row.lyrics;
     if (lyric?.state === 'present' || lyric?.state === 'none') return; // already resolved
     const url = this.lyricsUrl(song);
-    if (url !== null && url !== '') {
-      row.lyrics = { state: 'pending', bytes: 0 };
-      await this.bridge.enqueue({
-        songId: song.id,
-        url,
-        suffix: 'lyrics',
-        /*
-         * No byte count is known before the transfer starts, and inventing one would be a lie.
-         * Native verifies against the **response's** `Content-Length` (the route always sends one)
-         * and records it on the job as it arrives, so the lyrics axis is checked exactly as the
-         * audio axis is — `bytes: 0` here means "unknown yet", never "do not check".
-         */
-        bytes: 0,
-        refs: row.refs,
-        title: song.title,
-        artist: song.artist ?? '',
-        album: song.album ?? '',
-        durationSec: song.duration ?? 0,
-      });
+    if (url === null || url === '') {
+      await this.captureLibraryLyrics(song);
       return;
     }
+    row.lyrics = { state: 'pending', bytes: 0 };
+    await this.bridge.enqueue({
+      songId: song.id,
+      url,
+      suffix: 'lyrics',
+      /*
+       * No byte count is known before the transfer starts, and inventing one would be a lie.
+       * Native verifies against the **response's** `Content-Length` (the route always sends one)
+       * and records it on the job as it arrives, so the lyrics axis is checked exactly as the
+       * audio axis is — `bytes: 0` here means "unknown yet", never "do not check".
+       */
+      bytes: 0,
+      refs: row.refs,
+      title: song.title,
+      artist: song.artist ?? '',
+      album: song.album ?? '',
+      durationSec: song.duration ?? 0,
+    });
+  }
+
+  /**
+   * The Navidrome half of the lane: ask for this track's lyrics and store the body **raw**, so the
+   * read path (`fromSidecar`: LRC when a line is timed, else plain text) parses it exactly as it
+   * parses the route's bytes — one stored format, never a second one. Every source empty → `none`,
+   * the same fact a 404 writes, so the playlist shows no `· retry` for a track that simply has no
+   * words. The same predicate runs here as at every other write: the route's error document is
+   * never stored as lyrics, whatever a caller hands back.
+   */
+  private async captureLibraryLyrics(song: Song): Promise<void> {
+    if (!this.bridge) return;
+    const row = this.rows.get(song.id);
+    if (!row) return;
     try {
       const body = await this.lyricsFallback(song);
-      if (body !== null && body !== '') {
+      if (body !== null && body !== '' && !isRouteErrorBody(body)) {
         await this.bridge.writeLyrics(song.id, body);
         row.lyrics = { state: 'present', file: `${song.id}.lyrics`, bytes: body.length, fetchedAt: Date.now() };
       } else {
@@ -695,6 +744,53 @@ export class OfflineStore {
     } catch {
       row.lyrics = { state: 'none', bytes: 0, fetchedAt: Date.now() };
     }
+    for (const playlistId of row.refs) this.reconcileRecord(playlistId);
+    this.saveMirror();
+    this.notify();
+  }
+
+  /** After a lyric transfer lands: read the body back and void the row if it is the route's error. */
+  private async verifyStoredLyrics(songId: string): Promise<void> {
+    if (!this.bridge) return;
+    const row = this.rows.get(songId);
+    if (row?.lyrics?.state !== 'present') return;
+    let body: string | null = null;
+    try {
+      body = await this.bridge.readLyrics(songId);
+    } catch {
+      return; // A read that failed cannot convict the body.
+    }
+    if (body === null || !isRouteErrorBody(body)) return;
+    this.voidErrorBody(songId);
+  }
+
+  /**
+   * A stored body that is the route's 404 document is **not lyrics** (§3): the row reads absent
+   * (`none`, with a `fetchedAt` old enough that online reads still reach the network rather than
+   * answering "nothing here" for the next five minutes), and the track's lyric is re-fetched once.
+   */
+  private voidErrorBody(songId: string): void {
+    const row = this.rows.get(songId);
+    if (!row) return;
+    row.lyrics = { state: 'none', bytes: 0, fetchedAt: 0 };
+    for (const playlistId of row.refs) this.reconcileRecord(playlistId);
+    this.saveMirror();
+    this.notify();
+    if (this.lyricsRefetched.has(songId)) return;
+    this.lyricsRefetched.add(songId);
+    void this.captureLibraryLyrics(this.songFromRow(row));
+  }
+
+  /** The `Song` the Navidrome fallback needs, rebuilt from the durable row. No `path`: the route
+   * has already been asked and had nothing, so it is not asked a third time. */
+  private songFromRow(row: IndexRow): Song {
+    return {
+      id: row.songId,
+      title: row.title,
+      artist: row.artist === '' ? undefined : row.artist,
+      album: row.album === '' ? undefined : row.album,
+      duration: row.durationSec,
+    };
   }
 
   private addRef(songId: string, playlistId: string, song: Song): void {

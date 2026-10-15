@@ -89,6 +89,27 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         return (kind, songId)
     }
 
+    /// The error a non-`200` transfer is reported with; `status` travels beside it in the event.
+    fileprivate static func statusError(_ status: Int) -> NSError {
+        NSError(domain: "NaviliteDownloads", code: status, userInfo: [NSLocalizedDescriptionKey: "HTTP \(status)"])
+    }
+
+    /**
+     * The lyrics route's own "no sidecar" document —
+     * `{"error": "no lyrics sidecar for this track", "path": …, "tried": […]}` — which arrives as a
+     * **404 body**. Before v1.9.14 the completion handler never read the HTTP status, so such a body
+     * was promoted as the lyric file and recorded `present`; those rows are still on the owner's
+     * phone. The guard therefore stays where the bytes become an index row, so a bad body can never
+     * be recorded as `present` again. The two tests are the same two `isRouteErrorBody` makes in
+     * `src/api/lyrics.ts` (Swift cannot import it).
+     */
+    fileprivate static func looksLikeRouteError(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data.prefix(512), encoding: .utf8) else { return false }
+        let head = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return head.hasPrefix("{\"error\"") || head.contains("no lyrics sidecar for this track")
+    }
+
     /// One enqueued download, persisted so a relaunch can reconcile `URLSession`'s own tasks.
     private struct Job: Codable {
         var songId: String
@@ -471,6 +492,23 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     /// The one place a verified file becomes an index row, shared by the completion handler and the
     /// boot promotion. Never waits on JS: the row is written here.
     private func finish(kind: String, songId: String, suffix: String, job: Job?, bytes: Int, destination: URL) {
+        /*
+         * The last door on the lyric axis (§3): a body that is the route's own error document is
+         * **not lyrics**. A build before v1.9.14 promoted it (the status was never read), so the
+         * check stays here, where the bytes become a row, and it is reported as the `404` it is —
+         * `none` to JS, so the playlist is not held on `· retry`.
+         */
+        if kind == Self.lyricsKind, Self.looksLikeRouteError(destination) {
+            try? FileManager.default.removeItem(at: destination)
+            removeJob(kind: kind, songId: songId)
+            notifyListeners("failed", data: [
+                "songId": songId,
+                "kind": kind,
+                "status": 404,
+                "error": "no lyrics sidecar for this track"
+            ])
+            return
+        }
         var index = readIndex()
         if kind == Self.lyricsKind {
             var row = index[songId] ?? IndexRow(
@@ -581,6 +619,20 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let taskKey = downloadTask.taskDescription, !taskKey.isEmpty else { return }
+        /*
+         * **The status first.** A 4xx/5xx is a *successful transfer of an error body*: the response
+         * arrived, so URLSession calls this and never `didCompleteWithError` (`error == nil`). The
+         * lyrics route answers `404` with a JSON document for a track whose folder holds no sidecar —
+         * normal and common — and promoting that body wrote the server's error into the offline copy
+         * as the words. Nothing but a `200` is ever promoted, for either axis: a non-200 body whose
+         * length happened to match would otherwise become audio just the same way.
+         */
+        let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            try? FileManager.default.removeItem(at: location)
+            plugin?.didFail(taskKey: taskKey, error: NaviliteDownloads.statusError(status), status: status)
+            return
+        }
         let expected = Int(downloadTask.response?.expectedContentLength ?? 0)
         plugin?.didFinishDownload(taskKey: taskKey, from: location, responseExpected: expected)
     }

@@ -14,13 +14,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LyricsService } from '../src/lyrics/service.ts';
-import { OfflineStore, type IndexRow } from '../src/state/offline.ts';
+import { OfflineStore, type DownloadEvent, type DownloadJob, type IndexRow } from '../src/state/offline.ts';
 import { LyricsCache } from '../src/storage/lyrics.ts';
 import type { LyricsSource } from '../src/api/lyrics.ts';
 import type { SidecarSource } from '../src/api/sidecar.ts';
 import type { Song, StructuredLyrics } from '../src/api/types.ts';
 
 const song = (id = 'a'): Song => ({ id, title: 'Track', artist: 'Someone', album: 'Something', duration: 180 });
+
+/** The route's own answer for a track with no sidecar — verbatim from the owner's phone (§1). */
+const ROUTE_ERROR = '{"error": "no lyrics sidecar for this track", "path": "yorushika/eruma/13 - 海底、月明kari.opus", "tried": ["yorushika/eruma/13 - 海底、月明kari.lrc", "yorushika/eruma/13 - 海底、月明kari.txt"]}';
+
+/** Let the store's `void`-ed capture finish. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 interface MemoryStore {
   getItem(key: string): string | null;
@@ -158,4 +166,87 @@ test('a present row whose file is gone returns to the network without throwing',
   const doc = await service.lyricsFor(song());
   assert.ok(doc, 'the missing file fell through to the network, which answered');
   assert.deepEqual(calls, ['sidecar:a'], 'and no stale doc was served');
+});
+
+/* ------------------------------------------ §3: the poisoned rows a 1.9.13 build left behind */
+
+/**
+ * The download lane's bridge, modelled: `writeLyrics` is the durable copy `readLyrics` reads back,
+ * and the two listeners the store subscribes to are kept, so a transfer can be driven here.
+ */
+function lane(rows: IndexRow[], files = new Map<string, string>()) {
+  const listeners = new Map<string, (event: DownloadEvent) => void>();
+  const jobs: DownloadJob[] = [];
+  return {
+    files,
+    jobs,
+    emit(name: 'done' | 'failed', event: DownloadEvent): void {
+      listeners.get(name)?.(event);
+    },
+    configure: async () => undefined,
+    enqueue: async (job: DownloadJob) => void jobs.push(job),
+    cancel: async () => undefined,
+    remove: async () => undefined,
+    list: async () => rows,
+    freeBytes: async () => -1,
+    readLyrics: async (songId: string) => files.get(songId) ?? null,
+    writeLyrics: async (songId: string, text: string) => void files.set(songId, text),
+    addListener: async (name: string, listener: (event: DownloadEvent) => void) => {
+      listeners.set(name, listener);
+      return () => undefined;
+    },
+  };
+}
+
+test('a stored route-error body is never served: the view goes to the sources instead', async () => {
+  const { calls, library, sidecar } = sources();
+  sidecar.lyricsFor = async (s) => {
+    calls.push(`sidecar:${s.id}`);
+    return TXT;
+  };
+  const files = new Map([[ 'a', ROUTE_ERROR ]]);
+  const store = new OfflineStore(lane([row('a', { state: 'present', bytes: ROUTE_ERROR.length })], files), {
+    store: memoryStore(),
+    lyricsFallback: async () => null,
+  });
+  await store.hydrate();
+  const service = new LyricsService(new LyricsCache(null), () => library, () => sidecar, () => store);
+  const doc = await service.lyricsFor(song());
+  assert.ok(doc, 'the words come from the route, not from the stored JSON');
+  assert.equal(doc.lines[0]?.text, 'First line', 'and they are the lyric, not the error document');
+  assert.deepEqual(calls, ['sidecar:a'], 'exactly as if no copy existed');
+  assert.equal(store.lyricsState('a')?.state, 'none', 'the bad row is voided, never left reading `present`');
+  await settle();
+});
+
+test('a 404 on the route makes the lane store Navidrome’s body, and it renders offline', async () => {
+  const { calls, library, sidecar } = sources();
+  const files = new Map<string, string>();
+  const bridge = lane([], files);
+  const store = new OfflineStore(bridge, {
+    store: memoryStore(),
+    lyricsUrl: () => 'https://music.example/lyrics?path=a',
+    lyricsFallback: async (s) => {
+      calls.push(`navidrome:${s.id}`);
+      return LRC;
+    },
+  });
+  await store.download('pl-1', [song()]);
+  assert.equal(bridge.jobs.filter((job) => job.suffix === 'lyrics').length, 1, 'the lyric goes down the transfer lane first');
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+  // The route has no sidecar for this track; Navidrome does (an embedded tag).
+  bridge.emit('failed', { songId: 'a', kind: 'lyrics', status: 404, error: 'no sidecar' });
+  await settle();
+  assert.deepEqual(calls, ['navidrome:a'], 'the 404 fell through to Navidrome, not to `none`');
+  assert.equal(files.get('a'), LRC, 'the body is the stored lyric file, LRC and all');
+  assert.equal(store.record('pl-1')?.state, 'complete', 'and the playlist is not left on `· retry`');
+
+  // …and with the connection gone, the pane reads it from the device.
+  const service = new LyricsService(new LyricsCache(null), () => library, () => sidecar, () => store);
+  calls.length = 0;
+  const doc = await service.lyricsFor(song());
+  assert.ok(doc, 'the captured lyric renders with no source at all');
+  assert.equal(doc.synced, true, 'with its timings: the highlight survives the round trip');
+  assert.equal(doc.lines[0]?.timeMs, 1000);
+  assert.deepEqual(calls, [], 'zero network calls');
 });

@@ -105,10 +105,8 @@ export function parsePlain(body: string): LyricsLine[] {
  * the most useful: a synced one if there is one, otherwise the first with text.
  */
 export function fromStructured(entries: StructuredLyrics[]): LyricsDoc | null {
-  const usable = entries.filter((entry) => (entry.line ?? []).some((line) => typeof line?.value === 'string' && line.value !== ''));
-  if (usable.length === 0) return null;
-  const timed = usable.filter((entry) => (entry.line ?? []).some((line) => typeof line?.start === 'number'));
-  const chosen = timed[0] ?? usable[0];
+  const chosen = pickEntry(entries);
+  if (chosen === null) return null;
   const offset = typeof chosen.offset === 'number' && Number.isFinite(chosen.offset) ? chosen.offset : 0;
   const lines: LyricsLine[] = [];
   for (const line of chosen.line ?? []) {
@@ -118,6 +116,64 @@ export function fromStructured(entries: StructuredLyrics[]): LyricsDoc | null {
     lines.push({ timeMs: start, text });
   }
   return finalize(lines, 'sidecar');
+}
+
+/**
+ * The entry both readers use: the first **timed** one when there is a timed one, else the first
+ * with text. Shared so that the doc on screen and the body written to the offline copy can never
+ * be two different entries of the same answer.
+ */
+function pickEntry(entries: StructuredLyrics[]): StructuredLyrics | null {
+  const usable = entries.filter((entry) => (entry.line ?? []).some((line) => typeof line?.value === 'string' && line.value !== ''));
+  if (usable.length === 0) return null;
+  const timed = usable.filter((entry) => (entry.line ?? []).some((line) => typeof line?.start === 'number'));
+  return timed[0] ?? usable[0] ?? null;
+}
+
+/** `[mm:ss.cc]` — the one tag shape `parseLrc` reads back, so a written body round-trips. */
+function lrcTag(timeMs: number): string {
+  const total = Math.max(0, Math.round(timeMs));
+  const minutes = Math.floor(total / 60_000);
+  const seconds = Math.floor((total % 60_000) / 1000);
+  const hundredths = Math.floor((total % 1000) / 10);
+  return `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(hundredths).padStart(2, '0')}]`;
+}
+
+/**
+ * A structured answer written back as **the body of a file** (v1.9.14): an LRC when the chosen
+ * entry carries `start` times — so the offline copy keeps the highlight — and plain text when it
+ * does not. This is what the download lane stores when the route has no sidecar for a track whose
+ * words live inside the file itself: one stored format, the one `fromSidecar` already parses.
+ * `null` when there is nothing to write.
+ */
+export function structuredToBody(entries: StructuredLyrics[]): string | null {
+  const chosen = pickEntry(entries);
+  if (chosen === null) return null;
+  const offset = typeof chosen.offset === 'number' && Number.isFinite(chosen.offset) ? chosen.offset : 0;
+  const lines: string[] = [];
+  for (const line of chosen.line ?? []) {
+    const text = typeof line?.value === 'string' ? line.value : '';
+    if (text === '') continue;
+    const start = typeof line?.start === 'number' && Number.isFinite(line.start) ? line.start + offset : null;
+    lines.push(start === null ? text : `${lrcTag(start)}${text}`);
+  }
+  return lines.length === 0 ? null : lines.join('\n');
+}
+
+/**
+ * The route's own "there is nothing here" document —
+ * `{"error": "no lyrics sidecar for this track", "path": …, "tried": […]}`. It is a **404 body**.
+ *
+ * The predicate lives beside the parsers because it is a fact about the route's answer. It exists
+ * for one reason: before v1.9.14 the native completion handler never read the HTTP status, so this
+ * document was promoted as the lyric file and recorded `present`. Rows like that are still on the
+ * owner's phone, so the body has to be recognised and refused everywhere it is read or written.
+ * The native side carries the same two tests (`looksLikeRouteError` in `NaviliteDownloads.swift`),
+ * because Swift cannot import this file.
+ */
+export function isRouteErrorBody(body: string): boolean {
+  const head = body.trim().slice(0, 512);
+  return head.startsWith('{"error"') || head.includes('no lyrics sidecar for this track');
 }
 
 /** A plain blob from the legacy endpoint, which may still be an LRC file's contents. */

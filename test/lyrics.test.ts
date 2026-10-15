@@ -17,8 +17,10 @@ import {
   fromBlob,
   fromSidecar,
   fromStructured,
+  isRouteErrorBody,
   parseLrc,
   parsePlain,
+  structuredToBody,
   type LyricsSource,
 } from '../src/api/lyrics.ts';
 import { LyricsRoute, nativeSidecarFetch, type SidecarFetch, type SidecarSource } from '../src/api/sidecar.ts';
@@ -531,4 +533,48 @@ test('forget empties the cache', async () => {
   assert.equal(service.cachedTracks, 1);
   service.forget();
   assert.equal(service.cachedTracks, 0);
+});
+
+/*
+ * v1.9.14 — the two pieces the download lane borrows from this module: a structured answer written
+ * back as a *body* (so Navidrome-only lyrics survive into the offline copy with their timings), and
+ * the predicate that refuses the route's 404 document wherever a body is read or written.
+ */
+
+test('a structured answer is written back as a body the parser reads unchanged', () => {
+  const entries = [
+    { line: [{ start: 1000, value: 'First line' }, { start: 2500, value: 'Second line' }] },
+  ];
+  const body = structuredToBody(entries);
+  assert.equal(body, '[00:01.00]First line\n[00:02.50]Second line', 'an LRC body, to the hundredth');
+  const back = fromSidecar(body ?? '');
+  assert.equal(back?.synced, true, 'the timings survive the round trip');
+  assert.deepEqual(back?.lines.map((line) => line.timeMs), [1000, 2500]);
+  assert.deepEqual(back?.lines.map((line) => line.text), ['First line', 'Second line']);
+
+  // No timings: plain text, which is the normal case for this library.
+  const plain = structuredToBody([{ line: [{ value: 'First line' }, { value: 'Second line' }] }]);
+  assert.equal(plain, 'First line\nSecond line');
+  assert.equal(fromSidecar(plain ?? '')?.synced, false, 'and it reads as the untimed text it is');
+
+  // The same entry `fromStructured` picks, so the screen and the stored copy cannot disagree.
+  const both = [
+    { line: [{ value: 'untimed' }] },
+    { line: [{ start: 500, value: 'timed' }] },
+  ];
+  assert.equal(structuredToBody(both), '[00:00.50]timed');
+  assert.equal(fromStructured(both)?.lines[0]?.text, 'timed');
+
+  assert.equal(structuredToBody([]), null, 'nothing to write is null, never an empty file');
+  assert.equal(structuredToBody([{ line: [{ value: '' }] }]), null);
+});
+
+test('the route’s own 404 document is recognised and refused as a lyric body', () => {
+  const routeError = '{"error": "no lyrics sidecar for this track", "path": "yorushika/eruma/13 - 海底、月明kari.opus", "tried": ["….lrc", "….txt"]}';
+  assert.equal(isRouteErrorBody(routeError), true, 'the document the owner’s pane showed');
+  assert.equal(isRouteErrorBody('\n  {"error": "no lyrics sidecar for this track"}  \n'), true, 'leading whitespace and all');
+  assert.equal(isRouteErrorBody('{"error": "boom"}'), true, 'any body that opens with {"error"');
+  assert.equal(isRouteErrorBody('[00:01.00]A line'), false, 'an LRC sidecar is not one');
+  assert.equal(isRouteErrorBody('[ar:Someone]\nFirst line'), false, 'nor is an untimed .txt');
+  assert.equal(isRouteErrorBody(''), false, 'nor is nothing at all');
 });
