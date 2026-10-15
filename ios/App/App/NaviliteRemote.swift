@@ -327,6 +327,21 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 self.audible = (audibleAssetId, audibleSongId ?? "")
             }
             self.installEndObserver()
+            /*
+             * **A handover arms the first boundary (v1.9.18).**
+             *
+             * `preloadAhead` used to run only after a boundary had been taken here, so the *first*
+             * track end after the app went away was the one with nothing armed: the app is suspended
+             * by then (its warm pool is frozen with it), and any entry it did not already hold a slot
+             * for had to be fetched at the boundary — a fetch plus the readiness poll below, heard as
+             * a pause before the next track starts. The statement that says `awake: false` is exactly
+             * the moment this side learns it will own that boundary, so it is the moment to arm it.
+             *
+             * Idempotent by construction: `preloadAhead` returns immediately when a slot already
+             * holds the entry (the app's warm slot included) and when this side has already fetched
+             * it, so a repeated statement costs nothing and cannot replace a warm slot.
+             */
+            if !self.awake { self.preloadAhead(token: self.generation) }
             self.reason = self.queue.isEmpty
                 ? "the app published no queue, so there is nothing to advance to"
                 : self.index < 0

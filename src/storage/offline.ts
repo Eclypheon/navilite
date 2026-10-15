@@ -43,6 +43,13 @@ export interface OfflineMirrorRow {
 export interface OfflinePlaylistManifest {
   /** The songs the playlist held when the download was requested — the durable half of `total`. */
   songs: Song[];
+  /**
+   * The playlist's name as the server reported it (v1.9.18). It is the one piece of a downloaded
+   * playlist the song rows cannot carry, and without it the offline browse list could only show
+   * playlist ids — which are opaque strings, not names. Optional: a manifest written by an older
+   * build has none, and the UI falls back rather than inventing one.
+   */
+  name?: string;
   /** When the download was requested, for diagnostics. */
   requestedAt: number;
   /** `downloading` until it finishes or is cancelled; `partial`/`complete` never auto-resume. */
@@ -130,7 +137,13 @@ function parseManifests(value: unknown): Record<string, OfflinePlaylistManifest>
     if (!Array.isArray(manifest.songs)) continue;
     const songs = manifest.songs.filter((song): song is Song => typeof song === 'object' && song !== null && typeof (song as Song).id === 'string');
     if (songs.length !== manifest.songs.length || songs.length === 0) continue;
-    playlists[playlistId] = { songs, requestedAt: typeof manifest.requestedAt === 'number' ? manifest.requestedAt : Date.now(), state: manifest.state };
+    playlists[playlistId] = {
+      songs,
+      // A name is carried only when it is a usable one; anything else reads as "not recorded".
+      name: typeof manifest.name === 'string' && manifest.name !== '' ? manifest.name : undefined,
+      requestedAt: typeof manifest.requestedAt === 'number' ? manifest.requestedAt : Date.now(),
+      state: manifest.state,
+    };
   }
   return Object.keys(playlists).length > 0 ? playlists : undefined;
 }

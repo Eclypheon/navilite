@@ -242,3 +242,11 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - A downloaded song whose file has gone missing — deleted by the phone to free up space, or by you in the Files app — no longer plays silence for ever. The first time you press play on it, the app throws away that download, and the song plays from the server the next time you press play. Before this it played nothing, said nothing, and the only way out was deleting the download and downloading it again.
 - The playlist that download came from goes back to offering the download, so the copy on the phone can be built again with one press.
+
+## 1.9.18 — 2026-10-15
+
+- A playlist you have already downloaded opens with no connection at all now — the song list comes from your phone, and every track in it plays. Before this, opening that list in airplane mode showed the app's own "could not reach …" message instead of your songs, even though every one of them was already on the phone.
+- With no connection the Library and Playlists screens now show what is on your phone, by name, and you can open and play any of it. They used to show nothing you could use.
+- A screen that needs your server and cannot reach it says so with a small Offline badge and shows you what it can, instead of printing the connection error as the page.
+- The app no longer waits for your server to draw its first screen. With the connection up but nothing answering, it used to sit on a blank screen until the request gave up — twenty seconds — and it comes up straight away now, picking up where you left off as soon as the answer arrives.
+- The song after the one playing is handed to the phone's player the moment the app goes to the background, so the next song is already there when the current one ends instead of being fetched at that moment.

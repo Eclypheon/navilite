@@ -156,3 +156,41 @@ test('a non-JSON body is reported as "this is not a Navidrome"', async () => {
   const client = new SubsonicClient({ serverUrl: '', username: 'u', password: 'p' });
   await assert.rejects(() => client.ping(), /did not return JSON/);
 });
+
+/*
+ * v1.9.18 — which failures mean "there is no server".
+ *
+ * The distinction is the whole of the offline fix: a rejected `fetch` is the phone with no tailnet,
+ * and the view has to degrade for it; an HTTP or Subsonic-level answer is a server that is *there*,
+ * and its message is information the owner asked for. Before this flag existed the two were one
+ * thing — a `SubsonicError` with code 0 — and the view could not tell them apart.
+ */
+test('a rejected fetch is flagged unreachable, and a server’s own answer is not', async () => {
+  const failureOf = async (run: () => Promise<unknown>): Promise<SubsonicError> => {
+    try {
+      await run();
+    } catch (error) {
+      if (error instanceof SubsonicError) return error;
+      throw error;
+    }
+    throw new Error('expected the call to fail, and it resolved');
+  };
+
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    throw new TypeError('Load failed');
+  }) as typeof fetch;
+  const client = new SubsonicClient({ serverUrl: 'https://alienlab.tailbed832.ts.net:9443', username: 'u', password: 'p' });
+  const offline = await failureOf(() => client.ping());
+  assert.equal(offline.unreachable, true, 'a transport failure says the server was never reached');
+  assert.match(offline.message, /could not reach https:\/\/alienlab\.tailbed832\.ts\.net:9443/);
+
+  stubFetch(envelope({ status: 'failed', error: { code: 40, message: 'Wrong username or password' } }));
+  const refused = await failureOf(() => client.ping());
+  assert.equal(refused.unreachable, false, 'the server answered, so this is not an offline failure');
+  assert.equal(refused.code, 40, 'and its own error code survives');
+
+  stubFetch(envelope(), 503);
+  const http = await failureOf(() => client.ping());
+  assert.equal(http.unreachable, false, 'an HTTP status is an answer too');
+  assert.equal(http.code, 503, 'and it keeps the status as its code');
+});

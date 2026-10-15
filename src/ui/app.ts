@@ -13,7 +13,7 @@
 import { SubsonicClient, SubsonicError } from '../api/subsonic.ts';
 import { LyricsRoute, type SidecarSource } from '../api/sidecar.ts';
 import { sameSong, structuredToBody } from '../api/lyrics.ts';
-import type { Album, Artist, Playlist, QueueContext, QueueItem, Song } from '../api/types.ts';
+import type { Album, Artist, Playlist, PlaylistWithEntries, QueueContext, QueueItem, Song } from '../api/types.ts';
 import { DEFAULT_SERVER_URL, SERVER_URL_PLACEHOLDER } from '../config.ts';
 import { AudioEngine, type EngineStatus } from '../player/engine.ts';
 import { attachVisualizer } from '../player/visualizer.ts';
@@ -22,7 +22,7 @@ import { platformInfo, type PlatformInfo } from '../platform.ts';
 import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
-import { OfflineStore, estimateBytes, formatBytes, type SizeEstimate } from '../state/offline.ts';
+import { OfflineStore, estimateBytes, formatBytes, type DownloadedPlaylist, type SizeEstimate } from '../state/offline.ts';
 import { createDownloadsBridge } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
@@ -266,8 +266,20 @@ export async function boot(root: HTMLElement): Promise<void> {
   applyPalette(DEFAULT_PALETTE);
 
   let restored = false;
+  let lateRestore: Promise<boolean> | null = null;
   if (await restoreSession(ctx, shell, applyPalette)) {
-    restored = await restorePlayQueue(ctx);
+    /*
+     * v1.9.18 — the first screen is never held by a round trip.
+     *
+     * The device's own snapshot is local, so it is read here and the queue is exact and instant. The
+     * server's saved queue is the fallback for a launch with *no* snapshot, and that is a network
+     * call: it used to be awaited before `renderRoute`, so a tailnet that is up but not answering
+     * left the app on a blank screen for the full request timeout. The round trip now happens after
+     * the first paint, and if it lands on a launch the owner has not touched, it still lands on the
+     * spectrum exactly as before.
+     */
+    restored = await restorePlayQueue(ctx, { server: false });
+    if (!restored) lateRestore = restorePlayQueue(ctx);
     if (!location.hash) location.hash = restored ? NOW_ROUTE : DEFAULT_ROUTE;
   }
 
@@ -311,8 +323,20 @@ export async function boot(root: HTMLElement): Promise<void> {
   });
 
   visualizer.start();
+  const launchRoute = location.hash;
   renderRoute(ctx, shell);
   if (restored) updatePlayerBar(ctx, shell, engine.status());
+  /*
+   * The server's saved queue, when there was no snapshot to restore from: adopted whenever it
+   * arrives, and it takes the owner to the spectrum only on a launch he has not touched (v1.9.18).
+   */
+  if (lateRestore) {
+    void lateRestore.then((adopted) => {
+      if (!adopted) return;
+      if (location.hash === launchRoute) location.hash = NOW_ROUTE;
+      updatePlayerBar(ctx, shell, engine.status());
+    });
+  }
 
   // A small read-only seam: it lets the end-to-end harness (and anyone debugging a real
   // deployment from devtools) ask what the engine is actually doing. It exposes no
@@ -371,6 +395,28 @@ function errorText(error: unknown): string {
   if (error instanceof SubsonicError) return error.message;
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/**
+ * Did this failure mean "there is no server", rather than "the server said no"? (v1.9.18)
+ *
+ * The engine of the owner's report: with the tailnet down, a downloaded playlist's song list was
+ * fetched anyway, the `fetch` rejected, and the rejection text was rendered *as the view*. Anything
+ * that draws a screen asks this first, so an unreachable server degrades to what the app can
+ * actually show instead of a message about a URL.
+ *
+ * A bare `TypeError` is included because a rejected `fetch` in WebKit reaches a caller that has not
+ * gone through `SubsonicClient.call` (the lyrics route, cover art) exactly that way — "Load failed"
+ * with no envelope and no status.
+ */
+function isUnreachable(error: unknown): boolean {
+  if (error instanceof SubsonicError) return error.unreachable;
+  return error instanceof TypeError;
+}
+
+/** The inline "no connection" badge. Deliberately small: it belongs on a row or in a header. */
+function offlinePill(label = 'Offline'): HTMLElement {
+  return h('span', { class: 'offline-pill', role: 'status', text: label });
 }
 
 function toast(shell: Shell, message: string, kind: 'info' | 'error'): void {
@@ -1336,7 +1382,7 @@ async function restoreSession(ctx: AppContext, shell: Shell, applyPalette: Apply
  * without a gesture — that is not an error, the queue simply stays restored and paused, which is
  * what v1.1 promised.
  */
-async function restorePlayQueue(ctx: AppContext): Promise<boolean> {
+async function restorePlayQueue(ctx: AppContext, options: { server?: boolean } = {}): Promise<boolean> {
   const queue = ctx.queue;
   if (!queue) return false;
   const snapshot = loadSnapshot();
@@ -1370,7 +1416,15 @@ async function restorePlayQueue(ctx: AppContext): Promise<boolean> {
      */
     return true;
   }
-  return restoreServerQueue(ctx);
+  /*
+   * No snapshot: the server's saved queue is a convenience for a fresh install, not a gate on the
+   * first screen (v1.9.18). The launch asks for it in two halves — `{ server: false }` now, the
+   * round trip after the first paint — because the round trip is the one thing here that can hang:
+   * on a tailnet that is up but not answering, `getPlayQueue` used to hold the *whole app* on a
+   * blank screen for the request timeout (20 s). Nothing about the library, the downloaded
+   * playlists or the transport needs it.
+   */
+  return options.server === false ? false : restoreServerQueue(ctx);
 }
 
 /**
@@ -1547,6 +1601,17 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
   const routeKey = location.hash || DEFAULT_ROUTE;
   shell.viewRoute = routeKey;
   const fail = (error: unknown) => {
+    /*
+     * A view that needs the server, with no server, degrades (v1.9.18). This is the second half of
+     * the owner's report — the raw transport message ("could not reach https://…: (TypeError: Load
+     * failed)") was rendered as the content of the view. Anything unreachable now draws the offline
+     * state instead: what is downloaded, tappable, plus an Offline badge. Every other failure is a
+     * real answer from a server that is there, and keeps the message it gave.
+     */
+    if (isUnreachable(error)) {
+      renderOffline(ctx, shell, head, id, error);
+      return;
+    }
     replace(shell.view, h('div', { class: 'empty' }, [h('p', { text: errorText(error) })]));
   };
   /**
@@ -1636,6 +1701,79 @@ function pageTitle(shell: Shell, title: string, subtitle?: string, actions: HTML
 
 function loading(shell: Shell, message = 'Loading…'): void {
   replace(shell.view, h('div', { class: 'empty' }, [h('p', { class: 'muted', text: message })]));
+}
+
+/* ------------------------------------------------------- offline (v1.9.18) */
+
+/** What each server-only route was drawn as, so the offline state can keep its own heading. */
+const OFFLINE_TITLES: Record<string, string> = {
+  artists: 'Library',
+  albums: 'Albums',
+  playlists: 'Playlists',
+  favourites: 'Favourites',
+  search: 'Search',
+  artist: 'Artist',
+  album: 'Album',
+  playlist: 'Playlist',
+};
+
+/**
+ * The state a screen that needs the server shows when there is no server (v1.9.18).
+ *
+ * Two things are wrong with what the app did before this, and they are the owner's two reports
+ * about being offline: the screen was *empty of anything he could use*, and the one thing it did
+ * put on it was the transport's own text — `could not reach https://alienlab.tailbed832.ts.net:9443
+ * (TypeError: Load failed). Over Tailscale, check the tailnet is up …` — as the content of the view.
+ * A URL and a developer's diagnosis are not a screen.
+ *
+ * So this draws what is actually true and actually usable: an `Offline` badge in the header, the
+ * playlists the app holds locally (each one tappable, and playing with no connection), and a plain
+ * sentence about what does need the server. If nothing is downloaded it says that instead, and says
+ * how to fix it. The message the transport produced is not rendered anywhere — it goes to the
+ * console, where a developer can still see it.
+ */
+function renderOffline(ctx: AppContext, shell: Shell, head: string, id: string | undefined, error: unknown): void {
+  console.warn('[navilite] a view that needs the server was reached with no server', error);
+  const downloaded = ctx.offline?.downloadedPlaylists() ?? [];
+  const retry = h('button', { class: 'button', text: 'Try again' });
+  retry.addEventListener('click', () => ctx.render());
+  pageTitle(
+    shell,
+    OFFLINE_TITLES[head] ?? 'Navilite',
+    head === 'playlist' ? `“${id ?? ''}” is not downloaded` : 'no connection to your library',
+    [offlinePill(), retry],
+  );
+  const host = h('div', { class: 'list' });
+  shell.view.append(host);
+  host.append(h('h2', { class: 'section', text: 'Downloaded' }));
+  if (downloaded.length === 0) {
+    host.append(
+      h('p', {
+        class: 'muted',
+        text: 'Nothing is downloaded on this phone yet. Open a playlist while you have a connection and press ↓ in its header — it stays here, and it stays playable with no connection.',
+      }),
+    );
+    return;
+  }
+  host.append(...downloaded.map((entry) => offlinePlaylistRow(entry)));
+  host.append(h('p', { class: 'muted', text: 'These play here with no connection. Everything else needs your library.' }));
+}
+
+/** A downloaded playlist, drawn from the store alone — no cover art, because art is a fetch. */
+function offlinePlaylistRow(entry: DownloadedPlaylist): HTMLElement {
+  return bindTap(
+    h('button', { class: 'row', 'aria-label': `Open ${entry.name}` }, [
+      cover(null, 'thumb', entry.name),
+      h('div', { class: 'row-text' }, [
+        h('span', { class: 'row-title', text: entry.name }),
+        h('span', {
+          class: 'row-sub',
+          text: `${entry.record.songs.length} track${entry.record.songs.length === 1 ? '' : 's'} · ${entry.record.done} on this phone · ${formatBytes(entry.record.bytes)}`,
+        }),
+      ]),
+    ]),
+    () => (location.hash = `#/playlist/${encodeURIComponent(entry.id)}`),
+  );
 }
 
 /* ------------------------------------------------------------------ views */
@@ -1850,8 +1988,13 @@ async function renderAlbum(ctx: AppContext, shell: Shell, id: string): Promise<v
 
   const playlistPicker = h('select', { class: 'field inline' }, [h('option', { value: '', text: 'Add to playlist…' })]);
   void (async () => {
-    const playlists = await ctx.library!.playlists();
-    for (const playlist of playlists) playlistPicker.append(h('option', { value: playlist.id, text: playlist.name }));
+    try {
+      const playlists = await ctx.library!.playlists();
+      for (const playlist of playlists) playlistPicker.append(h('option', { value: playlist.id, text: playlist.name }));
+    } catch {
+      // Offline (v1.9.18): the picker keeps only its placeholder. An album page that is otherwise
+      // on screen is not worth an unhandled rejection over a control that could not have worked.
+    }
   })();
   playlistPicker.addEventListener('change', () => {
     const playlistId = playlistPicker.value;
@@ -1882,6 +2025,15 @@ async function renderAlbum(ctx: AppContext, shell: Shell, id: string): Promise<v
   updateRowHighlight(ctx, shell);
 }
 
+/**
+ * The playlists screen (v1.9.18 — local first, like the playlist page itself).
+ *
+ * With no connection this screen used to be one sentence about a URL. The playlists the phone holds
+ * are not a network question at all: they are in the durable manifests, with their names and their
+ * song lists, so they are drawn before the server is asked and kept when it cannot answer. The
+ * server's list replaces them when it does answer — that is where a playlist's *current* name and
+ * contents come from, and the name is remembered against the manifest as it arrives.
+ */
 async function renderPlaylists(ctx: AppContext, shell: Shell): Promise<void> {
   const nameInput = h('input', { class: 'field inline', placeholder: 'New playlist name', autocomplete: 'off' });
   const createButton = h('button', { class: 'button primary', text: 'Create' });
@@ -1899,15 +2051,36 @@ async function renderPlaylists(ctx: AppContext, shell: Shell): Promise<void> {
       }
     })();
   });
-  pageTitle(shell, 'Playlists', 'getPlaylists / createPlaylist', [nameInput, createButton]);
-  const host = h('div', { class: 'list' }, [h('p', { class: 'muted', text: 'Loading playlists…' })]);
-  shell.view.append(host);
-  const playlists = await ctx.library!.playlists();
-  if (playlists.length === 0) {
-    replace(host, h('p', { class: 'muted', text: 'No playlists yet — name one above.' }));
+  const pill = offlinePill();
+  pill.classList.add('hidden');
+  pageTitle(shell, 'Playlists', 'getPlaylists / createPlaylist', [nameInput, createButton, pill]);
+  const downloaded = ctx.offline?.downloadedPlaylists() ?? [];
+  const host = h('div', { class: 'list' });
+  if (downloaded.length > 0) {
+    host.append(h('h2', { class: 'section', text: 'Downloaded' }), ...downloaded.map((entry) => offlinePlaylistRow(entry)));
+  }
+  const serverHost = h('div', { class: 'list' }, [h('p', { class: 'muted', text: 'Loading playlists…' })]);
+  shell.view.append(host, serverHost);
+  let playlists: Playlist[];
+  try {
+    playlists = await ctx.library!.playlists();
+  } catch (error) {
+    /*
+     * Nothing downloaded: let the router draw the offline state, which explains where these come
+     * from. With downloads in hand there is something to show, so the screen keeps it and the badge
+     * says what is missing.
+     */
+    if (!isUnreachable(error) || downloaded.length === 0) throw error;
+    pill.classList.remove('hidden');
+    replace(serverHost, h('p', { class: 'muted', text: 'These are the playlists on this phone. Your library’s full list needs a connection.' }));
     return;
   }
-  replace(host, ...playlists.map((playlist) => playlistRow(ctx, playlist)));
+  for (const playlist of playlists) ctx.offline?.rememberPlaylistName(playlist.id, playlist.name);
+  if (playlists.length === 0) {
+    replace(serverHost, h('p', { class: 'muted', text: 'No playlists yet — name one above.' }));
+    return;
+  }
+  replace(serverHost, ...playlists.map((playlist) => playlistRow(ctx, playlist)));
 }
 
 function playlistRow(ctx: AppContext, playlist: Playlist): HTMLElement {
@@ -1956,7 +2129,7 @@ function clearOfflineSubscriptions(): void {
  * never a re-render of the list behind it. The estimate is recomputed inside `paint()`, not captured
  * at render: the same page reads `up to 312 MB` before a download and the exact figure after it.
  */
-function downloadControl(ctx: AppContext, playlistId: string, songs: Song[]): HTMLElement {
+function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], name: string): HTMLElement {
   const offline = ctx.offline;
   const estimate = (): SizeEstimate => (offline ? offline.estimate(songs) : estimateBytes(songs));
   const button = h('button', { class: 'button', 'aria-label': '' });
@@ -2001,7 +2174,9 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[]): HT
     if (!record || record.state === 'idle' || record.state === 'failed' || record.state === 'partial' || grown) {
       void (async () => {
         // Wi-Fi only by default: the native side enforces `allowsCellularAccess = false`.
-        const result = await offline.download(playlistId, songs, { allowsCellular: false });
+        // The name goes with the request: it is the one fact about this download that cannot be
+        // rebuilt from the files afterwards, and the offline browse list needs it (v1.9.18).
+        const result = await offline.download(playlistId, songs, { allowsCellular: false, name });
         if (result.kind === 'no-space') ctx.toast(`Not enough free space — ${formatBytes(result.needed)} needed`, 'error');
       })();
     } else if (record.state === 'downloading' || record.state === 'estimating') {
@@ -2014,33 +2189,106 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[]): HT
   return button;
 }
 
+/**
+ * The playlist page (v1.9.18 — local first).
+ *
+ * The owner's report, verbatim: with the playlist already downloaded and no connection, opening its
+ * song list *"renders a full-screen error instead of the songs"* — `could not reach https://…
+ * (TypeError: Load failed)`. The songs were on the phone the whole time; the page simply asked the
+ * server for them first and had nothing to draw when the answer never came.
+ *
+ * So the order is inverted. If the store holds a manifest for this playlist, its song list is drawn
+ * **synchronously, from local state**, and only then is the server asked — for the current list, and
+ * for the name. A server that does not answer costs nothing: the rows already on screen are the
+ * playlist as it was downloaded, every one of them plays from its local file, and the header grows
+ * an `Offline` badge. Nothing about the page waits on the network.
+ *
+ * `removable` is false on that local path: removing a track from a playlist is a server write, and
+ * offering a control that cannot work is worse than leaving it out.
+ */
 async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
-  loading(shell);
-  const playlist = await ctx.library!.playlist(id);
-  const songs = playlist.entry ?? [];
-  const items: QueueItem[] = songs.map((song) => ({ song, context: { kind: 'playlist', id, name: playlist.name } }));
+  const store = ctx.offline;
+  const record = store?.record(id) ?? null;
+  const localSongs = record !== null && record.done > 0 ? record.songs : [];
+  const pill = offlinePill();
+  pill.classList.add('hidden');
+  let painted = localSongs.length > 0;
+  if (painted) {
+    paintPlaylist(ctx, shell, id, record?.name ?? 'Downloaded playlist', localSongs, { pill, removable: false });
+  } else {
+    loading(shell);
+  }
+  let playlist: PlaylistWithEntries;
+  try {
+    playlist = await ctx.library!.playlist(id);
+  } catch (error) {
+    if (!painted) throw error;
+    // The list on screen is the one on the phone: keep it, and say why it is not the server's.
+    if (isUnreachable(error)) pill.classList.remove('hidden');
+    else ctx.toast(errorText(error), 'error');
+    return;
+  }
+  if (playlist.name) store?.rememberPlaylistName(id, playlist.name);
+  paintPlaylist(ctx, shell, id, playlist.name, playlist.entry ?? [], { pill, removable: true });
+}
+
+/**
+ * Draw the playlist page from a song list — the one body both answers use (the local manifest's and
+ * the server's), so the offline page is the same page rather than a second rendering of it.
+ */
+function paintPlaylist(
+  ctx: AppContext,
+  shell: Shell,
+  id: string,
+  name: string,
+  songs: Song[],
+  options: { pill: HTMLElement; removable: boolean },
+): void {
+  const items: QueueItem[] = songs.map((song) => ({ song, context: { kind: 'playlist', id, name } }));
   const playAll = h('button', { class: 'button primary', text: 'Play playlist' }, [icon(ICONS.play, 16)]);
-  playAll.addEventListener('click', () => void ctx.queue!.play(items, 0, items[0]?.context ?? null));
-  pageTitle(shell, playlist.name, `${songs.length} tracks · ${formatDuration(playlist.duration)}`, [playAll, downloadControl(ctx, id, songs)]);
+  playAll.disabled = items.length === 0;
+  playAll.addEventListener('click', () => {
+    if (items.length > 0) void ctx.queue!.play(items, 0, items[0]?.context ?? null);
+  });
+  // Offline the server's own `duration` is not available, so the figure is summed from the rows —
+  // the same arithmetic, on the same songs.
+  const duration = songs.reduce((total, song) => total + (song.duration ?? 0), 0);
+  pageTitle(shell, name, `${songs.length} tracks · ${formatDuration(duration)}`, [
+    playAll,
+    options.pill,
+    downloadControl(ctx, id, songs, name),
+  ]);
   replace(
     shell.view,
     shell.view.firstElementChild ?? h('div'),
     h(
       'div',
       { class: 'list' },
-      songs.map((song, index) =>
-        songRow(ctx, song, index, items, items[0]?.context ?? null, true, () => {
-          void (async () => {
-            try {
-              await ctx.library!.removeFromPlaylist(id, index);
-              ctx.toast('Removed from the playlist');
-              ctx.render();
-            } catch (error) {
-              ctx.toast(errorText(error), 'error');
-            }
-          })();
-        }),
-      ),
+      songs.length === 0
+        ? h('p', { class: 'muted', text: 'This playlist is empty.' })
+        : songs.map((song, index) =>
+            songRow(
+              ctx,
+              song,
+              index,
+              items,
+              items[0]?.context ?? null,
+              true,
+              options.removable
+                ? () => {
+                    void (async () => {
+                      try {
+                        await ctx.library!.removeFromPlaylist(id, index);
+                        ctx.toast('Removed from the playlist');
+                        ctx.render();
+                      } catch (error) {
+                        ctx.toast(errorText(error), 'error');
+                      }
+                    })();
+                  }
+                : undefined,
+            ),
+          ),
     ),
   );
   updateRowHighlight(ctx, shell);
@@ -2133,7 +2381,16 @@ async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promis
         );
         updateRowHighlight(ctx, shell);
       } catch (error) {
-        replace(results, h('p', { class: 'muted', text: errorText(error) }));
+        /*
+         * Offline, the result pane is not the place for the transport's own text either (v1.9.18):
+         * the whole view is still here — the field, the button, the header — so it degrades to the
+         * same small badge and a sentence about what search needs.
+         */
+        if (isUnreachable(error)) {
+          replace(results, h('div', { class: 'row' }, [offlinePill(), h('span', { class: 'muted', text: ' — searching needs your library' })]));
+        } else {
+          replace(results, h('p', { class: 'muted', text: errorText(error) }));
+        }
       }
     })();
   };

@@ -42,10 +42,23 @@ export const CLIENT_NAME = 'Navilite';
 export class SubsonicError extends Error {
   readonly code: number;
 
-  constructor(code: number, message: string) {
+  /**
+   * True when the request never reached the server — a rejected `fetch` (no tailnet, airplane
+   * mode, the proxy down) or the request timeout — as opposed to an HTTP or Subsonic-level answer
+   * (v1.9.18).
+   *
+   * This is the app's only honest signal for "you asked a view for something only the server has,
+   * and there is no server". Every caller that renders a screen has to be able to ask it, because
+   * the failure the owner hit was exactly this one being shown to him as the content of the view:
+   * `could not reach https://… (TypeError: Load failed)` in place of a downloaded playlist's songs.
+   */
+  readonly unreachable: boolean;
+
+  constructor(code: number, message: string, options: { unreachable?: boolean } = {}) {
     super(message);
     this.name = 'SubsonicError';
     this.code = code;
+    this.unreachable = options.unreachable === true;
   }
 }
 
@@ -141,7 +154,8 @@ export class SubsonicClient {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (cause) {
-      throw new SubsonicError(0, describeNetworkFailure(cause, this.baseUrl));
+      // The one place the app learns "there is no server on the other end": a rejected `fetch`.
+      throw new SubsonicError(0, describeNetworkFailure(cause, this.baseUrl), { unreachable: true });
     }
     if (!response.ok) {
       throw new SubsonicError(response.status, `${method} failed: HTTP ${response.status} ${response.statusText}`);

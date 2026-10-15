@@ -105,6 +105,12 @@ export type PlaylistDownloadState = 'idle' | 'estimating' | 'downloading' | 'com
 
 export interface PlaylistRecord {
   state: PlaylistDownloadState;
+  /**
+   * The playlist's name, as the server reported it when it was downloaded or last listed
+   * (v1.9.18). Absent for a manifest written before names were recorded, in which case the
+   * offline browse list falls back rather than inventing one.
+   */
+  name?: string;
   /** How many of `songs` are complete. */
   done: number;
   /** The manifest's length — the songs the download was *asked* for, never the completed row count. */
@@ -121,6 +127,17 @@ export interface PlaylistRecord {
 export interface SizeEstimate {
   total: number;
   exact: boolean;
+}
+
+/**
+ * A playlist that can be browsed with no connection (v1.9.18): its id (what the row navigates on),
+ * the name it was downloaded under, and the record — whose `songs` are the manifest's, i.e. the
+ * ones the app already holds Song metadata for as well as the download state.
+ */
+export interface DownloadedPlaylist {
+  id: string;
+  name: string;
+  record: PlaylistRecord;
 }
 
 /**
@@ -386,6 +403,43 @@ export class OfflineStore {
     return this.playlists.get(playlistId) ?? null;
   }
 
+  /**
+   * The playlists a connection is not needed for (v1.9.18) — every playlist with at least one
+   * complete file on disk, newest request first.
+   *
+   * This is what the offline browse list and the offline degrade are drawn from: the song lists
+   * come from the durable manifests, so the rows are the playlist as it was downloaded, with no
+   * Subsonic round trip anywhere in the path. A playlist deliberately removed has no record and is
+   * absent here, which is the same rule the download control uses.
+   */
+  downloadedPlaylists(): DownloadedPlaylist[] {
+    const out: DownloadedPlaylist[] = [];
+    for (const [playlistId, record] of this.playlists) {
+      if (record.done === 0) continue;
+      const name = record.name ?? this.manifests.get(playlistId)?.name;
+      out.push({ id: playlistId, name: name !== undefined && name !== '' ? name : 'Downloaded playlist', record });
+    }
+    out.sort((a, b) => (b.record.requestedAt ?? 0) - (a.record.requestedAt ?? 0));
+    return out;
+  }
+
+  /**
+   * Record what a playlist is called, from the one source that knows: the server's own list.
+   *
+   * It is written into the manifest only when it actually differs, so the playlists screen (which
+   * calls this on every successful listing) costs a mirror write once per rename rather than once
+   * per visit. A playlist with no manifest is not ours to name — there is no download to label.
+   */
+  rememberPlaylistName(playlistId: string, name: string): void {
+    if (name === '') return;
+    const manifest = this.manifests.get(playlistId);
+    if (!manifest || manifest.name === name) return;
+    manifest.name = name;
+    const record = this.playlists.get(playlistId);
+    if (record) record.name = name;
+    this.saveMirror();
+  }
+
   totalBytes(): number {
     let total = 0;
     for (const row of this.rows.values()) if (row.state === 'complete') total += row.bytes;
@@ -489,8 +543,16 @@ export class OfflineStore {
   /**
    * §5 `idle → estimating → downloading`. Free-space guard first; then the songs that are not
    * already complete are enqueued, with the playlist id added to their refs.
+   *
+   * `name` is what the playlist was called when the owner asked for it (v1.9.18), and it is stored
+   * in the manifest because it is the one fact about a downloaded playlist that cannot be rebuilt
+   * from the files afterwards.
    */
-  async download(playlistId: string, songs: Song[], options: { allowsCellular?: boolean } = {}): Promise<DownloadResult> {
+  async download(
+    playlistId: string,
+    songs: Song[],
+    options: { allowsCellular?: boolean; name?: string } = {},
+  ): Promise<DownloadResult> {
     if (!this.bridge) return { kind: 'started' };
     this.ensureListening();
     const estimate = this.estimate(songs);
@@ -500,9 +562,10 @@ export class OfflineStore {
      * so a kill mid-transfer, or a track added to the playlist afterwards, can never reconcile as
      * `done === total` from the completed files alone.
      */
-    this.manifests.set(playlistId, { songs, requestedAt: Date.now(), state: 'downloading' });
+    this.manifests.set(playlistId, { songs, name: options.name, requestedAt: Date.now(), state: 'downloading' });
     const record: PlaylistRecord = {
       state: 'estimating',
+      name: options.name ?? this.playlists.get(playlistId)?.name,
       done: doneInitially,
       total: songs.length,
       bytes: estimate.total,
@@ -936,6 +999,7 @@ export class OfflineStore {
           : manifest.state === 'downloading'
             ? 'downloading'
             : 'partial',
+        name: manifest.name,
         done,
         total: manifest.songs.length,
         bytes: estimate.total,

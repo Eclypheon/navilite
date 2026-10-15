@@ -366,4 +366,15 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The playlist that download came from goes back to offering the download, so the copy on the phone can be built again with one press.',
       ],
     },
+    {
+      version: '1.9.18',
+      date: '2026-10-15',
+      items: [
+        'A playlist you have already downloaded opens with no connection at all now — the song list comes from your phone, and every track in it plays. Before this, opening that list in airplane mode showed the app\'s own "could not reach …" message instead of your songs, even though every one of them was already on the phone.',
+        'With no connection the Library and Playlists screens now show what is on your phone, by name, and you can open and play any of it. They used to show nothing you could use.',
+        'A screen that needs your server and cannot reach it says so with a small Offline badge and shows you what it can, instead of printing the connection error as the page.',
+        'The app no longer waits for your server to draw its first screen. With the connection up but nothing answering, it used to sit on a blank screen until the request gave up — twenty seconds — and it comes up straight away now, picking up where you left off as soon as the answer arrives.',
+        'The song after the one playing is handed to the phone\'s player the moment the app goes to the background, so the next song is already there when the current one ends instead of being fetched at that moment.',
+      ],
+    },
   ];

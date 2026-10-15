@@ -95,6 +95,41 @@ button {
   color: var(--warn);
 }
 
+/*
+ * The inline "no connection" badge (v1.9.18).
+ *
+ * It lives on a header or a row, never as a screen, so it has to read at a glance and take no room:
+ * a small pill in the page-tools row. `hidden` is how the same element is reused — the playlist page
+ * and the playlists screen both render it up front and reveal it only when the server turns out not
+ * to answer, which is what keeps a two-line render from flickering.
+ */
+.offline-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.offline-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.offline-pill.hidden {
+  display: none;
+}
+
 /* ---------------------------------------------------------------- top bar */
 
 .topbar {

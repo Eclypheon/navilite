@@ -25,6 +25,9 @@
  * fake library: no DOM, no network, no phone.
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { AudioEngine, type EngineOptions } from '../src/player/engine.ts';
@@ -512,4 +515,41 @@ test('warm work yields while a start is in flight, and issues nothing when it ca
   assert.equal(audibleDone, true, 'and the start was never held up by it');
   assert.equal(lanes.busy, false, 'once the start is over the lane is quiet again');
   assert.equal(await lanes.warm(() => lanes.yieldToAudible(30)), true, 'so the next warm job is free to run');
+});
+
+/*
+ * v1.9.18 — the *first* boundary after the app goes away, and who arms it.
+ *
+ * The owner's report, in his words: *"with the app backgrounded there is a slight delay before
+ * auto-advance fires"*. The boundary itself is not in question — the native side owns it and takes
+ * it off `AVPlayerItemDidPlayToEndTime` since v1.9.9. What was missing is the **arming**: this side
+ * fetched the track *after* the one playing only from `commit()`, i.e. after a boundary it had
+ * already taken, so the first track end after the handover had nothing loaded unless the app's own
+ * warm pool still happened to hold it — and the app is suspended by then, so its pool is frozen
+ * where it was. A boundary with no slot is a fetch, and a fetch is the pause he hears.
+ *
+ * The statement that says `awake: false` is the moment this side learns it will own that boundary,
+ * so that is the moment it arms it. Asserted against the native source, because that is the only
+ * place this behaviour lives and there is no device in the suite: the JS side cannot see it, and a
+ * green JS test would say nothing about it.
+ */
+test('a handover arms the first boundary: the native side preloads ahead when it is given the queue', () => {
+  const native = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'ios', 'App', 'App', 'NaviliteRemote.swift'), 'utf8');
+  const setQueue = native.slice(native.indexOf('@objc func setQueue('), native.indexOf('@objc func setQueue(') + 6000);
+  assert.ok(setQueue.includes('self.installEndObserver()'), 'the handover no longer installs the end observer');
+  assert.match(
+    setQueue,
+    /if !self\.awake \{ self\.preloadAhead\(token: self\.generation\) \}/,
+    'the handover does not arm the next entry — the first boundary after the app goes away would be a fetch again',
+  );
+  assert.ok(
+    setQueue.indexOf('preloadAhead') > setQueue.indexOf('self.installEndObserver()'),
+    'the arming happens before the observer is installed, so it may run against a queue this side has not adopted',
+  );
+
+  // And the arming is idempotent: it names a slot that already holds the entry as "nothing to do",
+  // so a repeated statement cannot replace a warm slot with a second, competing load.
+  const preloadAhead = native.slice(native.indexOf('private func preloadAhead('), native.indexOf('private func preloadAhead(') + 1200);
+  assert.match(preloadAhead, /guard !awake, index >= 0, index < queue\.count else \{ return \}/, 'preloadAhead no longer checks that it is the off-screen owner');
+  assert.match(preloadAhead, /if holding\(entry\.songId\) != nil \{ return \}/, 'preloadAhead could replace an entry a slot already holds');
 });

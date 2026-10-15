@@ -177,3 +177,37 @@ research, then the owner decides what is built. **If all four land, this is v2.0
   timestamps are present**; a song with no lyrics or untimed lyrics must degrade gracefully.
   **The lyrics bytes are included in the playlist's total size estimate.**
 - Ownership: research (Mugger) → design + review (Sage) → implementation (Nerd).
+
+## 1.9.18, 2026-10-15 — offline browsing, and what a screen does with no server
+
+Owner's report: with playlists already downloaded and no connection, opening a downloaded playlist's
+song list rendered `could not reach https://… (TypeError: Load failed)…` as the page, and the library
+was unreachable offline entirely. Playback itself was fine.
+
+Four decisions, all of them about who owns a screen's content:
+
+1. **The playlist page is LOCAL FIRST.** A downloaded playlist's song list is read from the durable
+   manifest (`storage/offline.ts` → `state/offline.ts`) and drawn *synchronously*, before anything is
+   asked of the server; the server's list, when it answers, replaces it. Nothing about the page waits
+   on a round trip — including the hanging-connection case, which is what the browser harness proves.
+2. **A manifest carries the playlist's NAME** (additive, optional field). It is the only fact about a
+   downloaded playlist that cannot be rebuilt from the files, and the offline browse list needs it.
+   Manifests written by older builds have none: the server's own list fills it in on the next visit
+   (`rememberPlaylistName`), and until then the row reads "Downloaded playlist" rather than inventing
+   one.
+3. **"Unreachable" is a first-class failure.** `SubsonicError.unreachable` marks a rejected `fetch`
+   (no tailnet, airplane mode, timeout) as distinct from an HTTP/Subsonic answer. A server-only view
+   that gets one degrades to the offline state — an `Offline` badge plus what is on the phone — and
+   **no transport message may ever be a view's primary content** (it goes to the console). A real
+   answer from a server that is there keeps its own message.
+4. **The launch does not wait for the server.** The device's own queue snapshot is local and still
+   restores exactly as before; the server's `getPlayQueue` fallback (a fresh install, a stale
+   snapshot) now runs *after* the first paint, and takes the owner to the spectrum when it lands on a
+   launch he has not touched. With the connection up but nothing answering, the app used to be blank
+   for the whole 20 s request timeout.
+
+Item 4 of the owner's v2.0 list (the background auto-advance delay) is touched here only at the
+native boundary: the handover statement (`awake: false`) now arms the native side's own look-ahead,
+so the *first* boundary after the app goes away is a play from a loaded item rather than a fetch.
+DECISIONS.md's own note on that item stands — "if it can't be resolved it's fine", low priority — and
+the change is not device-verified here: the simulator cannot settle a background gap.
