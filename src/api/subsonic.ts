@@ -62,6 +62,31 @@ export class SubsonicError extends Error {
   }
 }
 
+/**
+ * Did this failure mean "there is no server", rather than "the server said no"? (v1.9.19)
+ *
+ * This is the predicate a view asks before it degrades, and it exists here — beside the flag it
+ * reads — because the answer has to be the same in every caller:
+ *
+ *   - a `SubsonicError` carries the decision already (`unreachable`, set where the `fetch` itself
+ *     rejected in `call`), so it is simply relayed;
+ *   - a **bare `TypeError`** is the shape a rejected `fetch` takes when it reaches a caller that did
+ *     not go through `call` — the lyrics route and cover art fetch directly, and WebKit hands them
+ *     `Load failed` with no envelope and no status. Only the transport's own messages count: until
+ *     v1.9.19 *any* `TypeError` was read as "offline", so a real bug inside a view (`Cannot read
+ *     properties of undefined`) was shown to the owner as the `Offline` pill with its message going
+ *     to the console — the app blaming the network for its own defect, which is the misdiagnosis
+ *     this whole change exists to stop. A genuine `TypeError` now falls through to the error the
+ *     view would have shown anyway.
+ */
+export function isTransportFailure(cause: unknown): boolean {
+  if (cause instanceof SubsonicError) return cause.unreachable;
+  if (!(cause instanceof TypeError)) return false;
+  return /load failed|failed to fetch|networkerror|network error|network connection was lost|timed out|timeout/i.test(
+    cause.message,
+  );
+}
+
 export interface SubsonicCredentials {
   /** Empty string means "same origin as this app" — the deployment we design for. */
   serverUrl: string;

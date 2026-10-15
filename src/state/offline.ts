@@ -291,7 +291,27 @@ export class OfflineStore {
     // Seed the in-memory map from the mirror synchronously, so the resolver answers local on the
     // very first start of a session — before `hydrate()` has had a chance to talk to the plugin.
     const mirror = loadMirror(this.store);
-    if (mirror) this.seedRows(mirror.rows);
+    if (mirror) {
+      this.seedRows(mirror.rows);
+      /*
+       * …and the **playlist records** from the mirror's manifests, in the same tick (v1.9.19).
+       *
+       * v1.9.18 rebuilt these only in `hydrate()`, and `hydrate()` reaches `rebuildPlaylists` after
+       * `await this.bridge.list()` — a native round trip that takes up to `BRIDGE_TIMEOUT_MS` (5 s)
+       * when it is slow, and is *never* instantaneous. Boot starts hydration with `void
+       * offline.hydrate()` and paints the first route without awaiting it, so on the phone (where a
+       * bridge exists) `record()` and `downloadedPlaylists()` answered out of an empty map for the
+       * whole of that window: a cold launch in airplane mode drew the Library and a downloaded
+       * playlist as *"nothing is downloaded on this phone yet"* over a phone full of downloads.
+       *
+       * The browser harness could not see it by construction: `createDownloadsBridge` returns null
+       * on the web (`player/native.ts`), which makes `hydrate()` fully synchronous, so the store was
+       * always warm by the time the harness read it. The mirror holds the manifests, so the records
+       * are rebuilt here from exactly the same data `hydrate()` will use, one round trip earlier;
+       * the reconcile that follows replaces them with `list()`'s answer.
+       */
+      this.rebuildPlaylists(mirror.playlists);
+    }
   }
 
   /** Copy mirror rows into the in-memory index, carrying the lyrics `fetchedAt` with them. */

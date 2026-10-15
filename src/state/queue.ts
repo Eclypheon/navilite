@@ -332,8 +332,18 @@ export class PlaybackQueue {
   /**
    * Put a queue back without starting it — used at launch to restore the queue the server
    * saved, so the app can open on the spectrum screen showing what was playing.
+   *
+   * **Returns false when it declines, and the one case it declines is a queue already in use
+   * (v1.9.19).** The server's saved queue is fetched *after* the first paint since v1.9.18, so on a
+   * slow server it can land up to the request timeout (20 s) into a session the owner has already
+   * started: he taps a downloaded track, the old server queue then overwrote the items, the order,
+   * the cursor and the context and republished all of it, so the bar, the now screen and the row
+   * highlight jumped to another track while the audio kept playing his choice — and the native side
+   * was handed the stale queue. Adopting a launch convenience is only honest when nothing has been
+   * chosen; `currentSong !== null` is exactly "something has started".
    */
-  restore(items: QueueItem[], startIndex: number, positionMs = 0, context: QueueContext | null = null): void {
+  restore(items: QueueItem[], startIndex: number, positionMs = 0, context: QueueContext | null = null): boolean {
+    if (this.currentSong !== null) return false;
     this.items = items;
     this.order = identityOrder(items.length);
     this.cursor = Math.min(Math.max(0, startIndex), Math.max(0, items.length - 1));
@@ -344,6 +354,7 @@ export class PlaybackQueue {
     // tapped" cannot leave it walking a queue the listener is no longer looking at.
     this.publishQueue();
     this.onChanged?.();
+    return true;
   }
 
   /**

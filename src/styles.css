@@ -447,6 +447,21 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
+/*
+ * v1.9.19 — a track the phone does not have, on an offline playlist page (the manifest's list, with
+ * the files that are actually on disk marked). It is deliberately not a play row: offline it
+ * resolves to nothing, so it reads as the dimmed, unusable row it is, and the mark carries the × that
+ * says so rather than a play sign.
+ */
+.row.not-on-phone {
+  cursor: default;
+  color: var(--text-dim);
+}
+
+.row.not-on-phone .row-play {
+  opacity: 0.5;
+}
+
 /* A song row with a remove control beside it: the row keeps the width, the control sits at the end. */
 .row-shell {
   display: flex;

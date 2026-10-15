@@ -250,3 +250,11 @@ Plain language, user-visible changes only. The app shows this same list under
 - A screen that needs your server and cannot reach it says so with a small Offline badge and shows you what it can, instead of printing the connection error as the page.
 - The app no longer waits for your server to draw its first screen. With the connection up but nothing answering, it used to sit on a blank screen until the request gave up — twenty seconds — and it comes up straight away now, picking up where you left off as soon as the answer arrives.
 - The song after the one playing is handed to the phone's player the moment the app goes to the background, so the next song is already there when the current one ends instead of being fetched at that moment.
+
+## 1.9.19 — 2026-10-15
+
+- A downloaded playlist opens with no connection from the very first moment now. The list on the phone was read a beat late, so a cold launch in airplane mode could tell you "nothing is downloaded on this phone yet" for a second or two over a phone full of downloads — and then never correct itself until you pressed something else. It is drawn from your phone before anything else happens.
+- A playlist you only partly downloaded no longer offers the missing tracks as ordinary rows you can tap. They are marked "not on this phone", left out of "Play playlist", and the header says how many of the tracks are here — so nothing you press is silence with no explanation.
+- Starting a song no longer gets overwritten by the last session your server saved. With a slow server the old queue could arrive a few seconds late and take over the screen — the bar, the now playing screen and the highlight jumping to another track while the music kept playing what you chose.
+- A playlist that is not downloaded says so in words instead of showing you its id.
+- If a screen fails for a reason that is not the connection, it now tells you what happened. Anything that went wrong was being reported as "Offline".

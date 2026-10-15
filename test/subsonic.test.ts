@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { SubsonicClient, SubsonicError, normalizeServerUrl } from '../src/api/subsonic.ts';
+import { SubsonicClient, SubsonicError, isTransportFailure, normalizeServerUrl } from '../src/api/subsonic.ts';
 
 // The client reads `location` to decide whether a deployment is cross-origin.
 (globalThis as unknown as { location: { origin: string } }).location = { origin: 'https://navilite.example' };
@@ -193,4 +193,31 @@ test('a rejected fetch is flagged unreachable, and a server’s own answer is no
   const http = await failureOf(() => client.ping());
   assert.equal(http.unreachable, false, 'an HTTP status is an answer too');
   assert.equal(http.code, 503, 'and it keeps the status as its code');
+});
+
+/*
+ * v1.9.19 — the classification a view asks is not "any TypeError".
+ *
+ * Until this, a screen that needs the server read *every* `TypeError` as "there is no server", so a
+ * genuine bug inside the view was drawn as the `Offline` pill with its message going to the console
+ * only: the app blamed the network for its own defect, which is the misdiagnosis the offline work
+ * exists to stop. A real error now keeps the path to the screen it always had.
+ */
+test('only a transport failure is unreachable — a real TypeError is not', () => {
+  assert.equal(isTransportFailure(new TypeError('Load failed')), true, 'WebKit’s rejected fetch');
+  assert.equal(isTransportFailure(new TypeError('Failed to fetch')), true, 'Chromium’s rejected fetch');
+  assert.equal(isTransportFailure(new TypeError('NetworkError when attempting to fetch resource.')), true, 'Firefox’s');
+  assert.equal(
+    isTransportFailure(new TypeError("Cannot read properties of undefined (reading 'entry')")),
+    false,
+    'a real bug inside a view is not an offline server',
+  );
+  assert.equal(isTransportFailure(new RangeError('Maximum call stack size exceeded')), false, 'nor is any other error type');
+  assert.equal(isTransportFailure('could not reach https://example'), false, 'nor is a bare string');
+  assert.equal(isTransportFailure(new SubsonicError(40, 'Wrong username or password')), false, 'the server answered');
+  assert.equal(
+    isTransportFailure(new SubsonicError(0, 'could not reach https://example', { unreachable: true })),
+    true,
+    'and the client’s own transport verdict is relayed',
+  );
 });

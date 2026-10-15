@@ -10,7 +10,7 @@
  * start can all land on it. Its controls live in one compact bar at the bottom of the
  * screen, and the Spectrum/Lyrics switch at the top swaps what fills the middle.
  */
-import { SubsonicClient, SubsonicError } from '../api/subsonic.ts';
+import { SubsonicClient, SubsonicError, isTransportFailure } from '../api/subsonic.ts';
 import { LyricsRoute, type SidecarSource } from '../api/sidecar.ts';
 import { sameSong, structuredToBody } from '../api/lyrics.ts';
 import type { Album, Artist, Playlist, PlaylistWithEntries, QueueContext, QueueItem, Song } from '../api/types.ts';
@@ -405,13 +405,15 @@ function errorText(error: unknown): string {
  * that draws a screen asks this first, so an unreachable server degrades to what the app can
  * actually show instead of a message about a URL.
  *
- * A bare `TypeError` is included because a rejected `fetch` in WebKit reaches a caller that has not
- * gone through `SubsonicClient.call` (the lyrics route, cover art) exactly that way — "Load failed"
- * with no envelope and no status.
+ * The classification itself lives in `api/subsonic.ts` (v1.9.19), next to the flag it reads, so that
+ * every caller answers the same way — and so it can be tested without a DOM. **It is deliberately
+ * not "any `TypeError`"**: a genuine `TypeError` thrown inside a view (`Cannot read properties of
+ * undefined`) used to be drawn as the `Offline` pill with its message going to the console, which is
+ * the app blaming the network for its own bug. Only the transport's own messages qualify, so a real
+ * error still reaches the screen.
  */
 function isUnreachable(error: unknown): boolean {
-  if (error instanceof SubsonicError) return error.unreachable;
-  return error instanceof TypeError;
+  return isTransportFailure(error);
 }
 
 /** The inline "no connection" badge. Deliberately small: it belongs on a row or in a header. */
@@ -1442,13 +1444,22 @@ async function restoreServerQueue(ctx: AppContext): Promise<boolean> {
     if (entries.length === 0) return false;
     const items: QueueItem[] = entries.map((song) => ({ song, context: { kind: 'song', name: 'your last session' } }));
     const found = entries.findIndex((song) => song.id === saved?.current);
-    queue.restore(items, found === -1 ? 0 : found, saved?.position ?? 0, {
+    /*
+     * Whether it is *adopted* is the queue's answer, not this function's (v1.9.19): by the time this
+     * round trip lands the owner may already have started something — a downloaded track plays with
+     * no server at all, which is the whole point of the offline work — and replacing his queue with
+     * the last session's is what made the bar, the now screen and the highlight jump while the audio
+     * played on. `restore()` declines in that case and this reports it as "nothing was restored", so
+     * the launch screen stays where he put it.
+     */
+    return queue.restore(items, found === -1 ? 0 : found, saved?.position ?? 0, {
       kind: 'song',
       name: 'your last session',
     });
-    return true;
   } catch (error) {
-    console.warn('[navilite] could not restore the saved play queue', error);
+    // A server that is not there has no saved queue. Not an error the owner needs to see: the launch
+    // simply has nothing to restore onto.
+    console.warn('[navilite] could not read the server’s saved queue', error);
     return false;
   }
 }
@@ -1609,7 +1620,7 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
      * real answer from a server that is there, and keeps the message it gave.
      */
     if (isUnreachable(error)) {
-      renderOffline(ctx, shell, head, id, error);
+      renderOffline(ctx, shell, head, error);
       return;
     }
     replace(shell.view, h('div', { class: 'empty' }, [h('p', { text: errorText(error) })]));
@@ -1732,7 +1743,7 @@ const OFFLINE_TITLES: Record<string, string> = {
  * how to fix it. The message the transport produced is not rendered anywhere — it goes to the
  * console, where a developer can still see it.
  */
-function renderOffline(ctx: AppContext, shell: Shell, head: string, id: string | undefined, error: unknown): void {
+function renderOffline(ctx: AppContext, shell: Shell, head: string, error: unknown): void {
   console.warn('[navilite] a view that needs the server was reached with no server', error);
   const downloaded = ctx.offline?.downloadedPlaylists() ?? [];
   const retry = h('button', { class: 'button', text: 'Try again' });
@@ -1740,7 +1751,12 @@ function renderOffline(ctx: AppContext, shell: Shell, head: string, id: string |
   pageTitle(
     shell,
     OFFLINE_TITLES[head] ?? 'Navilite',
-    head === 'playlist' ? `“${id ?? ''}” is not downloaded` : 'no connection to your library',
+    /*
+     * v1.9.19: the plain title, not the id. This read `“pl-not-downloaded” is not downloaded` —
+     * the owner was being shown a Subsonic identifier in quotes, which is not a sentence and not
+     * something he can act on, and it appeared in the harness output as well.
+     */
+    head === 'playlist' ? 'This playlist is not downloaded on this phone' : 'no connection to your library',
     [offlinePill(), retry],
   );
   const host = h('div', { class: 'list' });
@@ -2214,7 +2230,12 @@ async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promis
   pill.classList.add('hidden');
   let painted = localSongs.length > 0;
   if (painted) {
-    paintPlaylist(ctx, shell, id, record?.name ?? 'Downloaded playlist', localSongs, { pill, removable: false });
+    paintPlaylist(ctx, shell, id, record?.name ?? 'Downloaded playlist', localSongs, {
+      pill,
+      removable: false,
+      // The manifest is what was *asked for*; only the index knows what is on the phone (v1.9.19).
+      local: true,
+    });
   } else {
     loading(shell);
   }
@@ -2242,9 +2263,23 @@ function paintPlaylist(
   id: string,
   name: string,
   songs: Song[],
-  options: { pill: HTMLElement; removable: boolean },
+  options: { pill: HTMLElement; removable: boolean; local?: boolean },
 ): void {
-  const items: QueueItem[] = songs.map((song) => ({ song, context: { kind: 'playlist', id, name } }));
+  /*
+   * `local` says this list is the **manifest**, i.e. the songs the download was asked for — not the
+   * songs that are on the phone (v1.9.19).
+   *
+   * `record.done` counts only the complete files, and a download the owner cancelled (or a playlist
+   * that grew after it was downloaded) leaves `record.songs` longer than the index. Drawing that list
+   * unexamined painted tracks with no file as ordinary rows: offline a tap on one was silence and
+   * nothing on the screen said why, and "play the playlist" walked onto them. The resolver is
+   * synchronous, so every row is checked against the index as it is drawn — the ones that are not
+   * here are marked and stay out of the queue. On the server's own answer there is nothing to check:
+   * every track is streamable, so `onPhone` is null and the page is exactly as it was.
+   */
+  const onPhone = options.local === true ? (song: Song): boolean => ctx.offline?.pathFor(song.id) !== null : null;
+  const playable = onPhone ? songs.filter((song) => onPhone(song)) : songs;
+  const items: QueueItem[] = playable.map((song) => ({ song, context: { kind: 'playlist', id, name } }));
   const playAll = h('button', { class: 'button primary', text: 'Play playlist' }, [icon(ICONS.play, 16)]);
   playAll.disabled = items.length === 0;
   playAll.addEventListener('click', () => {
@@ -2253,45 +2288,64 @@ function paintPlaylist(
   // Offline the server's own `duration` is not available, so the figure is summed from the rows —
   // the same arithmetic, on the same songs.
   const duration = songs.reduce((total, song) => total + (song.duration ?? 0), 0);
-  pageTitle(shell, name, `${songs.length} tracks · ${formatDuration(duration)}`, [
-    playAll,
-    options.pill,
-    downloadControl(ctx, id, songs, name),
-  ]);
+  const partial = onPhone !== null && playable.length < songs.length;
+  pageTitle(
+    shell,
+    name,
+    partial ? `${songs.length} tracks · ${playable.length} on this phone` : `${songs.length} tracks · ${formatDuration(duration)}`,
+    [playAll, options.pill, downloadControl(ctx, id, songs, name)],
+  );
+  const removeAt = options.removable
+    ? (index: number) => (): void => {
+        void (async () => {
+          try {
+            await ctx.library!.removeFromPlaylist(id, index);
+            ctx.toast('Removed from the playlist');
+            ctx.render();
+          } catch (error) {
+            ctx.toast(errorText(error), 'error');
+          }
+        })();
+      }
+    : null;
+  // The rows are built in the playlist's own order, and the index a row plays is its position among
+  // the tracks that are actually here — so a queue drawn from this page never contains a file the
+  // phone does not have.
+  let playableIndex = 0;
+  const rows = songs.map((song) => {
+    const here = onPhone === null || onPhone(song);
+    if (!here) return notOnPhoneRow(ctx, song);
+    const index = playableIndex;
+    playableIndex += 1;
+    return songRow(ctx, song, index, items, items[0]?.context ?? null, true, removeAt?.(index));
+  });
   replace(
     shell.view,
     shell.view.firstElementChild ?? h('div'),
-    h(
-      'div',
-      { class: 'list' },
-      songs.length === 0
-        ? h('p', { class: 'muted', text: 'This playlist is empty.' })
-        : songs.map((song, index) =>
-            songRow(
-              ctx,
-              song,
-              index,
-              items,
-              items[0]?.context ?? null,
-              true,
-              options.removable
-                ? () => {
-                    void (async () => {
-                      try {
-                        await ctx.library!.removeFromPlaylist(id, index);
-                        ctx.toast('Removed from the playlist');
-                        ctx.render();
-                      } catch (error) {
-                        ctx.toast(errorText(error), 'error');
-                      }
-                    })();
-                  }
-                : undefined,
-            ),
-          ),
-    ),
+    h('div', { class: 'list' }, songs.length === 0 ? h('p', { class: 'muted', text: 'This playlist is empty.' }) : rows),
   );
   updateRowHighlight(ctx, shell);
+}
+
+/**
+ * A track this phone does not have, on the offline playlist page (v1.9.19).
+ *
+ * Deliberately **not** a play row: offline it resolves to nothing, and it used to look exactly like
+ * one — the tap was silence with no explanation at all. It says what it is, it stays out of the
+ * queue (`paintPlaylist` never puts it in `items`), and a tap explains how to get it.
+ */
+function notOnPhoneRow(ctx: AppContext, song: Song): HTMLElement {
+  return bindTap(
+    h('button', { class: 'row song not-on-phone', 'aria-label': `${song.title} — not on this phone` }, [
+      h('span', { class: 'row-play' }, [icon(ICONS.close, 18)]),
+      h('div', { class: 'row-text' }, [
+        h('span', { class: 'row-title', text: song.title }),
+        h('span', { class: 'row-sub', text: [song.artist, 'not on this phone'].filter(Boolean).join(' · ') }),
+      ]),
+      h('span', { class: 'row-time', text: formatDuration(song.duration) }),
+    ]),
+    () => ctx.toast('Not on this phone — open the playlist and press ↓ when you have a connection'),
+  );
 }
 
 async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {

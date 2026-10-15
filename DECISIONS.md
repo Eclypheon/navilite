@@ -211,3 +211,39 @@ native boundary: the handover statement (`awake: false`) now arms the native sid
 so the *first* boundary after the app goes away is a play from a loaded item rather than a fetch.
 DECISIONS.md's own note on that item stands — "if it can't be resolved it's fine", low priority — and
 the change is not device-verified here: the simulator cannot settle a background gap.
+
+## 1.9.19, 2026-10-15 — the three defects Sage's review of 1.9.18 found
+
+Review of 17995e4 (t_aad111fa) returned SEND BACK: the offline work was real but its headline claim
+was not reliably true *on the phone*, and two smaller defects followed from the same mistake — reading
+"the local list" as if it were "the list that is actually here". Fixes, in the order they matter:
+
+1. **The offline store is warm before the first paint.** The playlist records `record()` and
+   `downloadedPlaylists()` answer from were built in `hydrate()`, *after* `await bridge.list()` — a
+   native round trip lasting up to `BRIDGE_TIMEOUT_MS` (5 s). Boot starts hydration without awaiting
+   it and paints the first route anyway, so on iOS the Library and a downloaded playlist drew their
+   offline state off an empty store for that whole window: "nothing is downloaded on this phone yet"
+   over a phone full of downloads, with nothing re-rendering when the reconcile landed. The records
+   are now rebuilt from the mirror's manifests **in the constructor**, in the same tick as the rows
+   were already being seeded, from exactly the data `hydrate()` would use. The Chrome harness cannot
+   see this defect at all — `createDownloadsBridge()` is null on the web, which makes `hydrate()`
+   synchronous — so the regression test drives the store directly with a bridge whose `list()`
+   answers on a timer and asserts the record exists *before* any await
+   (`test/offline-browse.test.ts`).
+2. **A partial download paints only the tracks that are here.** `record.songs` is the manifest —
+   what the download was *asked* for — while `record.done` counts complete files, so a cancelled or
+   grown download drew tracks with no file as ordinary rows: offline a tap on one was silence with
+   nothing said, and "play the playlist" walked onto them. The local paint now checks each row
+   against the synchronous resolver (`pathFor`), marks the ones that are not here, leaves them out of
+   the queue, and the header says `n of m on this phone`. The server's own answer is untouched (every
+   track of it is streamable).
+3. **The deferred launch restore only adopts onto an untouched launch.** `getPlayQueue` lands after
+   the first paint since 1.9.18, so a queue the owner had already started could be overwritten by the
+   last session's — bar, now-playing screen and highlight jumping while the audio kept playing his
+   choice, and the native side republished the stale queue. `Queue.restore()` returns false when
+   `currentSong !== null`; a launch convenience is only adopted when nothing has been chosen.
+4. **"Unreachable" is narrower than "any `TypeError`"** (`api/subsonic.ts`: `isTransportFailure`). A
+   genuine `TypeError` thrown inside a view used to be presented as the `Offline` pill with its
+   message going to the console only — the app blaming the network for its own bug. Only the
+   transport's own messages qualify, and a real error keeps the path to the screen it always had.
+5. **A not-downloaded playlist's header uses words, not the id** (`“pl-…uuid” is not downloaded`).

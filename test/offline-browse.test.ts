@@ -120,12 +120,64 @@ test('the name a playlist was downloaded under survives a relaunch, from the mir
   // is in before `list()` replies, and the one the offline page has to work from.
   const next = new OfflineStore(null, { store: mirror });
   assert.equal(loadMirror(mirror)?.playlists?.['pl-1']?.name, 'Late night driving', 'the mirror holds the name');
+  // **Before** any hydrate, too (v1.9.19): the page is painted in this tick.
+  assert.deepEqual(
+    next.downloadedPlaylists().map((entry) => entry.id),
+    ['pl-1'],
+    'the browse list answers from the mirror before anything is reconciled',
+  );
   await next.hydrate();
   assert.deepEqual(
     next.downloadedPlaylists().map((entry) => [entry.id, entry.name, entry.record.done, entry.record.total]),
     [['pl-1', 'Late night driving', 2, 2]],
     'the record is rebuilt from the manifest and the mirrored rows, so the playlist is listed with its name',
   );
+});
+
+/**
+ * The defect the browser harness structurally cannot see (v1.9.19).
+ *
+ * On the web `createDownloadsBridge()` is null, which makes `hydrate()` fully synchronous, so the
+ * store there is always warm by the time anything reads it. On the phone a bridge exists, and
+ * `hydrate()` reaches `rebuildPlaylists` only after `await bridge.list()` — a native round trip that
+ * takes up to `BRIDGE_TIMEOUT_MS`. Boot does not await it (`void offline.hydrate()`), and the first
+ * route is painted anyway, so for the whole of that window the playlist records have to answer from
+ * the mirror or a cold launch in airplane mode says "nothing is downloaded on this phone yet" over a
+ * phone full of downloads.
+ *
+ * This is the assertion the harness cannot make: a bridge is present, `list()` answers on a timer,
+ * and nothing is awaited.
+ */
+test('with a bridge present the playlist records answer in the same tick the store is constructed', async () => {
+  const mirror = memoryStore();
+  const warm = fakeBridge();
+  const store = new OfflineStore(warm, { store: mirror });
+  await download(warm, store, 'pl-1', 'Late night driving', [song('a'), song('b')]);
+
+  let answered = false;
+  const slow: FakeBridge = {
+    ...fakeBridge(),
+    list: () =>
+      new Promise((resolve) => {
+        setTimeout(() => {
+          answered = true;
+          resolve([]);
+        }, 50);
+      }),
+  };
+  const cold = new OfflineStore(slow, { store: mirror });
+  // No `await`, no `hydrate()`: this is the tick `renderRoute` paints the first screen in.
+  assert.equal(answered, false, 'the native index has not answered yet — the window this test is about');
+  assert.deepEqual(
+    cold.downloadedPlaylists().map((entry) => [entry.id, entry.name, entry.record.done, entry.record.total]),
+    [['pl-1', 'Late night driving', 2, 2]],
+    'the offline browse list comes from the mirror, not from the round trip',
+  );
+  assert.equal(cold.record('pl-1')?.state, 'complete', 'and so does the record the download control draws from');
+  assert.equal(cold.pathFor('a'), 'file:///a.mp3', 'the resolver was already warm');
+
+  await cold.hydrate();
+  assert.equal(answered, true, 'and the reconcile still runs, replacing the mirror’s picture with list()’s');
 });
 
 test('a manifest written before names were recorded is named by the server’s own list, once', async () => {
