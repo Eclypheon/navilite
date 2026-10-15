@@ -18,6 +18,7 @@ import {
   fromSidecar,
   fromStructured,
   isRouteErrorBody,
+  isRouteErrorDoc,
   parseLrc,
   parsePlain,
   structuredToBody,
@@ -577,4 +578,13 @@ test('the route’s own 404 document is recognised and refused as a lyric body',
   assert.equal(isRouteErrorBody('[00:01.00]A line'), false, 'an LRC sidecar is not one');
   assert.equal(isRouteErrorBody('[ar:Someone]\nFirst line'), false, 'nor is an untimed .txt');
   assert.equal(isRouteErrorBody(''), false, 'nor is nothing at all');
+
+  /*
+   * …and the same question about a document that has already been parsed, which is the shape a
+   * ≤1.9.13 build stored in the view cache. `finalize` romanises the kana and leaves the ASCII
+   * markers alone, so the predicate reads the same document (v1.9.15).
+   */
+  assert.equal(isRouteErrorDoc(fromSidecar(routeError)), true, 'the cached document is the same error document');
+  assert.equal(isRouteErrorDoc(fromSidecar('[ar:Someone]\nFirst line')), false, 'a parsed .txt is not one');
+  assert.equal(isRouteErrorDoc(null), false, 'and "no lyrics for this track" is not one either');
 });

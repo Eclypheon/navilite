@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { LyricsService } from '../src/lyrics/service.ts';
 import { OfflineStore, type DownloadEvent, type DownloadJob, type IndexRow } from '../src/state/offline.ts';
 import { LyricsCache } from '../src/storage/lyrics.ts';
-import type { LyricsSource } from '../src/api/lyrics.ts';
+import { fromSidecar, type LyricsSource } from '../src/api/lyrics.ts';
 import type { SidecarSource } from '../src/api/sidecar.ts';
 import type { Song, StructuredLyrics } from '../src/api/types.ts';
 
@@ -249,4 +249,36 @@ test('a 404 on the route makes the lane store Navidrome’s body, and it renders
   assert.equal(doc.synced, true, 'with its timings: the highlight survives the round trip');
   assert.equal(doc.lines[0]?.timeMs, 1000);
   assert.deepEqual(calls, [], 'zero network calls');
+});
+
+test('a poisoned view cache is refused too: the pane still reaches the words', async () => {
+  /*
+   * v1.9.15 — the layer the 1.9.14 fix did not reach. The view cache is read **before** the
+   * offline copy, and a ≤1.9.13 build had cached the 404 document as a week-long hit, so the
+   * owner's pane printed the server's JSON for tracks the guards below it had already cleaned
+   * up. Both poisoned layers are present here, exactly as they are on his phone.
+   */
+  const { calls, library, sidecar } = sources();
+  sidecar.lyricsFor = async (s) => {
+    calls.push(`sidecar:${s.id}`);
+    return TXT;
+  };
+  const cacheStore = memoryStore();
+  cacheStore.setItem('navilite.lyrics.v1', JSON.stringify([{ key: 'a', at: Date.now(), doc: fromSidecar(ROUTE_ERROR) }]));
+  const cache = new LyricsCache(cacheStore);
+  const files = new Map([['a', ROUTE_ERROR]]);
+  const store = new OfflineStore(lane([row('a', { state: 'present', bytes: ROUTE_ERROR.length })], files), {
+    store: memoryStore(),
+    lyricsFallback: async () => null,
+  });
+  await store.hydrate();
+  const service = new LyricsService(cache, () => library, () => sidecar, () => store);
+
+  const doc = await service.lyricsFor(song());
+  await settle();
+  assert.ok(doc, 'the pane has words to show');
+  assert.equal(doc.lines[0]?.text, 'First line', 'the lyric, not the route’s error document');
+  assert.deepEqual(calls, ['sidecar:a'], 'the poisoned cache answered for nobody');
+  assert.equal(cache.get('a')?.lines[0]?.text, 'First line', 'and the cache now holds the words');
+  assert.equal(store.lyricsState('a')?.state, 'none', 'the poisoned row was voided, as at 1.9.14');
 });

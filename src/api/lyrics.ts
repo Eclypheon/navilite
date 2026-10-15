@@ -176,6 +176,21 @@ export function isRouteErrorBody(body: string): boolean {
   return head.startsWith('{"error"') || head.includes('no lyrics sidecar for this track');
 }
 
+/**
+ * The same predicate for a document that has **already been parsed** (v1.9.15).
+ *
+ * A build before v1.9.14 could store that 404 document as a *view cache hit* — a week long, in
+ * `localStorage` (`src/storage/lyrics.ts`) — so the phone still holds it for tracks that were
+ * opened while the body was being promoted. Whatever a `LyricsDoc` is, the error document is not
+ * an answer, and this is how the cache can tell: `fromSidecar` keeps every marker the route
+ * writes (they are ASCII, so `romanizeLine` leaves them alone), which is why the check can run
+ * on the parsed text rather than the raw bytes nobody kept.
+ */
+export function isRouteErrorDoc(doc: LyricsDoc | null): boolean {
+  if (doc === null) return false;
+  return isRouteErrorBody(doc.lines.map((line) => line.text).join('\n'));
+}
+
 /** A plain blob from the legacy endpoint, which may still be an LRC file's contents. */
 export function fromBlob(body: string): LyricsDoc | null {
   return fromText(body, 'blob');

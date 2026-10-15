@@ -343,4 +343,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'One thing to do by hand: delete and download again any playlist you downloaded with an older build. The playlists already on your phone saved that server message as if it were the lyrics, and only a fresh download replaces it.',
       ],
     },
+    {
+      version: '1.9.15',
+      date: '2026-10-15',
+      items: [
+        'A track that showed a server message where its words should be, in a playlist you downloaded with an older build, now fixes itself: open that track again and the saved message is thrown away and the real words are fetched in its place — or an honest "no lyrics" if there are none. Deleting the playlist and downloading it again is no longer needed, and it was never what cleared it.',
+        'Settings → Clear cached lyrics is still there if a track ever looks out of date.',
+      ],
+    },
   ];

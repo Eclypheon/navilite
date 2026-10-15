@@ -21,6 +21,7 @@ import test from 'node:test';
 
 import { LyricsService } from '../src/lyrics/service.ts';
 import { LyricsCache } from '../src/storage/lyrics.ts';
+import { fromSidecar } from '../src/api/lyrics.ts';
 import type { Song } from '../src/api/types.ts';
 
 const song: Song = {
@@ -142,4 +143,36 @@ test('the cache survives a relaunch, and clear() empties it', async () => {
   second.clear();
   assert.equal(second.get(song.id), undefined);
   assert.equal(new LyricsCache(storage, () => Date.UTC(2026, 0, 1)).size, 0);
+});
+
+/**
+ * v1.9.15 — the cache boundary.
+ *
+ * v1.9.14 made the offline copy, the download lane and the native completion handler refuse the
+ * lyrics route's 404 document, and the owner's pane still showed it: the view cache is read
+ * **first** (`src/lyrics/service.ts`), and a ≤1.9.13 build had cached that document as a
+ * week-long hit. The boundary is therefore closed in both directions here — the entry a
+ * previous build left is not served, and the document cannot be written back in as a hit.
+ */
+test('the route’s 404 document is refused at the cache boundary, in both directions', () => {
+  const routeError = '{"error": "no lyrics sidecar for this track", "path": "yorushika/eruma/13 - 海底、月明kari.opus", "tried": ["….lrc", "….txt"]}';
+  const poisoned = fromSidecar(routeError);
+  assert.ok(poisoned, 'the body parses — that is exactly why it has to be refused on content');
+
+  // What a ≤1.9.13 build left behind: the parsed document, stored as a week-long hit under the
+  // key this cache has always written.
+  const storage = fakeStorage();
+  storage.setItem('navilite.lyrics.v1', JSON.stringify([{ key: song.id, at: Date.UTC(2026, 0, 1), doc: poisoned }]));
+  const cache = new LyricsCache(storage, () => Date.UTC(2026, 0, 2));
+  assert.equal(cache.get(song.id), undefined, 'a poisoned entry is not an answer');
+  assert.equal(cache.size, 0, 'and it is dropped, not left to be re-examined for a week');
+
+  // …and it cannot come back in through the other door.
+  cache.set(song.id, poisoned);
+  assert.equal(cache.get(song.id), null, 'the error document is never held as a hit — the honest "nothing yet" is');
+
+  // The words themselves pass through the boundary untouched, timings included.
+  cache.set(song.id, fromSidecar('[00:01.00]A line\n[00:02.00]Another'));
+  assert.equal(cache.get(song.id)?.lines[1]?.text, 'Another');
+  assert.equal(cache.get(song.id)?.synced, true);
 });

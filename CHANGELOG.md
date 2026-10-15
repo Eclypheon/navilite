@@ -228,3 +228,8 @@ Plain language, user-visible changes only. The app shows this same list under
 - A track with no lyrics file of its own no longer shows a server error where the words should be. It says there are no lyrics for that track instead of printing the server's message on the screen.
 - Downloaded playlists now bring the tracks whose words live inside the music file itself, not only the ones that have a separate lyrics file next to them. Those tracks used to show their words while streaming and nothing at all in airplane mode.
 - One thing to do by hand: delete and download again any playlist you downloaded with an older build. The playlists already on your phone saved that server message as if it were the lyrics, and only a fresh download replaces it.
+
+## 1.9.15 — 2026-10-15
+
+- A track that showed a server message where its words should be, in a playlist you downloaded with an older build, now fixes itself: open that track again and the saved message is thrown away and the real words are fetched in its place — or an honest "no lyrics" if there are none. Deleting the playlist and downloading it again is no longer needed, and it was never what cleared it.
+- Settings → Clear cached lyrics is still there if a track ever looks out of date.

@@ -15,8 +15,13 @@
  * existed stayed blank. So a miss lives for minutes, and a hit for a week: the route serves
  * the file as it is *now*, and a `.txt` sidecar that is later upgraded to a timed `.lrc` has
  * to be able to appear without anyone clearing anything.
+ *
+ * v1.9.15: "a hit for a week" is a week of *words*. A build before v1.9.14 could cache the
+ * lyrics route's **404 document** (see `isRouteErrorBody`), and that entry is refused here, at
+ * the boundary, on the way in and on the way out — a poisoned entry from an older build is
+ * dropped so the caller asks again, and the document can never be written back as a hit.
  */
-import type { LyricsDoc } from '../api/lyrics.ts';
+import { isRouteErrorDoc, type LyricsDoc } from '../api/lyrics.ts';
 
 const STORAGE_KEY = 'navilite.lyrics.v1';
 const MAX_ENTRIES = 200;
@@ -64,12 +69,29 @@ export class LyricsCache {
       this.persist();
       return undefined;
     }
+    /*
+     * A hit written by a build before v1.9.14 can be the route's 404 document — a week of the
+     * server's JSON in the Lyrics pane for a track opened while it was being promoted. It is not
+     * an answer, so it is not served: the entry is dropped (the same refusal the offline copy
+     * makes, `src/state/offline.ts`) and the caller goes to the sources.
+     */
+    if (isRouteErrorDoc(entry.doc)) {
+      this.entries.delete(key);
+      this.persist();
+      return undefined;
+    }
     return entry.doc;
   }
 
   set(key: string, doc: LyricsDoc | null): void {
+    /*
+     * The write half of the same boundary: the error document never enters the cache as a hit.
+     * It is recorded as a miss instead — the honest "asked, nothing to show yet" — so no caller,
+     * and no later build, can get it back out of here.
+     */
+    const entry: LyricsDoc | null = isRouteErrorDoc(doc) ? null : doc;
     this.entries.delete(key);
-    this.entries.set(key, { key, at: this.now(), doc });
+    this.entries.set(key, { key, at: this.now(), doc: entry });
     if (this.entries.size > MAX_ENTRIES) {
       // Map preserves insertion order, so the first key is the oldest write.
       const oldest = this.entries.keys().next();

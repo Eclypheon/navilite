@@ -150,4 +150,9 @@ test('the route’s own error document is never stored as lyrics, wherever the b
   assert.ok(source.includes('head.contains("no lyrics sidecar for this track")'), 'and the same second: the route’s own wording');
   assert.match(source, /if kind == Self\.lyricsKind, Self\.looksLikeRouteError\(destination\) \{/, 'the guard runs where the bytes become a row');
   assert.match(source, /"status": 404/, 'and the body is reported as the 404 it is, so JS records `none`, not `· retry`');
+  // v1.9.15: the window is decoded lossily. `String(data:encoding:)` returns nil when byte 512
+  // splits a UTF-8 character, which made this last door fail **open** — the one thing it may not
+  // do. Both assertions fail against the 1.9.14 tree.
+  assert.match(source, /String\(decoding: data\.prefix\(512\), as: UTF8\.self\)/, 'the 512-byte window is decoded with no nil branch');
+  assert.doesNotMatch(source, /String\(data: data\.prefix\(512\), encoding: \.utf8\)/, 'the nil-returning initialiser is gone');
 });

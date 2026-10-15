@@ -101,12 +101,14 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
      * was promoted as the lyric file and recorded `present`; those rows are still on the owner's
      * phone. The guard therefore stays where the bytes become an index row, so a bad body can never
      * be recorded as `present` again. The two tests are the same two `isRouteErrorBody` makes in
-     * `src/api/lyrics.ts` (Swift cannot import it).
+     * `src/api/lyrics.ts` (Swift cannot import it); the window is decoded with `String(decoding:)`
+     * rather than `String(data:encoding:)` because the latter returns `nil` when byte 512 lands
+     * mid-character and the guard would then fail **open** — the one thing a last door may not do.
      */
     fileprivate static func looksLikeRouteError(_ url: URL) -> Bool {
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data.prefix(512), encoding: .utf8) else { return false }
-        let head = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = try? Data(contentsOf: url) else { return false }
+        let head = String(decoding: data.prefix(512), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return head.hasPrefix("{\"error\"") || head.contains("no lyrics sidecar for this track")
     }
 

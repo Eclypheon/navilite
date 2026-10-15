@@ -37,7 +37,14 @@ export class LyricsService {
     this.offline = offline;
   }
 
-  /** Lyrics for a track, from the device cache when it has them. Null = none to show. */
+  /**
+   * Lyrics for a track, from the device cache when it has them. Null = none to show.
+   *
+   * A cached document only counts when it is words: `LyricsCache` refuses the lyrics route's
+   * 404 document on the way in and on the way out (v1.9.15), so a track a ≤1.9.13 build
+   * poisoned falls through to `load` below and is answered from the offline copy or the
+   * sources.
+   */
   async lyricsFor(song: Song): Promise<LyricsDoc | null> {
     const cached = this.cache.get(song.id);
     if (cached !== undefined) return cached;
