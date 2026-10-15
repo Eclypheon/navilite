@@ -358,4 +358,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The spectrum works on songs you have downloaded. It sat flat on those tracks — the bars stayed on the album-art theme — while the same song played over the network was fine, because a downloaded song is played by a different part of the player and the spectrum was reading the part a stream uses. A downloaded song now plays through that same one.',
       ],
     },
+    {
+      version: '1.9.17',
+      date: '2026-10-15',
+      items: [
+        'A downloaded song whose file has gone missing — deleted by the phone to free up space, or by you in the Files app — no longer plays silence for ever. The first time you press play on it, the app throws away that download, and the song plays from the server the next time you press play. Before this it played nothing, said nothing, and the only way out was deleting the download and downloading it again.',
+        'The playlist that download came from goes back to offering the download, so the copy on the phone can be built again with one press.',
+      ],
+    },
   ];

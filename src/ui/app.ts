@@ -1409,7 +1409,14 @@ function connect(ctx: AppContext, shell: Shell, credentials: Credentials, applyP
   const client = new SubsonicClient(credentials);
   // The offline resolver is the one `streamUrl` consults first (local-first playback, v1.9.12).
   const library = new Library(client, (songId) => ctx.offline?.pathFor(songId) ?? null);
-  const queue = new PlaybackQueue(ctx.engine, library);
+  const queue = new PlaybackQueue(ctx.engine, library, {
+    /*
+     * A failed start for a track the library resolved to a `file://` path is the app's only evidence
+     * that the download's file has gone (v1.9.17): the row is voided, so the next start of that
+     * track streams it instead of asking for a file that is not there.
+     */
+    onLocalFileUnplayable: (songId) => void ctx.offline?.voidMissingFile(songId),
+  });
   ctx.library = library;
   ctx.queue = queue;
   // The library's own lyric route lives on the same door as the API, so it is derived from the

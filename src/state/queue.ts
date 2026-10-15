@@ -163,9 +163,26 @@ export class PlaybackQueue {
   private readonly engine: AudioEngine;
   private readonly library: Library;
 
-  constructor(engine: AudioEngine, library: Library) {
+  /**
+   * v1.9.17 — **the one signal the app gets that a downloaded row's file has gone.**
+   *
+   * The offline resolver is synchronous by design and never touches the filesystem, so nothing on
+   * the resolving side can discover that a row's file was deleted; a start that produced no sound
+   * for a track that was asked for **as a file** is all the evidence there is. The queue reports
+   * the song id and the owner of the download store voids the row, so the next start of that track
+   * resolves to the stream instead of a file that is not there. Absent in tests, and on a build
+   * with no download store at all.
+   */
+  private readonly onLocalFileUnplayable: ((songId: string) => void) | null;
+
+  constructor(
+    engine: AudioEngine,
+    library: Library,
+    options: { onLocalFileUnplayable?: (songId: string) => void } = {},
+  ) {
     this.engine = engine;
     this.library = library;
+    this.onLocalFileUnplayable = options.onLocalFileUnplayable ?? null;
     engine.onEnded = () => void this.advance(true);
     engine.onProgress = (positionMs, durationMs) => this.trackProgress(positionMs, durationMs);
     // The lock screen's next/previous (v1.7): the platform delivers them, the queue acts on them.
@@ -669,6 +686,22 @@ export class PlaybackQueue {
        * quickly stops"*. Nothing is claimed about the track that failed; the tracks around it are got
        * ready exactly as they are on the path where a start succeeded.
        */
+      /*
+       * v1.9.17 — **a start that produced no sound for a `file://` track is the file that has gone,
+       * and the row behind it is voided here.**
+       *
+       * Nothing else can find out. The resolver is synchronous and never touches the filesystem, and
+       * the retry above is *in place* by design (v1.9.8) — the same dead item asked again — so this
+       * is the only moment the app learns that a downloaded track cannot play. The store drops the
+       * row (the index, the mirror and the native `index.json`), which is what makes the next start
+       * of this song resolve to the stream instead of the missing file: the track comes back rather
+       * than being unplayable until the download is deleted and made again. The failure still stands
+       * on screen for the attempt that failed, with the tap that tries again.
+       *
+       * The scheme test is the whole of the guard: a stream that failed is a link or a server
+       * problem, and no download row is involved in it at all.
+       */
+      if (request.url.startsWith('file://')) this.onLocalFileUnplayable?.(song.id);
       this.cancelPrepared();
       this.onChanged?.();
       this.warmNeighbours();

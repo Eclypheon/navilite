@@ -304,6 +304,42 @@ export class OfflineStore {
     return row !== undefined && row.state === 'complete' ? row.path : null;
   }
 
+  /**
+   * §6 E3 recovery — **a complete row whose file has gone is voided, so the next start resolves to
+   * the stream** (v1.9.17).
+   *
+   * The resolver above is synchronous and never touches the filesystem (invariant 1), so it cannot
+   * discover a missing file by itself: a row whose file was deleted outside this app — by iOS under
+   * storage pressure, by the Files app, by anything that does not go through `remove` — answered
+   * with its dead `file://` path for ever, and that song played nothing from then on. The one
+   * signal the app gets is a start that produced no sound for a track it asked for **as a file**
+   * (`state/queue.ts`: the failed start whose request URL began `file://`), and that is what calls
+   * this.
+   *
+   * The row is dropped from the in-memory index, from the mirror *and* from the native index:
+   * `bridge.remove` is the durable half, because `list()` reports `index.json` without stat-ing the
+   * file (`NaviliteDownloads.swift`), so a row only dropped here would be back at the next boot
+   * reconcile. The playlist records that referenced it reconcile down, so a playlist whose
+   * downloaded copy has gone reads incomplete and offers the download again rather than reading
+   * `complete` over a track that cannot play. Same shape as `voidErrorBody` for a lyrics row that
+   * is not lyrics: void the row, re-resolve next time.
+   */
+  async voidMissingFile(songId: string): Promise<void> {
+    const row = this.rows.get(songId);
+    if (row?.state !== 'complete') return;
+    this.rows.delete(songId);
+    if (this.bridge) {
+      try {
+        await this.bridge.remove(songId);
+      } catch {
+        // The file is already gone, or the bridge refused — the row is dropped regardless.
+      }
+    }
+    for (const playlistId of row.refs) this.reconcileRecord(playlistId);
+    this.saveMirror();
+    this.notify();
+  }
+
   /** The durable lyrics row for a song, synchronously from the in-memory index. */
   lyricsState(songId: string): LyricsRow | null {
     return this.rows.get(songId)?.lyrics ?? null;

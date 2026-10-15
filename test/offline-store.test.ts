@@ -124,6 +124,44 @@ test('a boot with a missing mirror rebuilds from list() and plays local on the f
   assert.equal(store.record('pl-1')?.state, 'complete');
 });
 
+/*
+ * v1.9.17 — the file that is gone. The resolver cannot see a deleted file (it is synchronous and
+ * never touches the filesystem), so the row is voided on the one signal the app gets: a start that
+ * produced no sound for a track it asked for as a `file://` path (`state/queue.ts`). The void has to
+ * reach the **native** index and not only this process, because `list()` reports `index.json`
+ * without stat-ing the file, so a row dropped here alone would be back at the next boot reconcile.
+ */
+test('a complete row whose file has gone is voided from the index, the mirror and the native index', async () => {
+  const bridge = fakeBridge([indexRow('a')]);
+  const mirror = memoryStore();
+  const store = new OfflineStore(bridge, { store: mirror });
+  await store.hydrate();
+  assert.equal(store.pathFor('a'), 'file:///a.mp3', 'the row answers with its file while the file is there');
+  assert.equal(loadMirror(mirror)?.rows['a']?.state, 'complete', 'and the mirror carries it, so a relaunch resolves local');
+
+  await store.voidMissingFile('a');
+  assert.equal(store.pathFor('a'), null, 'the dead row no longer resolves — the next start is the stream');
+  assert.deepEqual(bridge.removed, ['a'], 'and the native index is corrected, not just this process');
+  assert.deepEqual(loadMirror(mirror)?.rows, {}, 'the mirror cannot resurrect it on the next launch either');
+  assert.equal(store.totalTracks(), 0, 'it is no longer counted as a downloaded track');
+});
+
+test('voiding a missing file reconciles the playlist down, and only a complete row is voidable', async () => {
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: memoryStore() });
+  await store.download('pl-1', [song('a')]);
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+  assert.equal(store.record('pl-1')?.state, 'complete', 'the playlist reads complete over a file that is on disk');
+
+  // A song the index does not hold — never downloaded, or already voided — is not a row to void.
+  await store.voidMissingFile('b');
+  assert.deepEqual(bridge.removed, [], 'nothing was removed for a song with no row');
+
+  await store.voidMissingFile('a');
+  assert.equal(store.record('pl-1')?.done, 0, 'the playlist no longer counts the track as downloaded');
+  assert.equal(store.record('pl-1')?.state, 'failed', 'so its control is the one that offers the download again');
+});
+
 test('invariant 7 is an executable claim: the store imports no queue, engine or native module', () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   const source = readFileSync(join(root, 'src', 'state', 'offline.ts'), 'utf8');
