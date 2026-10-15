@@ -279,6 +279,7 @@ node tools/layout-audit.mjs --url http://127.0.0.1:4533 --sweep 320:440 --step 1
 node tools/device-probe.mjs --device <simulator-udid>             # iOS WebKit: the app in Safari
 node tools/device-probe.mjs --serve --app <App.app>               # ...and the real Capacitor shell
 node tools/spectrum-proof.mjs --url http://127.0.0.1:4533         # real pixels: no after-image
+node tools/spectrum-tail.mjs --url http://127.0.0.1:4533          # the same tail, sample by sample
 node tools/palette-check.mjs --url http://127.0.0.1:4533          # the theme follows the track
 ```
 

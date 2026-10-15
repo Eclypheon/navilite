@@ -598,6 +598,11 @@ v1.2:
   RESULT: every bar is the current frame only.
 ```
 
+At v1.2 that criterion was true of the build as designed — and it still holds: re-run on 2026-10-15
+from a worktree of f9fd6e5, the same 1277 lit pixels appear at +160, +240, +700, +900 and +1200 ms,
+all byte-identical. What it stopped being true of is **every build since v1.7.4**, which replaced the
+snap with a release envelope; so the tool's window, not the player, was re-baselined — see §16.
+
 ### 10.5 The lyrics cache the owner tripped over, pinned by test
 
 `test/lyrics-cache.test.ts` covers the exact case: a track is opened *before* its sidecar exists
@@ -1448,4 +1453,100 @@ Neither binary is in the repo (`artifacts/` is gitignored). Both were attached t
   payload, not a run of the installed binary.
 - Everything else carries over from §14.4 unchanged: Safari's own edge-swipe on a real finger, the
   native scroll a real vertical drag produces, landscape, and the iPad.
+
+## 16. `tools/spectrum-proof.mjs`, re-baselined — the tool, not the player (2026-10-15, v1.9.19)
+
+Found while verifying v1.9.19 (card `t_e62d2b6b`, filed from the review of the offline fixes, which
+are untouched by this). §10.4's pixel criterion had stopped being true of every build since v1.7.4,
+while the repository still documented the check as green. What follows is the reproduction, the
+bisect, and the re-baselined criterion; the decision itself is in `DECISIONS.md`.
+
+**Reproduced here first** — `node tools/mock-subsonic.mjs --port 4599 --stress`, then
+`node tools/spectrum-proof.mjs --url http://127.0.0.1:4599` against the shipped `dist/` (built from
+ac12206):
+
+```
+playing:  30575 lit pixels
++50 ms:   32603 lit pixels — 106.6% of the loud frame (informational: pipeline latency)
++160 ms:  10212 lit pixels
++240 ms:   5278 lit pixels · DIFFERENT from +160 ms
+RESULT: FAIL — something of an earlier frame is still on screen.
+```
+
+The same shape on the pre-fix v1.9.18 (17995e4, its own worktree on its own port): 29939 lit while
+playing, 6763 at +160, 3067 at +240, and a tail still moving at +320 / +400. So this is not the
+v1.9.19 change and not a loaded machine — it is what the tool asks of the bars.
+
+**The window was right and the bars moved under it.** A fourteen-sample curve out to +2 s
+(`tools/spectrum-tail.mjs` — the curve tool added with this, which reports the whole tail rather than
+judging a window; same mock, same mock library), on the shipped build:
+
+```
++ 160 ms:   7184 lit px   23%    prev-ratio 2.65  DIFFERENT
++ 240 ms:   2501 lit px    8%    prev-ratio 2.87  DIFFERENT
++ 320 ms:   1337 lit px  4.3%    prev-ratio 1.87  DIFFERENT
++ 400 ms:    668 lit px  2.1%    prev-ratio 2      DIFFERENT
++ 480 ms:    668 lit px  2.1%    prev-ratio 1      identical to previous
++2000 ms:    668 lit px  2.1%    prev-ratio 1      identical to previous
+```
+
+A constant ratio of ~2.5 per 80 ms reading is an exponential with a ~0.1 s time constant —
+`RELEASE_S = 0.1` in `src/player/visualizer.ts`, the v1.7.4 release envelope the owner asked for
+(*"Pausing should cause the spectrum to gracefully all drop to zero"*). Its endpoint is 668 px, which
+is 64 bands × the 1 px minimum rectangle: the analyser is at digital silence and what is left on
+screen is exactly the "no bar" rectangle per band. Nothing is being carried over from the loud frame
+— the *tail* is the envelope, and the envelope is deliberate. The last pixel change after a mute is
+the last bar leaving the floor, so it moves between runs: +480 ms in one, +560 ms in the next, both
+on v1.9.19 — which is where the judgement window comes from, not from the +160/+240 readings.
+
+**Bisect, with the tool as the test.** `git bisect run` between v1.2 (f9fd6e5, good) and ac12206
+(bad), each commit built in a scratch worktree and served on its own mock port; the harness maps the
+tool's exit 0 to good, exit 1 to bad, anything else (a commit that cannot build or run) to `skip`:
+
+```
+Bisecting: 29 revisions left to test after this (roughly 5 steps)
+---- d0b5c9e exit=1   ---- ce92d3a exit=0   ---- 65f7046 exit=1
+---- a22e6ff exit=1   ---- 4b6b7db exit=1   ---- 4bee9f9 exit=1
+bisect found first bad commit
+```
+
+`4bee9f9` is **v1.7.4** — "the spectrum wears the album palette and stops shimmering; a pause settles
+to zero instead of the placeholder" — the one commit in the range that adds the attack/release
+envelope. v1.2 and v1.7.3 pass the old criterion; v1.7.4 and every later commit fail it.
+
+**The re-baselined criterion**, and the controls that show it was not weakened. The judgement moved
+to +900 ms and later (the envelope needs ~460 ms to reach its floor and the media pipeline can hold
+the silence back by ~100 ms; the last pixel change observed after a mute was at +560 ms), compares
+three readings half a second apart as PNGs rather than as lit counts, and adds a shape check on the
+settled frame — one separated run of lit pixels per canvas column, nothing lit below the bars'
+baseline. Every build below was built in its own scratch worktree and served on its own port; the
+existing harnesses do the work (`tools/spectrum-proof.mjs`, `tools/mock-subsonic.mjs`), with the
+shape facts added to the probe's `spectrumSnapshot(true)`.
+
+| build | verdict | playing | +160 | +240 | +900 | +1200 | +1500 | settled frame |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v1.9.19 (dist of ac12206), twice | **pass** | 30894 | 6054 | 2540 | 668 | 668 | 668 | 0 second runs, 0 below baseline |
+| v1.9.18 (17995e4) | **pass** | 29939 | 6763 | 3067 | 668 | 668 | 668 | 0 / 0 |
+| v1.7.4 (4bee9f9 — first bad commit) | **pass** | 22035 | 8922 | 4120 | 1233 | 1233 | 1233 | 0 / 0 |
+| v1.2 (f9fd6e5) | **pass** | 21665 | 1277 | 1277 | 1277 | 1277 | 1277 | 0 / 0 |
+| v1.1 (its `visualizer`+`engine` over v1.2) | **fail** | 20631 | 5713 | 2360 | 1246 | 979 | 922 | 118 second runs, loud frame 84 below baseline |
+
+The v1.1 row is the control that matters: the tool still fails the build whose report it was written
+for, on two independent counts (its bars never stop drifting, and what it leaves behind is bars with
+a cap/reflection above them). Its failure reason in one line: *"FAIL — the bars were still moving a
+second and a half after the audio went quiet; the frame left behind is not flat bars (118 columns
+with a second run, 0 lit pixels below the baseline)."* What is **not** covered at pixel level is the
+playing frame's own shape — that is asserted per frame in `test/visualizer.test.ts` (64 flat
+rectangles, no caps, no reflections), and the pixel check would only re-derive it.
+
+One correction found by the controls: distinct lit *colours* per column are not a usable shape fact.
+The bars' bottom edge lands on `0.98 × height`, which is fractional on most canvas heights, so a
+perfectly ordinary frame has one antialiased row blending the bar with the backdrop at two different
+alphas — 629 such columns on the v1.2 build. Separated *runs* have no such ambiguity, which is why
+the probe reports runs.
+
+**Still not covered.** This reads the **streaming** spectrum — the mock's WAV through the web engine.
+The local-file path (`playlistPath`/`localFile`, the v1.9.16/17 ground) is a different engine and was
+not exercised by this check. Nothing here touched the v1.9.19 offline fixes: no `src/` file changed
+in this work (`tools/` and this document only).
 

@@ -247,3 +247,67 @@ was not reliably true *on the phone*, and two smaller defects followed from the 
    message going to the console only — the app blaming the network for its own bug. Only the
    transport's own messages qualify, and a real error keeps the path to the screen it always had.
 5. **A not-downloaded playlist's header uses words, not the id** (`“pl-…uuid” is not downloaded`).
+
+## The spectrum proof, re-baselined, 2026-10-15 (card t_e62d2b6b — the tool, not the player)
+
+`tools/spectrum-proof.mjs` fails on v1.9.19 **and** on the pre-fix v1.9.18: after the audio goes
+quiet the lit pixels keep falling — 31220 → 7184 → 2501 → 1337 → 668 at +160 / +240 / +320 / +400 ms
+— where the v1.2 baseline in `docs/verification.md` §10.4 records the same 1277 at +160 *and* +240,
+byte-identical. The tool's criterion ("t+160 ms === t+240 ms, both ≤ 10 % of the loud frame") is no
+longer true of a spectrum the owner is happy with.
+
+**Decision: the tail is deliberate, so the tool is re-baselined — the player is not changed.**
+This is the v1.7.4 release envelope (`src/player/visualizer.ts`: `ATTACK_S = 0.045`,
+`RELEASE_S = 0.1`, `FLOOR = 0.01`), which exists because the owner asked for the opposite of the
+v1.2 snap — *"Pausing should cause the spectrum to gracefully all drop to zero"*. An exponential
+release with a 0.1 s time constant is *by construction* still moving hundreds of milliseconds after
+the music stops; the criterion was written when a silent frame collapsed the bars on the next frame,
+and nothing has asserted it since v1.7.4. The bisect says so: `git bisect run` between v1.2
+(f9fd6e5, good) and ac12206 (bad), with the tool itself as the test, lands on **4bee9f9 — v1.7.4**,
+the only commit in the range that changes what the bars are drawn from (v1.2 and v1.7.3 pass, v1.7.4
+and every later commit fail, in the bisect's own log).
+
+The measurements that shape the new window, all on this machine (macOS, headless Chrome, 393×852
+dpr 3, `node tools/mock-subsonic.mjs --port 4599 --stress`):
+
+| build | playing | +160 | +240 | +700 | +900 | +1200 | first byte-identical |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| v1.9.19 (dist of ac12206) | 29625–31220 | 5860–11330 | 2408–3806 | 668 | 668 | 668 | **+480 ms**, flat to +2 s |
+| v1.9.18 (17995e4, own worktree) | 29939–31017 | 6763–18201 | 3067–5589 | 668 | 668 | 668 | **+560 ms**, flat to +2 s |
+| v1.2 (f9fd6e5, own worktree) | 21665–22650 | 1277 | 1277 | 1277 | 1277 | 1277 | immediately |
+| v1.1 (its `visualizer`+`engine` over v1.2, rebuilt) | 20631–20763 | 5713–17060 | 2360–5664 | 1243 | 1246 | 979 | **never** (still moving at +1.5 s) |
+
+The judgement therefore sits at **+900 ms and later, not at +700**: the same build settled at +480 ms
+in one run and +560 ms in the next (the last pixel change is a bar leaving the envelope's floor), so
+the criterion takes three readings half a second apart — +900, +1200, +1500 — compared as PNGs
+rather than as lit counts, since a frame can have the same count and be a different picture.
+
+The decay is the envelope and nothing else: successive 80 ms readings fall by 1.9–2.9×, i.e. a 0.1 s
+time constant, and the settled value is 668 px = 64 bands × the 1 px minimum bar — the analyser has
+reached digital silence and what is left on screen is exactly the "no bar" rectangle per band. So
+the tool now asserts what the shape actually promises: **the tail only falls, it reaches flat inside
+the envelope's own window (the release's ~460 ms to the floor plus the media pipeline's ~100 ms), the
+flat frame is byte-identical from +900 ms to +1500 ms and is ≤ 10 % of the loud frame, and the frame
+it left is flat bars** — one separated run of lit pixels per canvas column, nothing lit below the
+bars' baseline. The v1.2 readings are still taken and printed, so §10.4's baseline stays comparable.
+
+The tool was not weakened to make it pass. Against the v1.1 control it fails on two independent
+counts (never settles — 1243 / 1246 / 979 / 922 lit pixels at +700 / +900 / +1200 / +1500 ms, no two
+frames alike; and 118 of its lit columns hold a second run of lit pixels) — the same defect family
+the tool was written for. Runs rather than distinct colours are used for the shape check because the
+bars' bottom edge lands on `0.98 × height`, which is a fractional line on most canvas heights: one
+antialiased row then blends the bar with the backdrop at two alphas, i.e. two colours in a column on
+a perfectly ordinary v1.2 frame (measured: 629 such columns). A gap in a column has no such
+ambiguity. The per-frame claim itself (64 flat rectangles, no caps, no reflections) is asserted on
+every frame in `test/visualizer.test.ts`; the pixel tool asserts what that test cannot see — that the
+shape survives a *silence* in a real browser, after the envelope has finished moving.
+
+Controls under the re-baselined tool, each built in its own scratch worktree and served on its own
+port, with the settled frame's shape counted: v1.9.19 **pass** (668 lit px flat at +700/+900/+1200/
++1500, 0 second runs, 0 below baseline, twice), v1.9.18 (17995e4) **pass**, v1.7.4 (4bee9f9 — the
+commit the bisect blames) **pass**, v1.2 (f9fd6e5) **pass** at its documented 1277, v1.1 **fail**.
+So the sequence of verdicts is now the same as the design's, with v1.7.4 no longer a false alarm.
+
+Not covered here: this reads the **streaming** spectrum (the mock's WAV through the web engine). The
+local-file path (`playlistPath`/`localFile`, the v1.9.16/17 ground) is a different engine and was not
+exercised by this check.

@@ -724,28 +724,76 @@
    *
    * The owner's report is about a picture ("some after image or some separation of the colors at
    * the top of each bar"), so part of the evidence has to be pixels rather than intentions: this
-   * is the number of lit pixels and a checksum over every byte of the canvas. The driver owns
+   * this is the number of lit pixels and a checksum over every byte of the canvas. The driver owns
    * the frames and the silence (see tools/spectrum-proof.mjs) — this only reads.
+   *
+   * `withShape` adds two more facts about the same reading, because the picture also has a *shape*:
+   *
+   *   - `belowBaseline` — lit pixels under the bars' own baseline (`BASELINE`, 0.98 of the canvas
+   *     height, in `src/player/visualizer.ts`). Nothing is drawn there: a lit pixel below it is a
+   *     second copy of a bar (v1.1's reflection) rather than a bar.
+   *   - `columnsWithMoreThanOneRun` and `worstRunsInAColumn` — per canvas column, how many
+   *     *separated* vertical runs of lit pixels it holds. One flat rectangle per band is one run; a
+   *     cap floating above the bar, or a reflection under it, is another. Runs are used rather than
+   *     distinct colours because a bar's bottom edge lands on the baseline line, which is fractional
+   *     on most canvas heights: one antialiased row then blends the bar colour with the backdrop at
+   *     two different alphas, which is two colours in one column on a perfectly ordinary frame.
+   *     Separated runs have no such ambiguity — a gap in the column is a gap.
+   *
+   * They cost a pass over the canvas, so they are opt-in: the frame-by-frame readings
+   * `tools/layout-audit.mjs` takes call this with no argument and pay what they always paid.
    */
-  function spectrumSnapshot() {
+  function spectrumSnapshot(withShape) {
     var canvas = document.querySelector('.now-canvas');
     if (!canvas || !canvas.width) return null;
     var c = canvas.getContext('2d');
     if (!c) return null;
     var data = c.getImageData(0, 0, canvas.width, canvas.height).data;
+    var width = canvas.width;
+    var height = canvas.height;
     var lit = 0;
     var sum = 0;
+    var belowBaseline = 0;
+    /*
+     * The first row that no bar may paint. A bar's bottom edge *is* the baseline line, so the row
+     * holding it is legitimate; the line is fractional on most canvas heights (0.98 × 178 = 174.44),
+     * and then the bar also paints the first row *under* the line with partial coverage — so the
+     * first row that has to be clear is one past the line's own row, not one past its floor.
+     */
+    var firstClearRow = Math.floor(height * 0.98) + 2;
     for (var i = 0; i < data.length; i += 4) {
       // The bars are the palette colour over a near-black backdrop: anything clearly lit is a
       // bar (or an artefact pretending to be one).
-      if (data[i + 3] > 8 && data[i] + data[i + 1] + data[i + 2] > 240) lit += 1;
+      if (data[i + 3] > 8 && data[i] + data[i + 1] + data[i + 2] > 240) {
+        lit += 1;
+        if (withShape && Math.floor(i / 4 / width) + 1 >= firstClearRow) belowBaseline += 1;
+      }
       sum = (sum * 31 + data[i] * 7 + data[i + 1] * 3 + data[i + 2] * 11 + data[i + 3]) % 2147483647;
+    }
+    var multiRun = 0;
+    var worstRuns = 0;
+    if (withShape) {
+      for (var x = 0; x < width; x += 1) {
+        var runs = 0;
+        var inRun = false;
+        for (var y = 0; y < height; y += 1) {
+          var at = (y * width + x) * 4;
+          var isLit = data[at + 3] > 8 && data[at] + data[at + 1] + data[at + 2] > 240;
+          if (isLit && !inRun) runs += 1;
+          inRun = isLit;
+        }
+        if (runs > worstRuns) worstRuns = runs;
+        if (runs > 1) multiRun += 1;
+      }
     }
     return {
       lit: lit,
       checksum: sum,
       canvas: canvas.width + 'x' + canvas.height,
       bytes: data.length,
+      belowBaseline: withShape ? belowBaseline : undefined,
+      columnsWithMoreThanOneRun: withShape ? multiRun : undefined,
+      worstRunsInAColumn: withShape ? worstRuns : undefined,
       /** A PNG of this frame: identical pixels encode to an identical string, so two of these
        * compare byte for byte without shipping 500 kB of raw pixels through the driver. */
       png: canvas.toDataURL('image/png'),
