@@ -3999,8 +3999,11 @@ release's own invariants: `package.json` + the lockfile root (`2.0.0-beta.2` →
 (`CURRENT_PROJECT_VERSION 51 → 52`, `MARKETING_VERSION` — both places), `src/ui/changelog.ts` + `CHANGELOG.md` (the
 same two items, same order), `test/changelog.test.ts` (the release check's version list) and `DECISIONS.md` (the
 beta-3 design entry marked *released as v2.0.0-beta.3*, plus the two invariants the release rests on — one source of
-truth for the current row, and the second tap keyed on visibility rather than on centring). **`src/` is
-byte-for-byte `961ed82`**: not one line of player code is touched by the cut that ships it.
+truth for the current row, and the second tap keyed on visibility rather than on centring). **No player code is
+touched by the cut that ships it**: `git diff --stat 961ed82 b3ccd9c -- src` is one file — `src/ui/changelog.ts`,
++8 lines, this release's "What's new" entry — and `src/player/`, `src/ui/app.ts`, `src/ui/player-bar.ts`,
+`src/ui/shell.ts`, `src/styles.css` and `tools/` are byte-for-byte `961ed82` (`git diff --stat` empty for all of
+them). The only other source-side change is the release check's version list in `test/changelog.test.ts` (+2 −2).
 
 **The version reads `2.0.0-beta.3` in the package and `2.0-beta.3` in the list he reads**, the same split `v2.0-beta`
 and `v2.0.0-beta.2` used. Two deliberate divergences, both recorded rather than silent:
