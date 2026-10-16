@@ -280,3 +280,9 @@ Plain language, user-visible changes only. The app shows this same list under
 - Moving through songs quickly no longer leaves the spectrum at zero on the song you land on. Skipping fast could leave the bars flat for the rest of the track while it played: the app was still reading the song you had just left, and it now reads the one that is playing.
 - The songs in "On this phone" have their names and their lengths. Downloads made before the last two versions were stored without a title or a duration, so the list showed blank rows with `--:--` beside every one of them — while every one of them played, with its art and its lyrics. They are named now, from the download's own record on the phone and from your server when it is reachable, and the names stay.
 - A downloaded song that had been stored without its length now shows the right total while it plays, instead of `0:00`.
+
+## 1.9.23 — 2026-10-16
+
+- Both problems you reported on the phone are fixed in this build. Skipping quickly through songs no longer leaves the spectrum flat on the song you land on: the app was still reading the song you had just left, and it now reads the one that is playing.
+- The songs in "On this phone" have their names and their lengths, and they fill themselves in while you are looking at the list. Downloads made before the last two versions were stored without a title or a duration, so it was a list of blank rows with `--:--` beside every one of them — and they stayed that way until you left the screen and came back. The names come from the download's own record on the phone, and from your server when it is reachable.
+- A song that had been stored without its length now shows the right total while it plays, instead of `0:00` — including the one that was already playing when its name came back.

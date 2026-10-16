@@ -220,6 +220,18 @@ export const LYRICS_MISS_TTL_MS = 5 * 60 * 1000;
 /** §5: leave this much headroom over the estimate before a download is allowed to start. */
 const FREE_SPACE_MARGIN = 250 * 1024 * 1024;
 const MAX_CONCURRENT = 3;
+/**
+ * How many rows **one** `repairMetadata` pass may ask the server about (v1.9.23).
+ *
+ * The sweep is one `getSong` per still-blank row, sequentially, and it exists for the rows the
+ * download's own record cannot name — the case where a build's manifest is gone. The owner has 497
+ * rows on the phone: uncapped, one visit to **On this phone** with his manifests gone is 497 round
+ * trips off a screen he is only looking at, and the first pass after an upgrade is precisely when
+ * they are all blank. Twenty is about two seconds on a tailnet and the rows past it are named by the
+ * next pass (each pass asks the first twenty it has not asked yet, so the work still finishes), while
+ * the manifest pass — the ordinary case — costs no round trips at all.
+ */
+export const SERVER_ASKS_PER_PASS = 20;
 
 /**
  * §4 — the size a playlist will take, summed over its entries, plus the lyric bodies and the covers.
@@ -556,12 +568,18 @@ export class OfflineStore {
    *      pass needs no connection at all, and it is the one that covers everything a playlist
    *      download brought in.
    *   2. **the server**, one `getSong` per row that is still blank and one ask per row per session
-   *      (`askedServer`), for the tracks that came in through a build whose record is gone.
+   *      (`askedServer`), for the tracks that came in through a build whose record is gone. The
+   *      sweep is **capped** (`SERVER_ASKS_PER_PASS`) and sequential, and its failure path is
+   *      honest about both halves: a lookup that *failed* is forgotten again so the next pass in
+   *      this session retries it, a `null` answer (the server does not know the id) is not asked
+   *      twice, and the rows past the cap wait for the next pass rather than for a burst of
+   *      hundreds of round trips off one screen.
    *
    * It is never on the first paint's path: the view draws from `downloadedSongs()` synchronously and
-   * calls this afterwards, and the answer is what re-draws it (through `notify`). Making the rows
-   * wait for a round trip before they can be printed is the 1.9.19 defect this view was built to
-   * avoid. Returns how many rows were filled.
+   * calls this afterwards, and the answer is what re-draws it (through `notify`, which the store's
+   * own subscribers turn into the row's text — see `songFor`). Making the rows wait for a round trip
+   * before they can be printed is the 1.9.19 defect this view was built to avoid. Returns how many
+   * rows were filled.
    */
   async repairMetadata(): Promise<number> {
     if (this.repairing) return 0;
@@ -572,15 +590,23 @@ export class OfflineStore {
         this.saveMirror();
         this.notify();
       }
+      let asks = 0;
       for (const songId of this.blankRows()) {
         if (this.askedServer.has(songId)) continue;
+        if (asks >= SERVER_ASKS_PER_PASS) break;
+        asks += 1;
         this.askedServer.add(songId);
         let song: Song | null = null;
         try {
           song = await this.songLookup(songId);
         } catch {
-          // No connection, no such song, a server that does not answer: the row stays as it is, and
-          // the next pass (or the next launch, from the manifest) has another go.
+          /*
+           * No connection, a server that does not answer: the row stays as it is, and **this id is
+           * forgotten again** so a later pass in this session has another go. v1.9.22 wrote it into
+           * `askedServer` *before* the await, so the comment here ("the next pass … has another go")
+           * was false in-session — the row was asked again on the next launch at best.
+           */
+          this.askedServer.delete(songId);
           continue;
         }
         const row = this.rows.get(songId);
@@ -668,16 +694,7 @@ export class OfflineStore {
     const out: Song[] = [];
     for (const [songId, row] of this.rows) {
       if (row.state !== 'complete') continue;
-      out.push({
-        id: songId,
-        title: row.title,
-        artist: row.artist === '' ? undefined : row.artist,
-        album: row.album === '' ? undefined : row.album,
-        duration: row.durationSec === 0 ? undefined : row.durationSec,
-        coverArt: row.coverArt,
-        suffix: row.suffix,
-        size: row.bytes,
-      });
+      out.push(this.rowAsSong(songId, row));
     }
     out.sort((a, b) => {
       const byArtist = (a.artist ?? '').localeCompare(b.artist ?? '');
@@ -688,6 +705,42 @@ export class OfflineStore {
       return byTitle !== 0 ? byTitle : a.id.localeCompare(b.id);
     });
     return out;
+  }
+
+  /**
+   * The store's answer for **one** song id, in the shape a view and the queue draw one from
+   * (v1.9.23). Synchronous, memory only; `null` for an id this phone does not hold a complete file
+   * for.
+   *
+   * It exists because the repair reaches the screen through two callers that each hold a different
+   * half of the state — the row that is already drawn, and the queue's own copy of the song — and
+   * neither may build a `Song` out of a row itself. The row → `Song` mapping is the store's
+   * (`downloadedSongs` is the list of them), and a second copy of it is exactly how two screens end
+   * up disagreeing about one track, which is the v1.9.21 lesson.
+   */
+  songFor(songId: string): Song | null {
+    const row = this.rows.get(songId);
+    if (row === undefined || row.state !== 'complete') return null;
+    return this.rowAsSong(songId, row);
+  }
+
+  /**
+   * One row as the `Song` every caller reads it as. `downloadedSongs()` is this, for all of them;
+   * `songFor` is this, for one. The three optional fields stay absent rather than becoming `''`/`0`,
+   * so a row with nothing to say draws the app's placeholders (`--:--`, an empty sub-line) and never
+   * a stand-in that reads like data.
+   */
+  private rowAsSong(songId: string, row: IndexRow): Song {
+    return {
+      id: songId,
+      title: row.title,
+      artist: row.artist === '' ? undefined : row.artist,
+      album: row.album === '' ? undefined : row.album,
+      duration: row.durationSec === 0 ? undefined : row.durationSec,
+      coverArt: row.coverArt,
+      suffix: row.suffix,
+      size: row.bytes,
+    };
   }
 
   /**

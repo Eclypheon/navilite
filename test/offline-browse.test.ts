@@ -20,7 +20,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { OfflineStore } from '../src/state/offline.ts';
+import { OfflineStore, SERVER_ASKS_PER_PASS } from '../src/state/offline.ts';
 import type { DownloadEvent, DownloadJob, DownloadsBridge, IndexRow } from '../src/state/offline.ts';
 import { loadMirror } from '../src/storage/offline.ts';
 import type { Song } from '../src/api/types.ts';
@@ -580,6 +580,104 @@ test('a row nobody can name is asked for once, and leaves the count, the bytes a
   // …and a second pass in the same session does not ask again.
   assert.equal(await store.repairMetadata(), 0, 'nothing more to fill');
   assert.deepEqual(asked, ['a', 'b'], 'and nobody is asked twice for the same row in one session');
+});
+
+/**
+ * The two failure paths, which are not the same fact and must not be treated as one (v1.9.23).
+ *
+ * v1.9.22 marked the id as asked **before** the await, so the comment beside it ("the next pass … has
+ * another go") was false in-session: a lookup that failed for want of a connection was retried on the
+ * next *launch* at best, and the owner's first pass after the upgrade is exactly the pass that can
+ * fail. A lookup that *failed* is now forgotten again and asked on the next pass; a `null` answer —
+ * the server has told us it does not know this id — is not, because that answer will not change and a
+ * retry would be a round trip per pass for it.
+ */
+test('a lookup that failed is asked again on the next pass, and one the server does not know is not', async () => {
+  const mirror = memoryStore();
+  mirror.setItem(
+    'navilite.offline',
+    JSON.stringify({
+      v: 1,
+      hydratedAt: Date.now(),
+      rows: {
+        a: { path: 'file:///a.mp3', bytes: 1000, state: 'complete' },
+        b: { path: 'file:///b.mp3', bytes: 2000, state: 'complete' },
+        c: { path: 'file:///c.mp3', bytes: 3000, state: 'complete' },
+      },
+    }),
+  );
+  const asked: string[] = [];
+  let offline = true;
+  const store = new OfflineStore(null, {
+    store: mirror,
+    songLookup: async (songId) => {
+      asked.push(songId);
+      // The connection is down for the first row of the pass, and `c` is not in the library at all.
+      if (offline) {
+        offline = false;
+        throw new Error('could not reach the library');
+      }
+      return songId === 'c' ? null : { ...song(songId), title: `Named ${songId}` };
+    },
+  });
+
+  assert.equal(await store.repairMetadata(), 1, 'the one row the server could answer is named');
+  assert.deepEqual(asked, ['a', 'b', 'c'], 'all three were tried, in row order');
+  assert.equal(
+    store.downloadedSongs().find((entry) => entry.id === 'a')?.title,
+    '',
+    'the row the failure landed on keeps what it had — nothing is invented for it',
+  );
+
+  // The next pass: `a` is asked again (it failed), `c` is not (the server said it does not know it).
+  assert.equal(await store.repairMetadata(), 1, 'and the row that failed is repaired by the next pass');
+  assert.deepEqual(asked, ['a', 'b', 'c', 'a'], 'so the failure is retried in this session, and the `null` is not');
+  assert.equal(store.downloadedSongs().find((entry) => entry.id === 'a')?.title, 'Named a', 'the row that failed is named now');
+  assert.equal(await store.repairMetadata(), 0, 'and then there is nothing left to ask');
+  assert.deepEqual(asked, ['a', 'b', 'c', 'a'], 'nobody is asked a third time');
+});
+
+/**
+ * …and the sweep is **bounded** (v1.9.23). One visit to **On this phone** with the manifests gone was
+ * one `getSong` per still-blank row — 497 of them on this phone, sequentially, off a screen the owner
+ * is only looking at. The cap is per pass, the order is the rows', and the work still finishes: each
+ * pass asks the first rows it has not asked yet, so the pass after this one names the next batch.
+ */
+test('the server sweep is capped, and the rows past the cap are named by the next pass', async () => {
+  const ids = Array.from({ length: SERVER_ASKS_PER_PASS + 3 }, (_unused, index) => `s${String(index).padStart(2, '0')}`);
+  const mirror = memoryStore();
+  mirror.setItem(
+    'navilite.offline',
+    JSON.stringify({
+      v: 1,
+      hydratedAt: Date.now(),
+      rows: Object.fromEntries(ids.map((id) => [id, { path: `file:///${id}.mp3`, bytes: 1000, state: 'complete' }])),
+    }),
+  );
+  const asked: string[] = [];
+  const store = new OfflineStore(null, {
+    store: mirror,
+    songLookup: async (songId) => {
+      asked.push(songId);
+      return { ...song(songId), title: `Named ${songId}` };
+    },
+  });
+
+  assert.equal(await store.repairMetadata(), SERVER_ASKS_PER_PASS, 'one pass names at most the cap');
+  assert.deepEqual(
+    asked,
+    ids.slice(0, SERVER_ASKS_PER_PASS),
+    `${ids.length} blank rows off one screen is ${SERVER_ASKS_PER_PASS} round trips, not ${ids.length}`,
+  );
+  assert.equal(await store.repairMetadata(), 3, 'the next pass finishes the list');
+  assert.deepEqual(asked.slice(SERVER_ASKS_PER_PASS), ids.slice(SERVER_ASKS_PER_PASS), 'the rows past the cap, in order');
+  assert.equal(await store.repairMetadata(), 0, 'and then there is nothing left to ask');
+  assert.equal(asked.length, ids.length, 'so every row was asked exactly once, in the end');
+  assert.equal(
+    store.downloadedSongs().filter((entry) => entry.title !== '').length,
+    ids.length,
+    'and every row is named — a cap that lost rows would be a worse defect than the burst',
+  );
 });
 
 /**

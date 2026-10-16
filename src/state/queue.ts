@@ -19,6 +19,7 @@ import type { AudioEngine, PublishedTrack, TrackRequest } from '../player/engine
 import { updateNowPlaying, updatePlaybackState, updatePositionState, mediaSessionAvailable } from '../player/mediasession.ts';
 import { clearSnapshot, saveSnapshot } from '../storage/session.ts';
 import { ByteRate } from './bitrate.ts';
+import { fillSong } from './song-metadata.ts';
 import type { Library } from './library.ts';
 
 const SAVE_QUEUE_DEBOUNCE_MS = 5000;
@@ -527,6 +528,36 @@ export class PlaybackQueue {
 
   queueSnapshot(): QueueItem[] {
     return this.items;
+  }
+
+  /**
+   * v1.9.23 — **the queue's own copies of its songs, filled from the store's repair.**
+   *
+   * A `QueueItem` holds the `Song` object the view handed it at the tap (`select(items, …)`, and
+   * `currentSong` *is* that object), so a queue built from a list drawn before the metadata repair
+   * holds a blank title and no duration for the whole track: the player bar prints the title it
+   * holds (`src/ui/app.ts`, `updatePlayerBar`) and the total it draws is
+   * `status.durationMs || (song.duration ?? 0) * 1000` — 0, which is the `0:00` beside the blank
+   * title in the owner's screenshot, from the same rows.
+   *
+   * `lookup` answers with the best copy of one song the app has, by id, or null; each item's
+   * **empty** fields are filled from it and nothing else ({@link fillSong}). A song that came from
+   * the server is complete, so this is a no-op for it, and a track nobody can name yet keeps the
+   * blank it has instead of a stand-in. Returns how many songs were filled.
+   *
+   * The redraw is driven from here rather than left to the next status event: while a track plays
+   * the engine emits those a dozen times a second, but a *paused* queue emits none, and the name
+   * arriving with no repaint at all is the defect this exists to close.
+   */
+  applyMetadata(lookup: (songId: string) => Song | null): number {
+    let filled = 0;
+    for (const item of this.items) {
+      const known = lookup(item.song.id);
+      if (known === null) continue;
+      if (fillSong(item.song, known) > 0) filled += 1;
+    }
+    if (filled > 0) this.onChanged?.();
+    return filled;
   }
 
   private applyShuffle(on: boolean): void {

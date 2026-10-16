@@ -61,6 +61,17 @@
  * server answers") — and tapping that row opens `#/downloads`. The grown-playlist arithmetic is
  * asserted where it can be exact (in `test/offline-browse.test.ts`, against the row's own formatters)
  * rather than in a browser reading.
+ *
+ * **v1.9.23 adds the two readings the metadata repair was missing.** v1.9.22 filled the *store* and
+ * nothing that draws from it, so the owner opened **On this phone** and read his own screenshot back —
+ * blank titles, `--:--` — until he left the screen and returned. The first reading is that screen with
+ * a store a 1.9.19 build wrote: the rows' own titles, sub-lines and lengths, taken on the route it
+ * painted, once as it drew and once when the store had spoken, **with no navigation between them**;
+ * a row nobody can name is read beside them, still drawing `--:--`. The second is the player bar,
+ * whose title is the `Song` the queue holds and whose total is built from the same object: a row the
+ * *server* names, the mock holding every answer (`/__slow`) so the tap lands while the row is still
+ * blank, and then the list **left** — so the only thing that can name the bar is the queue's own copy
+ * being filled. Both are driven with the app's real code path; no test hooks, no stubs.
  */
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
@@ -113,6 +124,13 @@ const RACE_SETTLE_MS = 700;
 /** The mock's own defaults, as `seed()` already assumes when it writes the app's settings. */
 const API_USER = 'navidrome';
 const API_PASSWORD = 'navidrome';
+
+/** How long the mock holds every API answer during the bar case (v1.9.23). */
+const LEGACY_HOLD_MS = 2000;
+/** The manifest's own length in the legacy store below, in seconds — `formatDuration` reads it as `3:34`. */
+const LEGACY_DURATION_SEC = 214;
+/** …and the same length as the row prints it (`formatDuration(214)`). */
+const LEGACY_TIME = '3:34';
 
 /** The rows, with the real shape the mirror writes (`file://` path + measured bytes + metadata). */
 function mirrorJson(appUrl, online) {
@@ -209,6 +227,74 @@ const MIRROR = {
   },
 };
 
+/**
+ * The mirror a **1.9.19 build** left behind (v1.9.23): `path`, `bytes` and `state` on every row and no
+ * metadata key anywhere (`src/storage/offline.ts`'s fields arrived in v1.9.20, and `parseMirror` reads
+ * a row without them), beside the manifest the download wrote — which is where the names and the
+ * lengths live, on the phone, with no connection needed.
+ *
+ * `orphan-1` is the residue case: complete on disk, named by no manifest, and the API is refused in
+ * this block, so nothing can name it. It is what the honesty rule is read against — a row that is
+ * still metadata-less must draw what it drew (an empty title, `--:--`) and never its own id or a 0.
+ */
+function legacyMirrorJson(appUrl) {
+  const rows = {};
+  for (const [index, _title] of TITLES.entries()) {
+    rows[`song-${index}`] = {
+      path: `${appUrl}${ART_DIR}song-${index}.opus`,
+      bytes: 8123456,
+      state: 'complete',
+      lyrics: { state: 'none', bytes: 0, fetchedAt: Date.now() - index },
+      art: { state: 'present', file: `${COVER_ID}.art`, bytes: 41230, fetchedAt: Date.now() - index },
+    };
+  }
+  rows['orphan-1'] = { path: `${appUrl}${ART_DIR}orphan-1.opus`, bytes: 123456, state: 'complete' };
+  return JSON.stringify({
+    v: 1,
+    hydratedAt: Date.now(),
+    rows,
+    playlists: {
+      [PLAYLIST_ID]: {
+        name: PLAYLIST_NAME,
+        requestedAt: Date.now(),
+        state: 'complete',
+        songs: TITLES.map((title, index) => ({
+          id: `song-${index}`,
+          title,
+          artist: 'ヨルシカ',
+          album: '盗作',
+          duration: LEGACY_DURATION_SEC,
+          suffix: 'opus',
+          size: 8123456,
+          coverArt: COVER_ID,
+          albumId: 'album-1-1',
+        })),
+      },
+    },
+  });
+}
+
+/**
+ * One complete, **unnamed** row for a song the *server* knows, and no manifest at all (v1.9.23).
+ *
+ * This is the case where only the server's pass of the repair can name the row, which is what makes
+ * the player-bar reading below a reading about the queue: the row fills over a round trip, so the tap
+ * can land while it is still blank, and the answer arrives after the list has been left.
+ */
+function serverNamedMirrorJson(appUrl, songId) {
+  return JSON.stringify({
+    v: 1,
+    hydratedAt: Date.now(),
+    rows: { [songId]: { path: `${appUrl}${ART_DIR}${songId}.opus`, bytes: 4096, state: 'complete' } },
+  });
+}
+
+/** Seconds as the app's own `formatTime` writes them (`src/ui/dom.ts`): `m:ss` below the hour. */
+function mmss(seconds) {
+  const total = Math.floor(Number(seconds) || 0);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
 /** What the page is actually showing, read the way a person reads it. */
 const READING = `(() => {
   const rows = [...document.querySelectorAll('.row.song .row-title')].map((node) => node.textContent);
@@ -234,9 +320,29 @@ const READING = `(() => {
     })),
     songMarks: [...document.querySelectorAll('.row.song')].map((row) => ({
       title: row.querySelector('.row-title') ? row.querySelector('.row-title').textContent : null,
+      // v1.9.23 — the row's other two pieces of text, which the metadata repair has to reach.
+      sub: row.querySelector('.row-sub') ? row.querySelector('.row-sub').textContent : null,
+      time: row.querySelector('.row-time') ? row.querySelector('.row-time').textContent : null,
       mark: badgeOf(row),
       label: row.getAttribute('aria-label'),
     })),
+    /*
+     * The player bar (v1.9.23): the title it prints is the Song the queue holds, and its total is
+     * "status.durationMs || (song.duration ?? 0) * 1000" — so a queue holding a blank song is a blank
+     * title with 0:00 beside it, which is the other half of the owner's screenshot. Read as the
+     * screen reads: the last .time in the progress row is the total, the first is the position.
+     */
+    bar: (() => {
+      const footer = document.querySelector('.playerbar');
+      const times = footer ? [...footer.querySelectorAll('.pb-progress .time')] : [];
+      return {
+        hidden: footer ? footer.classList.contains('hidden') : true,
+        title: footer && footer.querySelector('.pb-title') ? footer.querySelector('.pb-title').textContent : null,
+        sub: footer && footer.querySelector('.pb-sub') ? footer.querySelector('.pb-sub').textContent : null,
+        position: times.length > 0 ? times[0].textContent : null,
+        total: times.length > 1 ? times[times.length - 1].textContent : null,
+      };
+    })(),
     artSrcs: [...document.querySelectorAll('img.thumb, img.now-art, img.pb-art, img.detail-cover, img.card-cover')]
       .map((node) => node.getAttribute('src')),
     primary: getComputedStyle(document.documentElement).getPropertyValue('--accent-primary').trim(),
@@ -309,12 +415,27 @@ async function coldRoute(cdp, app, route) {
   await navigate(cdp, `${app}/?boot=${bootCounter}#${route}`);
 }
 
-const seed = (appUrl, apiUrl, online) => `(() => {
+/**
+ * The settings, the password and the offline mirror, written in one page (`seed` below is this, with
+ * the ordinary mirror). v1.9.23 split it out because two blocks seed a mirror the app never writes:
+ * one a 1.9.19 build left behind, and one a single unnamed row for a song the server knows.
+ *
+ * `mirror` is the mirror **as JSON text**, the way `storage/offline.ts` writes it and the way
+ * `mirrorJson` above returns it (`JSON.stringify` of a string is what makes it a string *in the page*:
+ * a bare object literal would reach `setItem` as `[object Object]`, and the store would read no rows
+ * at all — measured, this harness, v1.9.23).
+ */
+const seedScript = (apiUrl, mirror) => `(() => {
   localStorage.setItem('navilite.settings', JSON.stringify({ serverUrl: ${JSON.stringify(apiUrl)}, username: 'navidrome', playback: 'web' }));
   localStorage.setItem('navilite.subsonic-password', 'navidrome');
-  localStorage.setItem('navilite.offline', ${JSON.stringify(mirrorJson(appUrl, online))});
-  return true;
+  localStorage.setItem('navilite.offline', ${JSON.stringify(mirror)});
+  // Read back what was written: a block that seeds a mirror the app never writes has to be able to
+  // say whether the page it is standing on actually holds it (v1.9.23).
+  const raw = localStorage.getItem('navilite.offline');
+  return { bytes: raw ? raw.length : -1, rows: raw ? Object.keys(JSON.parse(raw).rows || {}).length : -1 };
 })()`;
+
+const seed = (appUrl, apiUrl, online) => seedScript(apiUrl, mirrorJson(appUrl, online));
 
 /** A port nothing is listening on: the phone with no tailnet. */
 async function refusedPort() {
@@ -385,6 +506,23 @@ async function readCatalogue(app) {
   const artists = ((await api(app, 'getArtists')).artists?.index ?? []).flatMap((entry) => entry.artist ?? []);
   if (!albums[0] || !artists[0]) throw new Error('the library answered with no album or no artist to visit');
   return { album: albums[0], artist: artists[0] };
+}
+
+/**
+ * The first track of the first album, as the library itself reports it (v1.9.23).
+ *
+ * Read out of the library rather than hard-coded, for the reason `--online-playlist` reads a name from
+ * `/__state`: the bar reading below compares the name and the total on the bar against the library's
+ * own answer, and a fixture that stops matching it must fail the check rather than quietly assert
+ * nothing.
+ */
+async function readFirstSong(app) {
+  const albums = (await api(app, 'getAlbumList2', { type: 'alphabeticalByName', size: '1' })).albumList2?.album ?? [];
+  if (!albums[0]) throw new Error('the library answered with no album');
+  const album = await api(app, 'getAlbum', { id: albums[0].id });
+  const song = (album.album?.song ?? [])[0];
+  if (!song) throw new Error(`the library’s album ${albums[0].id} answered with no songs`);
+  return { id: song.id, title: song.title, duration: song.duration };
 }
 
 /** The mock's own state, when this origin has one (`null` for a static-only origin). */
@@ -869,6 +1007,152 @@ async function main() {
         }
         say('');
 
+        /* ------ 2c. a row a 1.9.19 build wrote, on the screen it was reported on (v1.9.23) */
+        /*
+         * The owner's screenshot, driven. A mirror a 1.9.19 build wrote — `path`, `bytes`, `state`,
+         * and no metadata key anywhere — beside the download's own manifest, which is where the names
+         * and the lengths are, on the phone. The store's half of this is v1.9.22 and is asserted in
+         * `test/offline-browse.test.ts`; what this block asserts is that the repair reaches **the
+         * screen he is looking at, without leaving it**: the rows' own titles, sub-lines and lengths,
+         * read on the route it painted — once as the route drew, once when the store had spoken — with
+         * no navigation between the two readings. Before v1.9.23 the second reading was identical to
+         * the first until he left the screen and came back, which is what his report says.
+         */
+        await navigate(cdp, app);
+        const legacySeeded = await evaluate(cdp, seedScript(deadUrl, legacyMirrorJson(app)));
+        readings.states.legacySeeded = legacySeeded;
+        say(`  (the page was seeded with a 1.9.19 store: ${JSON.stringify(legacySeeded)})`);
+        await coldRoute(cdp, app, '/downloads');
+        await waitFor(cdp, `document.querySelectorAll('.row.song').length > 0`, 'the rows a 1.9.19 build wrote');
+        const legacyStarted = Date.now();
+        const legacyAsDrawn = await evaluate(cdp, READING);
+        let legacy = legacyAsDrawn;
+        const legacyDeadline = Date.now() + 5000;
+        for (;;) {
+          if (legacy.songMarks.filter((row) => row.time === LEGACY_TIME).length === TITLES.length) break;
+          if (Date.now() > legacyDeadline) break;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          legacy = await evaluate(cdp, READING);
+        }
+        readings.states.downloadsLegacyAsDrawn = legacyAsDrawn;
+        readings.states.downloadsLegacyRepaired = { ...legacy, ms: Date.now() - legacyStarted };
+        const legacyNamed = legacy.songMarks.filter((row) => row.title !== '');
+        const legacyUnnamed = legacy.songMarks.filter((row) => row.title === '');
+        say('A store a 1.9.19 build wrote, on “On this phone”, with no server:');
+        say(`    as the route drew it: ${JSON.stringify(legacyAsDrawn.songMarks.map((row) => [row.title, row.time]))}`);
+        say(
+          `    and once the store had spoken, on the same route (${readings.states.downloadsLegacyRepaired.ms} ms): ` +
+            JSON.stringify(legacyNamed.map((row) => [row.title, row.sub, row.time])),
+        );
+        check(
+          'a row a 1.9.19 build wrote is named and timed on the screen it was reported on, without leaving it (v1.9.23)',
+          legacy.route === '#/downloads' &&
+            JSON.stringify(legacy.songMarks.map((row) => row.title).sort()) === JSON.stringify([...TITLES, ''].sort()) &&
+            legacyNamed.length === TITLES.length &&
+            legacyNamed.every((row) => row.time === LEGACY_TIME && /ヨルシカ/.test(String(row.sub))),
+          `route ${legacy.route} · ${legacy.songMarks.length} rows · ${JSON.stringify(
+            legacy.songMarks.map((row) => [row.title, row.time]),
+          )}`,
+        );
+        check(
+          'a row nobody can name keeps drawing what it drew — no song id in the title slot, no invented length',
+          legacyUnnamed.length === 1 &&
+            legacyUnnamed[0].time === '--:--' &&
+            !String(legacyUnnamed[0].label).includes('orphan') &&
+            legacyUnnamed[0].title === '',
+          `${legacyUnnamed.length} unnamed row(s): ${JSON.stringify(legacyUnnamed.map((row) => [row.title, row.time, row.label]))}`,
+        );
+        say('');
+
+        /* -------------- 2d. …and the track he is playing is named with it (v1.9.23) */
+        /*
+         * The other half of his screenshot: the player bar beside that list. The bar's title is the
+         * `Song` the queue holds and its total is built out of the same object, so a row that was blank
+         * when he tapped it was a blank bar with `0:00` for the length of the track.
+         *
+         * Driven so that only the queue's own copy can be what fills it: the row is one the **server**
+         * names (no manifest names it, so the phone's pass has nothing to say), the mock holds every
+         * API answer for `LEGACY_HOLD_MS`, so the tap lands while the row is still blank and sets off
+         * on a genuinely nameless song, and the list is **left** before the answer arrives — there is
+         * no row on screen by then for a repaint to reach.
+         */
+        const firstSong = await readFirstSong(app).catch((error) => {
+          readings.states.barCaseSong = String(error);
+          return null;
+        });
+        const heldForBar = await holdAnswers(app, LEGACY_HOLD_MS);
+        const barDriverReady = check(
+          'the bar case can be driven: the library names a track and the mock can hold its answer (/__slow)',
+          firstSong !== null && heldForBar === LEGACY_HOLD_MS,
+          firstSong === null
+            ? `the library named no track (${readings.states.barCaseSong ?? 'no album'})`
+            : heldForBar !== LEGACY_HOLD_MS
+              ? `no /__slow at ${app}: every answer lands at once, so the tap cannot be made to land on a blank row`
+              : `${firstSong.id} “${firstSong.title}” (${firstSong.duration} s), every API answer held for ${heldForBar} ms`,
+        );
+
+        if (!barDriverReady) {
+          say('The bar reading was not driven.');
+          await holdAnswers(app, 0);
+        } else {
+          readings.states.barCaseSong = firstSong;
+          await navigate(cdp, app);
+          await evaluate(cdp, seedScript(app, serverNamedMirrorJson(app, firstSong.id)));
+          /*
+           * A **real navigation**, not a hash change: the app reads its settings once, at boot, and
+           * builds the client they name — so the document that asks the server for this row's name has
+           * to be one that was opened *after* the settings were seeded. (A same-document route change
+           * keeps the client the last block pointed at a refused port, and then nothing can name the
+           * row at all: measured, this harness, v1.9.23.)
+           */
+          await coldRoute(cdp, app, '/downloads');
+          await waitFor(cdp, `document.querySelectorAll('.row.song').length > 0`, 'the one unnamed row to be drawn');
+          /*
+           * The tap he makes, and where it lands: the whole row is the tap target, and the row selects
+           * its song synchronously before anything reaches the network (`queue.select`), so the bar is
+           * already carrying this song — with nothing on it — before the ask for its name is answered.
+           */
+          await evaluate(cdp, `(() => { const row = document.querySelector('.row.song'); if (row) row.click(); return Boolean(row); })()`);
+          // …and he moves on, which is what takes the row repaint off the table: the list is gone.
+          await evaluate(cdp, `location.hash = '#/artists'`);
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          const barAsTapped = (await evaluate(cdp, READING)).bar;
+          let bar = barAsTapped;
+          const barDeadline = Date.now() + 8000;
+          for (;;) {
+            if (bar.title !== '') break;
+            if (Date.now() > barDeadline) break;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            bar = (await evaluate(cdp, READING)).bar;
+          }
+          readings.states.barAsTapped = barAsTapped;
+          readings.states.barWhenNamed = bar;
+          // What the store itself ended up holding, so a failure can say which half did not happen.
+          readings.states.barCaseStore = await evaluate(
+            cdp,
+            `(() => {
+              const raw = localStorage.getItem('navilite.offline');
+              const row = raw ? (JSON.parse(raw).rows || {})[${JSON.stringify(firstSong.id)}] : null;
+              return row ? { title: row.title ?? null, durationSec: row.durationSec ?? null } : null;
+            })()`,
+          );
+          say(`The player bar, for a track that was already playing while its row was still blank (${firstSong.id}):`);
+          say(`    as the tap landed: title ${JSON.stringify(barAsTapped.title)}, total ${barAsTapped.total}`);
+          say(`    once the store could name it, with the list replaced by the Library: title ${JSON.stringify(bar.title)}, total ${bar.total}`);
+          check(
+            'the bar of a track that was already playing carries its name, with the list it was tapped from gone (v1.9.23)',
+            barAsTapped.title === '' && bar.title === firstSong.title,
+            `${JSON.stringify(barAsTapped.title)} → ${JSON.stringify(bar.title)} (the library calls it ${JSON.stringify(firstSong.title)})`,
+          );
+          check(
+            'and its real total, instead of 0:00',
+            barAsTapped.total === '0:00' && bar.total === mmss(firstSong.duration),
+            `${barAsTapped.total} → ${bar.total} (${firstSong.duration} s)`,
+          );
+          await holdAnswers(app, 0);
+        }
+        say('');
+
         /* ------------- 3. the round trip is never waited on (accepts, never answers) */
         await evaluate(cdp, seed(app, `${hole.url}`));
         const hungStarted = Date.now();
@@ -1138,7 +1422,7 @@ async function main() {
   say('');
   say(
     failures.length === 0
-      ? 'RESULT: a downloaded playlist is browsable with no connection, one row per playlist, a mark on what is on this phone, the Library keeps its own door into the downloaded music with no server, nothing prints a URL at him, and a view left mid-answer does not paint over the screen he moved to.'
+      ? 'RESULT: a downloaded playlist is browsable with no connection, one row per playlist, a mark on what is on this phone, the Library keeps its own door into the downloaded music with no server, nothing prints a URL at him, a view left mid-answer does not paint over the screen he moved to, and a store a 1.9.19 build wrote is named on the list he is looking at and on the bar of the track he is playing.'
       : `RESULT: ${failures.length} offline check(s) failed.`,
   );
   for (const failure of failures) say(`  - ${failure}`);

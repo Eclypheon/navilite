@@ -23,6 +23,7 @@ import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
 import { OfflineStore, estimateBytes, formatBytes, type DownloadedPlaylist, type PlaylistBadge, type PlaylistDownloadState, type SizeEstimate } from '../state/offline.ts';
+import { fillSong } from '../state/song-metadata.ts';
 import { createDownloadsBridge, localFileSrc } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
@@ -1597,8 +1598,24 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
    * built; this one listener walks them, and the list is emptied per render because the nodes it
    * names do not outlive it.
    */
-  clearDownloadMarks();
-  subscribeOffline(ctx.offline, repaintDownloadMarks);
+  clearStoreRepaints();
+  subscribeOffline(ctx.offline, () => {
+    repaintStoreRows();
+    /*
+     * v1.9.23 — **and the queue's own copies of its songs, wherever the owner is.**
+     *
+     * This listener is on every route, not only on the list the rows are drawn in, and that is the
+     * point: the repair runs for a while after the screen it started on is gone (its second pass is
+     * one `getSong` at a time), so the track he tapped while its row was still blank has to be named
+     * in the player bar even if he has moved on to the Library since. `applyMetadata` fills only what
+     * is missing, so a song that came from the server is untouched and a queue with nothing to learn
+     * costs one pass over its own items.
+     *
+     * It reads through `ctx.offline` at call time rather than capturing the store: the session that
+     * connects can build a new one, and a listener pointed at the old one would go quiet.
+     */
+    ctx.queue?.applyMetadata((songId) => ctx.offline?.songFor(songId) ?? null);
+  });
   const [head = 'artists', id, extra] = routeParts();
   setActiveTab(shell, head);
   const nowOpen = head === 'now';
@@ -2078,29 +2095,30 @@ function playlistRow(ctx: AppContext, input: PlaylistRowInput): HTMLElement {
     row.setAttribute('aria-label', playlistRowLabel(input, badge));
   };
   paint();
-  trackDownloadMark(paint);
+  trackStoreRepaint(paint);
   return row;
 }
 
 /*
- * The download marks on the view that is on screen, as repaint closures (v1.9.20).
+ * **What the store feeds on the view that is on screen, as repaint closures** (v1.9.20, v1.9.23).
  *
  * Registered by the row builders as they run and emptied by every render, because the nodes it names
  * are replaced with the view. One store listener walks it (`renderRoute`), which is how a download
- * that finishes while a list is on screen flips its own mark — and only its own mark.
+ * that finishes while a list is on screen flips its own mark — and how the metadata repair a 1.9.19
+ * row needs reaches the row's own text (v1.9.23) — and only its own parts.
  */
-let downloadMarks: Array<() => void> = [];
+let storeRepaints: Array<() => void> = [];
 
-function trackDownloadMark(paint: () => void): void {
-  downloadMarks.push(paint);
+function trackStoreRepaint(paint: () => void): void {
+  storeRepaints.push(paint);
 }
 
-function clearDownloadMarks(): void {
-  downloadMarks = [];
+function clearStoreRepaints(): void {
+  storeRepaints = [];
 }
 
-function repaintDownloadMarks(): void {
-  for (const paint of downloadMarks) {
+function repaintStoreRows(): void {
+  for (const paint of storeRepaints) {
     try {
       paint();
     } catch {
@@ -2320,7 +2338,7 @@ function downloadsEntryRow(ctx: AppContext): HTMLElement {
       tracks === 0 ? 'nothing downloaded yet' : `${tracks} track${tracks === 1 ? '' : 's'} · ${formatBytes(bytes)}`;
   };
   paint();
-  trackDownloadMark(paint);
+  trackStoreRepaint(paint);
   return row;
 }
 
@@ -2385,6 +2403,15 @@ async function renderDownloads(ctx: AppContext, shell: Shell): Promise<void> {
    * arrives through the store's own `onChange`. What must not happen again is the first paint
    * waiting on a `bridge.list()` round trip, which is the 1.9.19 defect this view was built to
    * avoid (§4.2), or a plausible-looking stand-in for a title nobody has asked for yet.
+   *
+   * v1.9.23 — **and that re-draw is the row's own text.** The repair was reaching the store and
+   * nothing else: the rows had captured their title and their time at build, so he opened this list
+   * and read his screenshot until he left the screen and came back. The rows `songRow` builds
+   * register their own repaint (`paintText`), which is walked by the same store listener they were
+   * always registered with. `items` above is built from **those same `Song` objects** (one item per
+   * `downloadedSongs()` entry, and the rows are drawn from that same array), so filling one fills the
+   * queue's copy with it: the bar of the track he is playing, and the track a tap a moment later
+   * carries, come out of the same fill.
    */
   void ctx.offline?.repairMetadata();
 }
@@ -3068,6 +3095,21 @@ function songRow(
    * Favourites screen still lists what is starred, and the row's own highlight is untouched.
    */
   const mark = h('span', { class: 'row-dl hidden', 'aria-hidden': 'true' });
+  /** The row's second line: the artist, and the album where this list is not already an album. */
+  const subLine = (): string => [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ');
+  /*
+   * v1.9.23 — **the row's text is three nodes, not a snapshot.**
+   *
+   * They used to be written once, at build, from the `Song` the view was handed — so the repair
+   * filled the store and the row went on drawing a blank title and `--:--` for as long as the owner
+   * stayed on the screen (`paintText` below is what re-reads it). The `Song` object is **shared with
+   * the queue** by construction (`renderDownloads` builds its items out of these very objects and
+   * hands them to `queue.select`), which is why filling it in place also puts the name in the player
+   * bar and why a tap a moment later carries it.
+   */
+  const titleNode = h('span', { class: 'row-title', text: song.title });
+  const subNode = h('span', { class: 'row-sub', text: subLine() });
+  const timeNode = h('span', { class: 'row-time', text: formatDuration(song.duration) });
   const row = bindTap(
     h(
       'button',
@@ -3077,17 +3119,14 @@ function songRow(
       },
       [
         h('span', { class: 'row-play' }, [icon(ICONS.play, 18)]),
-        h('div', { class: 'row-text' }, [
-          h('span', { class: 'row-title', text: song.title }),
-          h('span', { class: 'row-sub', text: [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ') }),
-        ]),
+        h('div', { class: 'row-text' }, [titleNode, subNode]),
         /*
          * v1.9.20 — the download mark, immediately before the time. It is a glyph, not a control:
          * the whole row is the one tap target (v1.5), so the state goes on the row's accessible name
          * instead, and the mark itself is `aria-hidden`.
          */
         mark,
-        h('span', { class: 'row-time', text: formatDuration(song.duration) }),
+        timeNode,
       ],
     ),
     () => {
@@ -3118,14 +3157,40 @@ function songRow(
    */
   const paintMark = (): void => {
     const downloaded = (ctx.offline?.pathFor(song.id) ?? null) !== null;
-    if (mark.dataset.on === String(downloaded)) return;
-    mark.dataset.on = String(downloaded);
-    mark.className = downloaded ? 'row-dl' : 'row-dl hidden';
-    replace(mark, ...(downloaded ? [icon(ICONS.download, 15)] : []));
+    if (mark.dataset.on !== String(downloaded)) {
+      mark.dataset.on = String(downloaded);
+      mark.className = downloaded ? 'row-dl' : 'row-dl hidden';
+      replace(mark, ...(downloaded ? [icon(ICONS.download, 15)] : []));
+    }
+    /*
+     * …and the accessible name is written on **every** pass, not only when the glyph changed
+     * (v1.9.23): it carries the title, and the title can be filled in later by `paintText` below.
+     * The row's name is the only place a screen reader hears which track this is.
+     */
     row.setAttribute('aria-label', downloaded ? `Play ${song.title}, downloaded` : `Play ${song.title}`);
   };
+  /**
+   * v1.9.23 — **the name, the sub-line and the length, re-read from the store's own answer.**
+   *
+   * `songFor` is the store's row for this id as a `Song`; only what is *missing* is filled from it
+   * ({@link fillSong}), so a row the library answered for is never overwritten by the phone's copy,
+   * and a row nobody can name yet keeps drawing exactly what it drew — an empty title, `--:--` —
+   * rather than its id in the title slot or a zero drawn as a length.
+   *
+   * This is the whole of the owner's screenshot: he opened **On this phone**, the store named every
+   * one of his 497 tracks in the same tick, and the rows went on showing blanks until he left the
+   * screen and came back.
+   */
+  const paintText = (): void => {
+    const known = ctx.offline?.songFor(song.id) ?? null;
+    if (known === null || fillSong(song, known) === 0) return;
+    titleNode.textContent = song.title;
+    subNode.textContent = subLine();
+    timeNode.textContent = formatDuration(song.duration);
+  };
   paintMark();
-  trackDownloadMark(paintMark);
+  trackStoreRepaint(paintMark);
+  trackStoreRepaint(paintText);
   if (!onRemove) return row;
   // Remove-from-playlist cannot live inside the row any more — the row is one button — so it sits
   // beside it, in a wrapper that keeps the two on one line.

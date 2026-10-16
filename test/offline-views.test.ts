@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { startMockLibrary } from './support/mock-fixture.ts';
+import { formatTime } from '../src/ui/dom.ts';
 
 /**
  * No port of this test's own any more: the fixture asks the OS (test/support/mock-fixture.ts). This
@@ -85,7 +86,10 @@ interface Reading {
   downloadedRows: string[];
   /** v1.9.20: the playlist rows with their mark, and the song rows with theirs. */
   playlistRows?: Array<{ title: string | null; sub: string | null; mark: string; label: string | null }>;
-  songMarks?: Array<{ title: string | null; mark: string; label: string | null }>;
+  /** v1.9.23: the song rows' own text — what the metadata repair has to reach. */
+  songMarks?: Array<{ title: string | null; sub?: string | null; time?: string | null; mark: string; label: string | null }>;
+  /** v1.9.23: the player bar — the title the queue's `Song` prints, and the total built from it. */
+  bar?: { hidden: boolean; title: string | null; sub: string | null; position: string | null; total: string | null };
   artSrcs?: string[];
   /** The shell's `--accent-primary` on a reading (the `paletteOffline` state carries before/after). */
   primary?: string;
@@ -101,6 +105,19 @@ interface Reading {
 interface OfflineReport {
   checks: Record<string, { ok: boolean; detail?: string }>;
   states: Record<string, Reading>;
+}
+
+/**
+ * The player bar's own text, as `tools/offline-check.mjs` reads it (v1.9.23). The bar is recorded on
+ * its own rather than as part of a `Reading`, because the two readings that matter here are the bar
+ * *at the tap* and the bar *once the store could name the track* — the same screen, two moments.
+ */
+interface BarReading {
+  hidden: boolean;
+  title: string | null;
+  sub: string | null;
+  position: string | null;
+  total: string | null;
 }
 
 test('a downloaded playlist is browsable with no connection, and no view prints a URL at him', async (t) => {
@@ -281,6 +298,52 @@ test('a downloaded playlist is browsable with no connection, and no view prints 
     assert.equal(palette?.before, '#7cd2ff', 'the shell was not wearing the default palette before the tap');
     assert.notEqual(palette?.after, '#7cd2ff', 'the palette stayed on the default: the cover on disk was not read');
     assert.ok(String(palette?.after).length > 0, 'no palette was written at all');
+
+    /*
+     * ---------------------------------------------------------------------------------------
+     * v1.9.23 — the repair reaching **the screen and the queue**, asserted on the readings the
+     * harness reported rather than on its exit code (the pattern every block above uses).
+     * ---------------------------------------------------------------------------------------
+     */
+
+    // **The screen he photographed.** A store a 1.9.19 build wrote — every row named by the
+    // download's own record on the phone and none of them carrying it — read on `#/downloads`, once
+    // as the route drew and once when the store had spoken, with no navigation between the two.
+    const legacyAsDrawn = report.states.downloadsLegacyAsDrawn;
+    const legacyRepaired = report.states.downloadsLegacyRepaired;
+    assert.equal(legacyAsDrawn?.route, '#/downloads', 'the first reading of the legacy rows was taken off the route');
+    assert.equal(legacyRepaired?.route, '#/downloads', 'the reading that names the rows was taken somewhere else');
+    const legacyRows = legacyRepaired?.songMarks ?? [];
+    const legacyNamed = legacyRows.filter((row) => (row.title ?? '') !== '');
+    const legacyUnnamed = legacyRows.filter((row) => (row.title ?? '') === '');
+    assert.deepEqual(
+      legacyNamed.map((row) => row.title).sort(),
+      ['A very long unbroken track title for the 393 px audit', '夜に駆ける', '海底、月明かり'].sort(),
+      'the rows the repair named are not the ones the download’s own record names',
+    );
+    for (const row of legacyNamed) {
+      assert.equal(row.time, '3:34', `${row.title} is named but its length is not the record’s own (214 s)`);
+      assert.match(String(row.sub), /ヨルシカ/, `${row.title} has no artist on its sub-line`);
+    }
+    // …and the row nobody can name keeps drawing what it drew: not its id, not a length.
+    assert.equal(
+      legacyUnnamed.length,
+      1,
+      `expected the one row no record names, read ${JSON.stringify(legacyRows.map((row) => [row.title, row.time]))}`,
+    );
+    assert.equal(legacyUnnamed[0]?.time, '--:--', 'an unnamed row drew a length nobody had told the app');
+    assert.doesNotMatch(String(legacyUnnamed[0]?.label), /orphan/, 'an unnamed row drew its song id as the row’s name');
+
+    // **And the bar.** The row was blank when he tapped it and the list was gone before the server
+    // could name it, so the only thing that can name the bar is the queue's own copy being filled.
+    const expected = report.states.barCaseSong as unknown as { id: string; title: string; duration: number } | undefined;
+    const barAsTapped = report.states.barAsTapped as unknown as BarReading | undefined;
+    const barWhenNamed = report.states.barWhenNamed as unknown as BarReading | undefined;
+    assert.ok(expected?.title, 'the harness never recorded the track the library named for the bar reading');
+    assert.equal(barAsTapped?.title, '', 'the bar was not blank when the tap landed on the unnamed row');
+    assert.equal(barAsTapped?.total, '0:00', 'the bar did not draw 0:00 for a track with no stored length');
+    assert.equal(barWhenNamed?.title, expected?.title, 'the bar’s title is not the library’s own name for the track');
+    assert.equal(barWhenNamed?.total, formatTime(expected?.duration ?? 0), 'the bar’s total is not the track’s real length');
   } finally {
     mock.stop();
   }
