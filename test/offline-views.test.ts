@@ -344,6 +344,38 @@ test('a downloaded playlist is browsable with no connection, and no view prints 
     assert.equal(barAsTapped?.total, '0:00', 'the bar did not draw 0:00 for a track with no stored length');
     assert.equal(barWhenNamed?.title, expected?.title, 'the bar’s title is not the library’s own name for the track');
     assert.equal(barWhenNamed?.total, formatTime(expected?.duration ?? 0), 'the bar’s total is not the track’s real length');
+
+    /*
+     * ---------------------------------------------------------------------------------------
+     * v1.9.23's follow-up — the row's **accessible name**, read beside the text it carries.
+     *
+     * The name is the only thing a screen reader hears about a row, and it is built out of the
+     * row's title — which, for a row only the *server* can name, is filled by the same store pass
+     * that writes the name. So a name painted before that pass left the row announced as
+     * `Play , downloaded` with its title legibly on the screen beside it, for as long as he stayed
+     * on the screen. Asserted as one reading of the route: the **rendered text** and the
+     * **aria-label** of the same row, taken on `#/downloads` with no navigation between them —
+     * blank as the route drew, named once the store had spoken.
+     * ---------------------------------------------------------------------------------------
+     */
+    const namedAsDrawn = report.states.downloadsServerNamedAsDrawn?.songMarks?.[0];
+    const namedRow = report.states.downloadsServerNamed?.songMarks?.[0];
+    assert.equal(
+      report.states.downloadsServerNamed?.route,
+      '#/downloads',
+      'the accessible-name reading was taken off the route, so it is not the reading the card asked for',
+    );
+    assert.equal(
+      namedAsDrawn?.title,
+      '',
+      `the row was not blank when the route drew it, so this reading is not the repair naming it: ${JSON.stringify(namedAsDrawn)}`,
+    );
+    assert.equal(namedRow?.title, expected?.title, 'the row the server named does not read as the library’s own title');
+    assert.equal(
+      namedRow?.label,
+      `Play ${expected?.title}, downloaded`,
+      'the row’s accessible name is not the title it shows beside the mark: a screen reader hears this row and nothing else',
+    );
   } finally {
     mock.stop();
   }

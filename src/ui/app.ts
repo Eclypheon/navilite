@@ -3189,8 +3189,22 @@ function songRow(
     timeNode.textContent = formatDuration(song.duration);
   };
   paintMark();
-  trackStoreRepaint(paintMark);
+  /*
+   * **The text pass is registered first, and that order is load-bearing.**
+   *
+   * The mark pass writes the row's accessible name *from* `song.title` (`:3170`), so it has to run
+   * after the pass that fills the title out of the store — otherwise the one store pass that both
+   * fills the title and writes the name (the repair's **server** pass, which is the only notify a row
+   * with no manifest beside it gets) leaves the row announced as `Play , downloaded` while its title
+   * is legibly on the screen. The legacy case looked fine only because the record pass notifies
+   * twice, so a second pass repaired the name. A screen reader hears this row through its name and
+   * nothing else.
+   *
+   * Both stay registered, and the name is still written on **every** pass: the title can arrive
+   * later than the glyph, and neither pass writes the other's node.
+   */
   trackStoreRepaint(paintText);
+  trackStoreRepaint(paintMark);
   if (!onRemove) return row;
   // Remove-from-playlist cannot live inside the row any more — the row is one button — so it sits
   // beside it, in a wrapper that keeps the two on one line.

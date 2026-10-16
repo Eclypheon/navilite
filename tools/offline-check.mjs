@@ -72,6 +72,11 @@
  * *server* names, the mock holding every answer (`/__slow`) so the tap lands while the row is still
  * blank, and then the list **left** — so the only thing that can name the bar is the queue's own copy
  * being filled. Both are driven with the app's real code path; no test hooks, no stubs.
+ *
+ * **…and the row's accessible name, read beside its text** (the follow-up finding on v1.9.23): the name
+ * carries the title, and on a row only the *server* can name the two are written by the same store pass,
+ * so a name painted before the title it carries left the row announced as `Play , downloaded` while its
+ * title was on the screen. Read on the route it was drawn on, in one reading, with no navigation.
  */
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
@@ -1148,6 +1153,75 @@ async function main() {
             'and its real total, instead of 0:00',
             barAsTapped.total === '0:00' && bar.total === mmss(firstSong.duration),
             `${barAsTapped.total} → ${bar.total} (${firstSong.duration} s)`,
+          );
+          await holdAnswers(app, 0);
+        }
+        say('');
+
+        /* ---- 2e. the name a reader hears is the row's own title (v1.9.23, the card's acceptance) */
+        /*
+         * The row's accessible name carries its title (`Play <title>, downloaded`), and for a row the
+         * **server** names, the title and the name are written by the *same* store pass: with no
+         * manifest in this mirror `repairFromRecords` has nothing to say, so the notify after the
+         * record pass never fires and `repairMetadata` notifies **once**, at the end of the server
+         * pass — the pass that fills the title.
+         *
+         * The name used to be painted *before* the pass that fills the title (`songRow` registered its
+         * mark pass first), so this row — its title legibly on the screen beside it — was announced as
+         * `Play , downloaded`: no name at all, for as long as the owner stayed on the screen, healing
+         * only on the next unrelated store notify. A screen reader hears this row only through its
+         * name, so this is the whole of what a blind owner gets from the screen.
+         *
+         * Read the way a person perceives it: the row's **rendered text** and its **accessible name**
+         * in one reading (`READING.songMarks` carries both), on the route, with the first reading
+         * taken as the route drew (blank — the state the owner's screenshot is in) and the second once
+         * the store could name the row, and **no navigation between the two**.
+         */
+        if (firstSong !== null) {
+          // The hold is what makes "blank when the route drew" a fact rather than a hope: the ask for
+          // this row's name cannot have been answered before the reading below is taken.
+          await holdAnswers(app, LEGACY_HOLD_MS);
+          await navigate(cdp, app);
+          await evaluate(cdp, seedScript(app, serverNamedMirrorJson(app, firstSong.id)));
+          await coldRoute(cdp, app, '/downloads');
+          await waitFor(cdp, `document.querySelectorAll('.row.song').length > 0`, 'the one unnamed row to be drawn');
+          const namedAsDrawn = await evaluate(cdp, READING);
+          let named = namedAsDrawn;
+          const namedDeadline = Date.now() + 8000;
+          for (;;) {
+            if ((named.songMarks[0]?.title ?? '') !== '') break;
+            if (Date.now() > namedDeadline) break;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            named = await evaluate(cdp, READING);
+          }
+          readings.states.downloadsServerNamedAsDrawn = namedAsDrawn;
+          readings.states.downloadsServerNamed = named;
+          // The store's own row for it, so a failure can say which half did not happen.
+          readings.states.downloadsServerNamedStore = await evaluate(
+            cdp,
+            `(() => {
+              const raw = localStorage.getItem('navilite.offline');
+              const row = raw ? (JSON.parse(raw).rows || {})[${JSON.stringify(firstSong.id)}] : null;
+              return row ? { title: row.title ?? null, durationSec: row.durationSec ?? null } : null;
+            })()`,
+          );
+          const namedRow = named.songMarks[0] ?? null;
+          const heard = String(namedRow?.label ?? '');
+          const asDrawn = [namedAsDrawn.songMarks[0]?.title ?? null, namedAsDrawn.songMarks[0]?.label ?? null];
+          say('The row the server named, read on the route it was drawn on, with no navigation:');
+          say(`    as the route drew it: ${JSON.stringify(asDrawn)}`);
+          say(`    once the store had named it: ${JSON.stringify([namedRow?.title ?? null, namedRow?.time ?? null, heard])}`);
+          check(
+            'the row the server named reads as its title and its accessible name in the same reading, on the route (v1.9.23)',
+            named.route === '#/downloads' &&
+              named.songMarks.length === 1 &&
+              namedAsDrawn.songMarks[0]?.title === '' &&
+              namedRow?.title === firstSong.title &&
+              heard === `Play ${firstSong.title}, downloaded`,
+            `route ${named.route} · as drawn ${JSON.stringify(asDrawn)} · named ${JSON.stringify([
+              namedRow?.title ?? null,
+              heard,
+            ])} (the library calls it ${JSON.stringify(firstSong.title)})`,
           );
           await holdAnswers(app, 0);
         }
