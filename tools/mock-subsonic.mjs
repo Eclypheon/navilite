@@ -24,8 +24,9 @@
  *                              the sidecar file itself, timed or untimed. Also /lyrics/health and
  *                              /lyrics/index.json. Every request is recorded in `state.lyrics`
  *                              with the endpoint that served it.
- *   GET  /__state   → requests seen, scrobbles, starred ids, saved play queue
- *   POST /__reset   → clear that state
+ *   GET  /__state   → requests seen, scrobbles, starred ids, saved play queue, the current API delay
+ *   POST /__reset   → clear that state (and the delay)
+ *   GET  /__slow?ms=N → make every **API answer** late by N ms (0 clears it — v1.9.21)
  *   POST /__report  → a layout-probe report posted from inside the page (see
  *                     tools/device-probe.mjs — the iOS Simulator run has no CDP to attach to)
  *   GET  /__reports → those reports, for the harness on the host
@@ -79,6 +80,23 @@ const LYRICS_PLAIN = args.has('lyrics-plain');
 const STRESS = args.has('stress');
 const STRESS_ARTIST_ID = 'artist-ja';
 const STRESS_ALBUM_ID = 'album-ja-1';
+
+/**
+ * How late every **API** answer is (v1.9.21), set by `GET /__slow?ms=N`.
+ *
+ * The app's own request timeout is 20 s, so against this mock every view's answer has always landed
+ * in a millisecond — and a view that paints *after* its await can only be caught painting over the
+ * wrong screen if the answer is late enough for the owner to have navigated away in the meantime.
+ * That is the one thing this knob exists for: `tools/offline-check.mjs` navigates away from a view
+ * whose request this holds open, then reads the screen it navigated to.
+ *
+ * Only `/rest/*` is delayed. Static files, `/offline-art/`, the lyrics sidecars and these debug
+ * endpoints are *not*: the harness has to be able to read `/__state` and boot the app while an
+ * answer is held, which is exactly the difference between "the library is slow" and "the page is
+ * slow". Zero is the default, so nothing else in this repository's harnesses is affected by it, and
+ * `/__reset` puts it back to zero.
+ */
+let apiDelayMs = 0;
 
 /* ------------------------------------------------------------------ library */
 
@@ -943,9 +961,22 @@ const server = createServer((request, response) => {
         playQueue: state.playQueue,
         lyrics: state.lyrics,
         playlists: state.playlists,
+        // Read back rather than asserted from the harness's own variable: "the delay is on" is a
+        // fact about the server, and a harness that set a knob nothing honours must see that.
+        slowMs: apiDelayMs,
       },
       { 'content-type': 'application/json; charset=utf-8' },
     );
+    return;
+  }
+  if (path === '/__slow') {
+    /*
+     * v1.9.21 — hold every API answer for `ms` milliseconds. See `apiDelayMs` above for why this
+     * exists; `/__reset` clears it, so a run that dies half-way still leaves the mock honest.
+     */
+    const requested = Number(url.searchParams.get('ms') ?? 0);
+    apiDelayMs = Number.isFinite(requested) && requested > 0 ? Math.min(Math.round(requested), 30_000) : 0;
+    send(response, 200, { slowMs: apiDelayMs }, { 'content-type': 'application/json; charset=utf-8' });
     return;
   }
   if (path === '/__reset') {
@@ -960,6 +991,9 @@ const server = createServer((request, response) => {
      */
     state.starred.clear();
     state.playQueue = null;
+    // …and the API delay (v1.9.21): "clear that state" is what a run starts with, and a delay left
+    // on would make the next run's numbers mean something else.
+    apiDelayMs = 0;
     send(response, 200, { reset: true }, { 'content-type': 'application/json; charset=utf-8' });
     return;
   }
@@ -1017,6 +1051,13 @@ const server = createServer((request, response) => {
       params: { ...params, t: params.t ? `${params.t.slice(0, 8)}…` : undefined },
       at: new Date().toISOString(),
     });
+    // The request is recorded as *seen* above, before the hold: what `/__slow` delays is the
+    // answer, not the arrival, so a harness can see that a request went out while it is still
+    // waiting for the reply.
+    if (apiDelayMs > 0) {
+      setTimeout(() => handleRest(response, method, params, url), apiDelayMs);
+      return;
+    }
     handleRest(response, method, params, url);
     return;
   }

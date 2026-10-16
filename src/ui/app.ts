@@ -1641,6 +1641,12 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
   shell.viewRoute = routeKey;
   const fail = (error: unknown) => {
     /*
+     * A rejection is a paint as much as an answer is, and it can land just as late (v1.9.21): the
+     * view that failed may be two screens back, so an error box drawn here would replace whatever
+     * the owner is actually looking at with a message about a screen he has left.
+     */
+    if (overtaken(shell, routeKey)) return;
+    /*
      * A view that needs the server, with no server, degrades (v1.9.18). This is the second half of
      * the owner's report — the raw transport message ("could not reach https://…: (TypeError: Load
      * failed)") was rendered as the content of the view. Anything unreachable now draws the offline
@@ -1760,6 +1766,19 @@ function loading(shell: Shell, message = 'Loading…'): void {
  * `shell.viewRoute` is the route the router drew for the view that is on screen now, set
  * synchronously before that view renders, so it is the honest answer to "am I still the view?".
  * Data work — remembering a playlist's name, say — is not a paint and is deliberately not guarded.
+ *
+ * v1.9.21 guards the rest of the class. The paint is what is guarded, in the view that started the
+ * work, and the route is captured **once per render** (never per request): a second search while the
+ * first is in flight is the same render, and its answer is a current one and must land.
+ *
+ *   - the views that paint into `shell.view` itself — `renderAlbum` (`replace`), `renderArtist` and
+ *     `renderFavourites` (`pageTitle` + the rows below it) — are the ones where a stale answer is
+ *     *visible*, and they are checked in `tools/offline-check.mjs`;
+ *   - `renderSearch` is guarded too, for uniformity, though its paint goes into the results host its
+ *     own render created — a node the next render has already detached, so that one cannot corrupt
+ *     the screen (its check says as much: it passes with or without the guard);
+ *   - the router's own failure fallback (`fail`, below) is guarded as well: a *rejection* that lands
+ *     after the owner has moved on used to draw its error box over the screen he moved to.
  */
 function overtaken(shell: Shell, route: string): boolean {
   return shell.viewRoute !== route;
@@ -2226,8 +2245,11 @@ async function renderDownloads(ctx: AppContext, shell: Shell): Promise<void> {
 }
 
 async function renderArtist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
+  // The route this render answers for: a late answer paints only if it is still the view (v1.9.21).
+  const route = location.hash || DEFAULT_ROUTE;
   loading(shell);
   const artist = await ctx.library!.artist(id);
+  if (overtaken(shell, route)) return;
   pageTitle(shell, artist.name, `${artist.albumCount ?? artist.album?.length ?? 0} albums`);
   const host = h('div', { class: 'grid' });
   const albums = artist.album ?? [];
@@ -2237,8 +2259,11 @@ async function renderArtist(ctx: AppContext, shell: Shell, id: string): Promise<
 }
 
 async function renderAlbum(ctx: AppContext, shell: Shell, id: string): Promise<void> {
+  // The route this render answers for: a late answer paints only if it is still the view (v1.9.21).
+  const route = location.hash || DEFAULT_ROUTE;
   loading(shell);
   const album = await ctx.library!.album(id);
+  if (overtaken(shell, route)) return;
   const songs = album.song ?? [];
   const items: QueueItem[] = songs.map((song) => ({ song, context: { kind: 'album', id, name: album.name } }));
   const starred = Boolean(album.starred);
@@ -2656,8 +2681,11 @@ function notOnPhoneRow(ctx: AppContext, song: Song): HTMLElement {
 }
 
 async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {
+  // The route this render answers for: a late answer paints only if it is still the view (v1.9.21).
+  const route = location.hash || DEFAULT_ROUTE;
   loading(shell);
   const starred = await ctx.library!.starred();
+  if (overtaken(shell, route)) return;
   const songs = starred.song ?? [];
   const albums = starred.album ?? [];
   const artists = starred.artist ?? [];
@@ -2703,6 +2731,13 @@ async function renderFavourites(ctx: AppContext, shell: Shell): Promise<void> {
 }
 
 async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promise<void> {
+  /*
+   * The route this render answers for (v1.9.21), captured **once per render and never per request**:
+   * `submit` runs again on every Enter, and a second search while the first is in flight is still
+   * this render — its answer is a current one and must paint. What the guard rules out is the answer
+   * that arrives after the owner has left the screen.
+   */
+  const route = location.hash || DEFAULT_ROUTE;
   const input = h('input', {
     class: 'field inline',
     type: 'search',
@@ -2719,6 +2754,9 @@ async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promis
     void (async () => {
       try {
         const found = await ctx.library!.search(query);
+        // The owner may have left the screen while this was in flight (v1.9.21): the results host
+        // below belongs to a render that is no longer the view.
+        if (overtaken(shell, route)) return;
         const songs = found.song ?? [];
         const albums = found.album ?? [];
         const artists = found.artist ?? [];
@@ -2742,6 +2780,9 @@ async function renderSearch(ctx: AppContext, shell: Shell, initial = ''): Promis
         );
         updateRowHighlight(ctx, shell);
       } catch (error) {
+        // A failure is a paint too (v1.9.21): the badge and the message belong to a screen he is no
+        // longer on, and a stale one would land in the results host of a dead render.
+        if (overtaken(shell, route)) return;
         /*
          * Offline, the result pane is not the place for the transport's own text either (v1.9.18):
          * the whole view is still here — the field, the button, the header — so it degrades to the

@@ -1611,3 +1611,122 @@ touched here; it is the next card, not a claim of this one.
 5. **Background transfers of art** (the lane's own background behaviour, unchanged since 1.8.x).
 6. **The 393 px layout with badged rows on the phone.** The harness measures overflow at 393 × 852 on
    every screen it visits, including the badged lists (0 px), but the device is the owner's.
+
+## 18. v1.9.21 — a view he left does not paint over the one he is on (2026-10-16)
+
+The defect, as filed by v1.9.20's own acceptance check: every view that awaits the library paints when
+the answer arrives, and by then the router may already have drawn whatever the owner navigated to — so
+a slow answer writes the old screen over the new one. v1.9.20 guarded the three views its acceptance
+depended on (`renderPlaylist`, `renderPlaylists`, `renderArtists`) and left this card for the rest of
+the class. **This change is unreleased**: no version, changelog or native version field is touched, so
+no IPA/APK carries it yet — the release that does is a separate step, and it is what puts it on his
+phone.
+
+**What changed in `src/ui/app.ts`.** `overtaken(shell, route)` now guards the paint in `renderAlbum`,
+`renderArtist`, `renderFavourites` and `renderSearch`. Each captures its route once, at the top of the
+*render* — never per request, so a second Enter while the first search is in flight is still the same
+render and its answer is a current one and lands. The same guard went into the router's own failure
+fallback (`fail`): a *rejection* is a paint too, and one that lands after the owner has moved on used
+to replace his screen with an error box about the one he left. Data work stays unguarded.
+
+**The driver.** `tools/mock-subsonic.mjs` gained `GET /__slow?ms=N` — every API answer is held for N
+milliseconds and `/__state` reads the hold back (static files, `/offline-art/`, the lyrics sidecars and
+the debug endpoints are *not* held; `/__reset` clears it). That is the one thing the check needed: a
+slow answer that is slow on purpose, every time, rather than by luck. `tools/offline-check.mjs` gained
+a fifth block that uses it, with five cases: the album page, the artist page, Favourites, Search, and
+the router's failure fallback (an album id the library does not know, i.e. an error that lands late).
+Each case is run twice:
+
+- a **control** that visits the route and stays — the held answer must draw that page, because a view
+  that never paints cannot paint over another one;
+- and the case itself: ask for the view, walk to `#/downloads` **250 ms** later (the answer is held for
+  1800 ms), then read the screen once the answer has certainly landed.
+
+A sixth check drives the caution the card raised: a search that is *still* the screen is left alone
+until its answer lands, and a second Enter is sent while the first is in flight — the guard is keyed to
+the render, not to the request, so both answers are allowed to land. (That one passes on **both**
+builds by construction: it protects the current search, it does not detect the defect.)
+
+`#/downloads` is the destination on purpose: it is drawn from the store alone, so it is on screen
+immediately and stays put while the library is slow, and a reading of it is unambiguous. Every case
+boots cold before it is raced — `state/library.ts` caches an album, an artist and the starred set for
+the session, so a second visit inside one page load answers from memory and lands before anyone could
+leave (that is what would make this check pass on nothing).
+
+```
+$ node tools/mock-subsonic.mjs --port 4673 --stress --dist dist
+$ node tools/offline-check.mjs --app http://127.0.0.1:4673 --online-playlist pl-stress-long
+```
+
+**RED — the same check against the build the card was written on** (`dist/` built from aa8874f, before
+any of this change): **30 ok, 4 FAIL**. What the screen read, 2.5 s after the route was left, while the
+address said `#/downloads`:
+
+| case | the reading |
+| --- | --- |
+| album page | heading **“Alien Lab — Quiet Hours”**, 4 song rows, an album header and cover drawn |
+| artist page | heading **“Alien Lab”**, 2 album cards, 0 song rows |
+| Favourites | heading **“Favourites”**, “0 tracks · 0 albums · 0 artists”, “Nothing starred yet…” |
+| router's failure fallback | an error box: “the requested data was not found: Album not found” |
+| Search | **passed** — see finding 1 below |
+
+**GREEN — the same run on the fix**: **34 checks, 0 failures**. Every one of the five reads `#/downloads`
+intact — h1 “On this phone”, the four downloaded rows, and none of the old view's parts on it. The
+controls drew the held answer at 1856 / 1815 / 1812 / 1808 / 1809 ms, i.e. the same answer this block
+then holds open is one that does paint when it *is* the view.
+
+`npm test` (240 tests, 0 skipped — including this harness run under `test/offline-views.test.ts`, which
+asserts every check the harness reports) and `npm run typecheck` are both green. No test file and no
+store-level suite was touched: the whole change is the four paints, the router's fallback, and the two
+tools.
+
+**Two findings the check made, left in this record rather than papered over.**
+
+1. **Search cannot corrupt the screen, with or without the guard.** The guard is applied to it (as the
+   card asked — one rule, uniformly), but `renderSearch` paints into the results host its *own* render
+   created, and the next render's `pageTitle`/`replace` has already detached that node, so a stale
+   answer lands somewhere nothing shows. The RED run above is the evidence: Search passed there too.
+   The guard stays, and the check states that it cannot fail rather than implying that it can.
+   `renderAlbums`' `load()` is the same shape (its paint target is its own `listHost`) and is left
+   alone for the same reason: there is no defect to fix there.
+2. **The router's failure fallback was broken in the same way, and the card did not name it.** Case 5
+   of the RED run is a *rejection* that arrives late, and it replaced the destination with its error
+   box. Same class, one caller further out, so it is guarded now — and the check covers it.
+
+**Found while doing this, and not fixed here** — the suite's own reliability, because this block added
+browser work to it:
+
+- `test/pager.test.ts` failed on **4 of the 17 full `npm test` runs** made here, always with the *same*
+  single symptom: `page threw: Error: timed out waiting for the stress album`. That is its step 9
+  waiting `PATIENCE_MS` = 20 s (`tools/layout-probe-browser.js:31`) for the stress album's rows, and
+  the flake is already documented in this repository twice — §14.5 ("the pager flake was met twice and
+  re-run three times") and `tools/pager-check.mjs:798-807`, which names *the suite's parallel load* as
+  its cause. The pre-change build (aa8874f, `dist/` rebuilt from it) was green **6 of 6** in the same
+  session. What this release changed about that: the offline harness now runs ~20 s longer (12 boots,
+  five held answers), so it overlaps the pager's step 9 where it did not before; the *peak* load is
+  unchanged. The 34 checks of this harness never failed in any of those runs, and none of the failures
+  reproduces standalone (`node --test test/pager.test.ts` passes on this build).
+- One **300 s hang** of this harness was seen once under that load (no report written — the output is
+  buffered until the end, so a hang prints nothing). Every call this harness makes to the *mock* is now
+  bounded (`mockFetch`, 10 s), which covers a stalled connection and turns it into a named error. A
+  wedged *renderer* is still uncovered: `Cdp.send` (`tools/layout-audit.mjs:70`) has no timeout.
+- Related: four headless Chrome instances from earlier runs were still alive on this machine, one of
+  them 17 hours old and holding remote-debugging port 9725 — inside the range `withChromePage` picks
+  from (`9500 + random(400)`), so an orphan can collide with a fresh harness. Nothing here was changed
+  to prevent that.
+
+Neither the pager's patience nor the shared browser plumbing is this card's to change: both are filed
+as follow-up rather than edited under a race fix.
+
+**Not verified here, and not claimed.**
+
+1. **His phone, and his link.** Everything above is Chrome at 393 × 852 on this Mac against the mock;
+   the slow answer is the mock's own hold, not his relay. What is reproduced is the shape of his
+   situation — a library answer that takes longer than his patience — not his network, and not the
+   WebView.
+2. **The parts of the class this card did not touch**: `renderAlbums`' `load()` (finding 1) and the
+   per-track download marks' in-place repaints are unchanged.
+3. **No artifact.** See the note at the top of this section: unreleased.
+
+Raw runs behind the two tables: `offline-check-RED-v1.9.20-build.txt` and `offline-check-GREEN-fix.txt`,
+attached to this card (t_8de0bddf).

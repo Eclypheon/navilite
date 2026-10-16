@@ -45,8 +45,18 @@
  * The `/offline-art/` route the mock serves is this harness's stand-in for a file in the app's own
  * container; the real one (`Capacitor.convertFileSrc` → Application Support) is only checkable on
  * the phone, and is stated as such in the design's §10.
+ *
+ * **v1.9.21 adds the race this release is about** (§5 of the run): every view that awaits the library
+ * paints when the answer arrives, so an answer that lands after the owner has navigated away used to
+ * write the old screen over the new one. The mock can now hold its API answers (`GET /__slow?ms=N`,
+ * see `apiDelayMs` in `tools/mock-subsonic.mjs`), which is the one thing needed to drive it
+ * deliberately rather than by luck: visit the view, leave it while the answer is still held, then
+ * read the screen you moved to. Five cases — the album page, the artist page, Favourites, Search, and
+ * the router's own failure fallback (an error that lands late) — each with a control that visits the
+ * same route and stays, because a view that never paints cannot paint over another one.
  */
 import { createServer } from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { withChromePage, navigate, evaluate } from './layout-audit.mjs';
 
@@ -62,6 +72,13 @@ const TITLES = ['海底、月明かり', '夜に駆ける', 'A very long unbroke
 const PARTIAL_ID = 'pl-partial-1';
 const PARTIAL_NAME = 'Half downloaded';
 /**
+ * Every track the downloaded-songs view holds in this run: the mirror's three plus the one complete
+ * file of the half-downloaded playlist. It is what `#/downloads` must still read *after* another
+ * view's late answer has landed — the assertion the race block below is made of.
+ */
+const DOWNLOAD_TITLES = [...TITLES, 'Only this one is here'].sort((a, b) => a.localeCompare(b));
+
+/**
  * The device-copy stand-in (v1.9.20). On the phone the audio and the cover sit side by side in
  * `Library/Application Support/navilite-offline/` and reach the page through
  * `Capacitor.convertFileSrc` — a URL on the **app's own origin**, not the API's. The browser has no
@@ -73,6 +90,16 @@ const COVER_ID = 'cover-album-1-1';
 const SERVER_COVER_ID = 'cover-album-1-2';
 /** The default palette's primary, so "the art actually themed the shell" is a comparison, not a claim. */
 const DEFAULT_PRIMARY = '#7cd2ff';
+
+/** How long the mock holds every API answer during the race block (v1.9.21). */
+const RACE_DELAY_MS = 1800;
+/** How long after leaving a screen the answer is still held — i.e. it has demonstrably not landed. */
+const RACE_AWAY_MS = 250;
+/** How long past the hold the block waits before reading, so the answer has certainly landed. */
+const RACE_SETTLE_MS = 700;
+/** The mock's own defaults, as `seed()` already assumes when it writes the app's settings. */
+const API_USER = 'navidrome';
+const API_PASSWORD = 'navidrome';
 
 /** The rows, with the real shape the mirror writes (`file://` path + measured bytes + metadata). */
 function mirrorJson(appUrl, online) {
@@ -209,6 +236,25 @@ const READING = `(() => {
 })()`;
 
 /**
+ * The screen, as the race block reads it (v1.9.21): what is on it *now*, and which of an old view's
+ * parts are on it. `detail` is the album page's header, `cards` are its/its artists' album art,
+ * `sections` are Favourites' and Search's headings, `emptyBox` is the router's error fallback — so one
+ * reading distinguishes all five cases' stale paints from the destination they must not replace.
+ */
+const RACE_READING = `(() => ({
+  route: location.hash,
+  h1: document.querySelector('.view h1') ? document.querySelector('.view h1').textContent : null,
+  subtitle: document.querySelector('.view .muted') ? document.querySelector('.view .muted').textContent : null,
+  sections: [...document.querySelectorAll('.view h2.section')].map((node) => node.textContent),
+  songs: [...document.querySelectorAll('.view .row.song .row-title')].map((node) => node.textContent),
+  cards: document.querySelectorAll('.view .card').length,
+  detail: document.querySelector('.view .detail') !== null,
+  emptyBox: document.querySelector('.view .empty') ? document.querySelector('.view .empty').textContent : null,
+  text: (document.querySelector('.view') ? document.querySelector('.view').textContent : '').slice(0, 240),
+  leaked: ['could not reach', 'Load failed', 'Over Tailscale'].filter((needle) => (document.body.textContent || '').includes(needle)),
+}))()`;
+
+/**
  * Poll a page expression, so a route's own render has time to land without a blind sleep.
  *
  * The timeout carries **what the page was showing** rather than only the label it was waiting for: a
@@ -286,6 +332,86 @@ async function blackHole() {
   };
 }
 
+/* --------------------------------------- the library, read by the harness itself (v1.9.21) */
+
+/**
+ * The harness's own small Subsonic client.
+ *
+ * The race block needs three facts it refuses to invent: the id and the name of the album and the
+ * artist it is about to visit. They are read out of the library through its **real API** (token auth
+ * and all), for the same reason `--online-playlist` reads a playlist's own name from `/__state`: a
+ * fixture that stops matching the app's library then fails the check instead of quietly testing a
+ * screen nobody can reach.
+ */
+function apiUrl(app, method, params = {}) {
+  const salt = randomBytes(6).toString('hex');
+  const token = createHash('md5').update(`${API_PASSWORD}${salt}`).digest('hex');
+  const query = new URLSearchParams({
+    ...params,
+    u: API_USER,
+    s: salt,
+    t: token,
+    v: '1.16.1',
+    c: 'navilite-offline-check',
+    f: 'json',
+  });
+  return `${app}/rest/${method}.view?${query}`;
+}
+
+/** One API call, unwrapped and status-checked. */
+async function api(app, method, params = {}) {
+  const answer = await (await mockFetch(apiUrl(app, method, params))).json();
+  const payload = answer?.['subsonic-response'];
+  if (payload?.status !== 'ok') throw new Error(`${method} answered ${JSON.stringify(answer).slice(0, 200)}`);
+  return payload;
+}
+
+/** An album and an artist to visit, with the names the pages will have to show. */
+async function readCatalogue(app) {
+  const albums = (await api(app, 'getAlbumList2', { type: 'alphabeticalByName', size: '1' })).albumList2?.album ?? [];
+  const artists = ((await api(app, 'getArtists')).artists?.index ?? []).flatMap((entry) => entry.artist ?? []);
+  if (!albums[0] || !artists[0]) throw new Error('the library answered with no album or no artist to visit');
+  return { album: albums[0], artist: artists[0] };
+}
+
+/** The mock's own state, when this origin has one (`null` for a static-only origin). */
+async function mockState(app) {
+  try {
+    const state = await (await mockFetch(`${app}/__state`)).json();
+    return Array.isArray(state?.requests) ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask the mock to hold every API answer for `ms` (0 clears it) and read back what it holds.
+ *
+ * The read-back is the point of the function. `null` means there is no `/__slow` at this origin, and
+ * a race check driven against a library that answers instantly passes on nothing at all — so the
+ * caller turns that into a failure rather than a quiet pass.
+ */
+async function holdAnswers(app, ms) {
+  try {
+    const answer = await (await mockFetch(`${app}/__slow?ms=${ms}`)).json();
+    return typeof answer?.slowMs === 'number' ? answer.slowMs : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every call this harness makes to the mock, bounded (v1.9.21).
+ *
+ * The loopback mock answers in a couple of milliseconds; what `fetch` does without a signal is
+ * unbounded — a stalled connection holds the whole run open with **nothing printed at all** (the
+ * output is buffered until the end), which is the least diagnosable failure this harness can have.
+ * A bounded call turns that into a named error the same run.
+ */
+async function mockFetch(url, options = {}) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(10000) });
+}
+
 async function main() {
   const argv = new Map();
   for (let i = 2; i < process.argv.length; i += 1) {
@@ -326,7 +452,7 @@ async function main() {
   let onlineInfo = null;
   if (onlinePlaylist) {
     try {
-      const answer = await fetch(`${app}/__state`);
+      const answer = await mockFetch(`${app}/__state`);
       const state = await answer.json();
       const entry = state.playlists?.find((item) => item.id === onlinePlaylist);
       onlineInfo = { id: onlinePlaylist, name: entry?.name ?? null, songIds: entry?.songIds ?? [] };
@@ -347,7 +473,7 @@ async function main() {
      * of the one before it; an origin that does not serve the mock simply answers nothing and the
      * line is a no-op.
      */
-    await fetch(`${app}/__reset`);
+    await mockFetch(`${app}/__reset`);
   } catch {
     // A static-only origin: there is no mock state to clear.
   }
@@ -601,7 +727,7 @@ async function main() {
         say(`“On this phone” with no server: h1 “${downloads.title}”, “${downloads.subtitle}”, ${downloads.rows.length} row(s):`);
         for (const row of downloads.songMarks) say(`    · [${row.mark}] ${row.title}`);
         {
-          const expected = [...TITLES, 'Only this one is here'].sort((a, b) => a.localeCompare(b));
+          const expected = DOWNLOAD_TITLES;
           const drawn = [...downloads.rows].sort((a, b) => a.localeCompare(b));
           check(
             'the downloaded songs are browsable by title with no connection, and it is a view (item 3)',
@@ -693,6 +819,220 @@ async function main() {
           empty.rows.length === 0 && empty.pill?.visible === true && empty.leaked.length === 0,
           `${empty.rows.length} rows · badge ${empty.pill?.visible ?? false} · leaked ${JSON.stringify(empty.leaked)}`,
         );
+        say('');
+
+        /* ------------------- 5. the view he left does not paint over the one he is on (v1.9.21) */
+        /*
+         * Every view that awaits the library paints when the answer arrives, and by then the router
+         * may already have drawn whatever the owner navigated to — so a slow answer writes the old
+         * screen over the new one. v1.9.20 guarded the three views its own acceptance depended on;
+         * this block is the same claim for the rest of the class, driven on purpose rather than by
+         * luck: the mock holds every API answer for `RACE_DELAY_MS` (`GET /__slow`, v1.9.21), so a
+         * screen can be left mid-answer every time, and each case is read once the answer has landed.
+         *
+         * Each case has a **control** — the same route, the same held answer, visited and *stayed on*
+         * — because a view that never paints cannot paint over another one; the control is what makes
+         * the negative reading below mean something. Each case then boots cold before it is raced: the
+         * library caches an album, an artist and the starred set for the session (`state/library.ts`),
+         * and a second visit inside one page load would answer from memory, land before anyone could
+         * leave, and pass on nothing.
+         */
+        await mockFetch(`${app}/__reset`).catch(() => {});
+        await evaluate(cdp, seed(app, app));
+        await coldRoute(cdp, app, '/downloads');
+        const onDownloads = `document.querySelector('.page-head h1')?.textContent === 'On this phone'`;
+        await waitFor(cdp, onDownloads, 'the downloaded-songs screen to boot');
+        let catalogue = null;
+        try {
+          catalogue = await readCatalogue(app);
+        } catch (error) {
+          readings.states.raceCatalogue = String(error);
+        }
+        const heldMs = await holdAnswers(app, RACE_DELAY_MS);
+        const driverReady = check(
+          'the mock can hold an API answer open, so this block is about a **late** answer (/__slow)',
+          heldMs === RACE_DELAY_MS,
+          heldMs === null
+            ? `no /__slow at ${app} — no answer can be made late here, and a race asserted against a library that answers instantly passes on nothing`
+            : `every API answer at ${app} is held for ${heldMs} ms`,
+        );
+        /*
+         * And the other half of the same rule: an undriven check is a failure, not a skip. This one
+         * reads the ids and the names the pages will have to show out of the library itself, so a
+         * fixture that stops offering them is reported instead of quietly testing nothing.
+         */
+        const catalogueReady = check(
+          'the library names an album and an artist to visit, so the race cases can be driven',
+          catalogue !== null,
+          catalogue === null
+            ? `nothing answered (${readings.states.raceCatalogue ?? 'no album and no artist'})`
+            : `${catalogue.album.id} “${catalogue.album.name}”, ${catalogue.artist.id} “${catalogue.artist.name}”`,
+        );
+
+        if (!driverReady || !catalogueReady) {
+          say(`The race checks were not driven: ${!driverReady ? 'the mock is not holding answers' : 'the library named no album and artist to visit'}.`);
+          await holdAnswers(app, 0);
+        } else {
+          /** …and the search route, used both as a case and as the current-search control below. */
+          const searchRoute = `#/search/${encodeURIComponent(catalogue.artist.name)}`;
+
+          /**
+           * `drawn` is the control's assertion, `waiting` is what the screen looks like while its
+           * answer is still held, and `parts` names what that view contributes — so a failure can say
+           * which screen's parts it found on the wrong one, not merely that something was wrong.
+           */
+          const cases = [
+            {
+              name: 'album page',
+              route: `#/album/${catalogue.album.id}`,
+              method: 'getAlbum',
+              drawn: `document.querySelector('.view h1')?.textContent === ${JSON.stringify(catalogue.album.name)}`,
+              waiting: `document.querySelector('.view .empty p')?.textContent === 'Loading…'`,
+              parts: 'album header, cover and song rows',
+            },
+            {
+              name: 'artist page',
+              route: `#/artist/${catalogue.artist.id}`,
+              method: 'getArtist',
+              drawn: `document.querySelector('.view h1')?.textContent === ${JSON.stringify(catalogue.artist.name)}`,
+              waiting: `document.querySelector('.view .empty p')?.textContent === 'Loading…'`,
+              parts: 'artist header and album cards',
+            },
+            {
+              name: 'Favourites',
+              route: '#/favourites',
+              method: 'getStarred2',
+              drawn: `document.querySelector('.view h1')?.textContent === 'Favourites'`,
+              waiting: `document.querySelector('.view .empty p')?.textContent === 'Loading…'`,
+              parts: 'Favourites header and sections',
+            },
+            {
+              name: 'Search',
+              route: searchRoute,
+              method: 'search3',
+              drawn: `document.querySelector('.view h1')?.textContent === 'Search' && document.querySelectorAll('.view .card, .view .row.song').length > 0`,
+              waiting: `(document.querySelector('.view')?.textContent ?? '').includes('Searching…')`,
+              parts: 'Search header and result sections',
+            },
+            {
+              name: 'router’s failure fallback',
+              route: '#/album/not-a-real-album',
+              method: 'getAlbum',
+              drawn: `Boolean(document.querySelector('.view .empty')?.textContent) && document.querySelector('.view .empty').textContent !== 'Loading…'`,
+              waiting: `document.querySelector('.view .empty p')?.textContent === 'Loading…'`,
+              parts: 'error box',
+            },
+          ];
+
+          /** `waitFor`, answered instead of thrown: a control that never drew is a finding, not a wall. */
+          const drew = async (expression, label, timeoutMs = RACE_DELAY_MS + 6000) => {
+            try {
+              await waitFor(cdp, expression, label, timeoutMs);
+              return true;
+            } catch {
+              return false;
+            }
+          };
+
+          /** Is the screen the destination — On this phone — with none of the old view's parts on it? */
+          const destinationIntact = (reading) => {
+            const songs = [...(reading.songs ?? [])].sort((a, b) => a.localeCompare(b));
+            const wrong = [];
+            if (reading.route !== '#/downloads') wrong.push(`the address is ${reading.route}`);
+            if (reading.h1 !== 'On this phone') wrong.push(`the heading is “${reading.h1}”`);
+            if (JSON.stringify(songs) !== JSON.stringify(DOWNLOAD_TITLES)) wrong.push(`${songs.length} song rows, ${JSON.stringify(songs)}`);
+            if (reading.detail) wrong.push('an album page’s header is drawn');
+            if (reading.cards > 0) wrong.push(`${reading.cards} album or artist card(s) are drawn`);
+            if ((reading.sections ?? []).length > 0) wrong.push(`the sections ${JSON.stringify(reading.sections)} are drawn`);
+            if (reading.emptyBox !== null) wrong.push(`an error box reads ${JSON.stringify(reading.emptyBox)}`);
+            return { ok: wrong.length === 0, why: wrong.join('; ') };
+          };
+
+          /* 5a — the control: the same routes, the same held answers, visited and stayed on. */
+          const controls = [];
+          for (const one of cases) {
+            await evaluate(cdp, `location.hash = ${JSON.stringify(one.route)}`);
+            const at = Date.now();
+            const ok = await drew(one.drawn, `the ${one.name} to draw from a held answer`);
+            controls.push(`${one.name}: ${ok ? `drew ${Date.now() - at} ms after the route changed` : 'did NOT draw'}`);
+            if (ok) readings.states[`raceControl: ${one.name}`] = await evaluate(cdp, RACE_READING);
+          }
+          check(
+            'the control: every one of these views draws from the very answer the block then holds open — without this, the readings below would prove nothing',
+            controls.every((line) => line.includes('drew')),
+            controls.join(' · '),
+          );
+          say('');
+
+          /* 5b — and each of them, left while its own answer is still in the air. */
+          for (const one of cases) {
+            const before = (await mockState(app))?.requests.filter((entry) => entry.method === one.method).length ?? 0;
+            await evaluate(cdp, seed(app, app));
+            await coldRoute(cdp, app, '/downloads');
+            await waitFor(cdp, onDownloads, 'the destination to boot', 15000);
+            await evaluate(cdp, `location.hash = ${JSON.stringify(one.route)}`);
+            await new Promise((resolve) => setTimeout(resolve, RACE_AWAY_MS));
+            const holding = await evaluate(cdp, RACE_READING);
+            const stillAsking = await evaluate(cdp, one.waiting);
+            await evaluate(cdp, `location.hash = '#/downloads'`);
+            await waitFor(cdp, onDownloads, 'the destination he moved to', 10000);
+            await new Promise((resolve) => setTimeout(resolve, RACE_DELAY_MS - RACE_AWAY_MS + RACE_SETTLE_MS));
+            const after = await evaluate(cdp, RACE_READING);
+            const served = ((await mockState(app))?.requests.filter((entry) => entry.method === one.method).length ?? 0) - before;
+            const reached = destinationIntact(after);
+            readings.states[`raceAway: ${one.name}`] = after;
+            say(`  · ${one.name} — ${one.route}, left ${RACE_AWAY_MS} ms in, ${served} ${one.method} answered by the mock:`);
+            say(`      while the answer was held: ${stillAsking ? 'the view is asking, nothing drawn yet' : `NOT that view any more — ${JSON.stringify(holding.text)}`}`);
+            say(`      once it had landed: ${reached.ok ? `still “${after.h1}”, ${after.songs.length} rows, no ${one.parts} on screen` : reached.why}`);
+            check(
+              `the ${one.name} does not paint over the screen he moved to (its answer held for ${RACE_DELAY_MS} ms)`,
+              stillAsking && reached.ok,
+              stillAsking
+                ? reached.ok
+                  ? `#/downloads intact after the ${one.method} answer landed: h1 “${after.h1}”, ${after.songs.length} rows, no ${one.parts} on it`
+                  : `the screen he moved to now reads: ${reached.why} — on screen: ${JSON.stringify(after.text)}`
+                : `the view had already drawn or was not asking at +${RACE_AWAY_MS} ms, so its answer was not held: ${JSON.stringify(holding.text)}`,
+            );
+          }
+          say('');
+
+          /*
+           * 5c — the caution on the card, kept as a check of its own: the guard is keyed to the
+           * **render**, not to the request, so a second Enter while the first search is still in the
+           * air is the same render and both answers are allowed to land. The route does not move here;
+           * what a wrong guard would do is make a *current* answer unsendable, and this says it does
+           * not. (The route's own `submit` is the first search; the event below is the second.)
+           */
+          await evaluate(cdp, seed(app, app));
+          await coldRoute(cdp, app, '/downloads');
+          await waitFor(cdp, onDownloads, 'the destination before the current-search control', 15000);
+          await evaluate(cdp, `location.hash = ${JSON.stringify(searchRoute)}`);
+          await evaluate(
+            cdp,
+            `(() => {
+              const input = document.querySelector('.page-head input');
+              if (!input) return false;
+              input.value = ${JSON.stringify(catalogue.artist.name)};
+              input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+              return true;
+            })()`,
+          );
+          const secondSeen = await drew(
+            `document.querySelectorAll('.view .card, .view .row.song').length > 0`,
+            'the search that is still the view to draw after a second Enter',
+          );
+          const twice = await evaluate(cdp, RACE_READING);
+          readings.states.raceSecondEnter = twice;
+          check(
+            'a search that is still the screen still draws after a second Enter while the first answer is held (the guard is keyed to the render, not to the request)',
+            secondSeen,
+            secondSeen
+              ? `drew with h1 “${twice.h1}”, ${twice.cards} card(s), ${twice.songs.length} song row(s), while every answer was held for ${RACE_DELAY_MS} ms`
+              : `nothing drew: ${JSON.stringify(twice.text)}`,
+          );
+          say('');
+          await holdAnswers(app, 0);
+        }
       },
       { width: 393, height: 852, deviceScaleFactor: 3 },
     );
@@ -701,7 +1041,11 @@ async function main() {
   }
 
   say('');
-  say(failures.length === 0 ? 'RESULT: a downloaded playlist is browsable with no connection, one row per playlist, a mark on what is on this phone, and nothing prints a URL at him.' : `RESULT: ${failures.length} offline check(s) failed.`);
+  say(
+    failures.length === 0
+      ? 'RESULT: a downloaded playlist is browsable with no connection, one row per playlist, a mark on what is on this phone, nothing prints a URL at him, and a view left mid-answer does not paint over the screen he moved to.'
+      : `RESULT: ${failures.length} offline check(s) failed.`,
+  );
   for (const failure of failures) say(`  - ${failure}`);
   process.stdout.write(`${lines.join('\n')}\n`);
   if (jsonPath) {
