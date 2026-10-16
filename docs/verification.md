@@ -2626,3 +2626,152 @@ not a UI change that hides the state), the one-engine rule is untouched, and not
    command against a build that has the change — and on the owner's phone, one change of track with the reason
    line open: the chip's third word until the tap's first frame, and *never* the sentence *"reading digital
    silence"* about an item whose tap has produced nothing.
+
+## 26. v1.9.24 — the release that carries the per-item spectrum fact and the row's accessible name (2026-10-16)
+
+§25 (`b760253`, the spectrum fix) and §23 (`acd4822`, A11Y-1) were both on `main` and **unreleased** when they were
+written, and both said so. This is the cut that stamps and ships them: one release carrying those two commits and
+nothing else — the two docs-only commits since the `v1.9.23` tag (`0af06b0`, `c636ca5`) change no code and are in
+the build only as history. What is new here is only what a release adds: the version, the evidence for the release
+as a whole, and the artifact.
+
+### 26.1 What was run, and the counts for this cut
+
+```
+$ npm run typecheck             # tsc --noEmit — clean
+$ npm test                      # 256 tests, 256 pass, 0 fail, 0 cancelled, 0 skipped, 39.8 s
+$ npm run build                 # build #1 — tsc --noEmit && vite build → dist/assets/index-it8C1qaH.js
+$ node tools/mock-subsonic.mjs --port 4691 --stress --dist dist
+$ node tools/offline-check.mjs --app http://127.0.0.1:4691 --online-playlist pl-stress-long
+                                # 42 checks ok, 0 FAIL, exit 0
+$ node tools/spectrum-proof.mjs --url http://127.0.0.1:4691
+                                # exit 0
+$ npm run ipa:unsigned          # build #2 + cap sync ios + one xcodebuild → the artifact in §26.5
+$ npm run build                 # build #3 — the fresh build of the commit compared to the shipped bytes
+```
+
+**Three `vite build`s** (build #1 for the readings, build #2 inside `ipa:unsigned` for the artifact, build #3 for
+the byte comparison), **one `xcodebuild`**, **one `npm test`**, **two `offline-check` runs**, **one
+`spectrum-proof` run**. The harness ran twice because the first run's exit code was lost inside the pipeline it was
+captured through: the identical command was run again to capture the code. Both runs report the same thing — 42
+checks `ok`, 0 `FAIL` — and the tool exits non-zero on any check that fails or cannot be made, so the second run's
+`exit 0` is the verdict and the first is the count.
+
+### 26.2 `npm test` is the release check as well as the suite
+
+`test/changelog.test.ts` compares `CHANGELOG.md` with `src/ui/changelog.ts` item for item and asserts the version
+list ends at 1.9.24, so a bump that touched only part of `docs/VERSIONING.md` §3's list fails there. It ran **256
+tests, 256 pass, 0 fail, 0 cancelled, 0 skipped, in 39.8 s** — §25's count, with no test added or removed by this
+cut (the bump edits the release check's own list).
+
+### 26.3 The harness's 42 checks, on this release's build
+
+Every check is `ok` and none is `FAIL`. The one this cut exists for reads, in the harness's own words:
+
+```
+The row the server named, read on the route it was drawn on, with no navigation:
+    as the route drew it: ["","Play , downloaded"]
+    once the store had named it: ["Track 1 · 110/330/1320 Hz","0:20","Play Track 1 · 110/330/1320 Hz, downloaded"]
+ok    the row the server named reads as its title and its accessible name in the same reading, on the route (v1.9.23)
+```
+
+That is A11Y-1's own check (§23.2's §2e reading) on the released bundle: the visible title and the accessible name
+arrive in the same pass, which is the second item in this release's changelog. The rest of the 42 are the block
+§18–§23 built, unchanged by this cut: the five race cases with their controls and the second-Enter check, the
+Library's own door into the downloaded music with the API refused, the two failure paths and the bounded sweep, the
+metadata repair read on the screen it was reported on and on the bar of the track that is playing, and the
+one-row-per-playlist readings.
+
+### 26.4 The spectrum proof
+
+The spectrum is this cut's subject, so the proof was run against the same build. It changes no visualiser code, so
+this is the release's own baseline rather than this fix's evidence — §25.3 is that:
+
+- playing: **30,905** lit pixels (checksum 521414949) · 3 columns with a second run of lit pixels · 0 lit below the
+  baseline;
+- pause: **668** lit pixels at +700, +900, +1200 and +1500 ms, the last three **byte-identical**;
+- settled frame: 0 columns with a second run of lit pixels, 0 lit below the baseline.
+
+### 26.5 The artifact, and the bytes it carries
+
+```
+$ npm run ipa:unsigned
+** BUILD SUCCEEDED **
+built  artifacts/Navilite-1.9.24-unsigned.ipa
+bytes: 1,028,192          (v1.9.23: 1,027,907 — +285, +0.03 %)
+app version 1.9.24 (45), UIBackgroundModes[0]=audio
+```
+
+Read out of the archive itself, not out of a source file:
+
+```
+$ unzip -p artifacts/Navilite-1.9.24-unsigned.ipa Payload/App.app/Info.plist | plutil -p - \
+    | grep -E 'CFBundleShortVersionString|CFBundleVersion'
+  "CFBundleShortVersionString" => "1.9.24"
+  "CFBundleVersion" => "45"
+```
+
+`artifacts/Navilite-1.9.24-unsigned.ipa` is 1,028,192 bytes, sha256
+`d6d59c85957a6129f5114b00f59fc6c8b71c560c641ed37e550b854a1fe01d8d`, and `file` reads it as a real zip archive
+carrying `Payload/App.app/`.
+
+Every hashed asset is **byte-identical in all four places it exists** — the three builds of this commit and the
+member inside the IPA:
+
+| asset | sha256 — identical in build #1, build #2, build #3 and the IPA |
+| --- | --- |
+| `index-it8C1qaH.js` (198,307 B) | `cda60f8ea4eab157297bd810405aefdd7d0b752e0975e662f8377a2346848198` |
+| `index-F6_Re_h1.css` (14,005 B) | `9316db8712117f190a34005bf1ba3f0221eab5aeb3ee32c61056932c35b522ef` |
+| `base-jY13WPav.js`, `esm-CEnHiZDq.js`, `esm-xH0U1Vfy.js`, `native-Cu_lWe8Y.js`, `web-CfmDQGfG.js`, `web-DloB7lCe.js` | `73c25724…`, `09e96d30…`, `26a3903d…`, `a3c42f14…`, `b2209008…`, `6fd514dd…` |
+| `sw.js` | `138447434e0061da16bd832493b9b3c6cad8ad4b78d2b19384f6bc767c61f20d` (stamped `08e7681`, the commit it was built from) |
+
+The previous release's chunk was `index-Bnzfna-r.js` (198,054 B, sha256 `bb57b25b…0d88`), so this is not v1.9.23's
+bundle — and this fix is *in* it, read against that chunk as the control. The identifiers are the minified ones the
+bundle keeps (private fields and methods), so the reading is of the shipped bytes, not of the source:
+
+| in the bundle | v1.9.23's chunk | v1.9.24's chunk |
+| --- | --- | --- |
+| `spectrumRechecks` (the three-re-check budget) | 1 | **0** |
+| `retrySpectrumOnce` (the 5 s retry) | 1 | **0** |
+| `slowSpectrumPoll` (the timed slow read) | 1 | **0** |
+| `tapFramesForItem` (the per-item counter) | 0 | **1** |
+| `forgetTapFrames` (the rewind when the tap leaves the item) | 0 | **1** |
+| `the tap is on the item the player has moved off and would not re-attach` | 1 | **0** |
+| `nothing is attached to the item that is playing — asking the plugin to put a tap on it` | 0 | **1** |
+| the 1.9.24 changelog's two sentences | 0 | **1 and 1** |
+
+The word that was spent by a clock is gone from the shipped bytes and the fact that replaces it is in them; the
+changelog sentences are in there too, but they say only that the *changelog* shipped, since they are written once
+and grow with every release. The identifiers are the fix.
+
+**Order of operations, and what was built.** The release body was committed first (`08e7681`), `dist/` was rebuilt
+from that commit for the readings above, and the IPA was made from the same build — `docs/VERSIONING.md` §6's
+order. All three builds of this commit are byte-identical in every asset **including `sw.js`**, which is what three
+builds of one commit should be (v1.9.20's artifact carried its parent's short SHA inside `sw.js`, the deviation
+§20 records). The tag `v1.9.24` sits on `08e7681`, the commit the IPA was built from; this section is the one
+commit after it, written from that build's readings, and the tree is clean at `origin/main`.
+
+### 26.6 Not verified here, and not claimed
+
+1. **His phone.** Everything above is a read of the shipped bytes and of Chrome at 393 × 852 on this Mac against
+   the mock; no device, no simulator, no native mixer. The chip's third word across a real track change is
+   §25.5 note 1's answer, still his to give.
+2. **The state this release deliberately leaves open.** A tap that is attached to this item and producing nothing,
+   or a request that never lands, keeps the chip on *"spectrum…"* for the whole track where v1.9.23 eventually said
+   *native audio* — §25.5 note 3(a) and item 4 of `DECISIONS.md`'s 1.9.24 entry. It is a known open state, filed as
+   `t_aedab91d` (the plugin's own refusal reason for this item, never a timer), and it is **not** written as fixed
+   in the changelog. Nothing in this release changes it.
+3. **The installed IPA.** Unsigned on purpose (§15.4, `docs/ios-sideload.md`); the sideload and the 7-day re-sign
+   are the owner's own steps. The announcement VoiceOver actually makes (§23.5 note 1) and whether the mix lands on
+   a `file://`-backed `AVPlayerItem` (§24.8, §25.5 note 1) are his install's answers.
+4. **The review's two P3 notes** (`t_d7dd3e62`'s F2 and F3): the stale *"native audio"* flap when the plugin
+   reports a not-playing player after this item's tap has answered live, and the plugin's PCM ring not being zeroed
+   on a re-install. Both are pre-existing, neither is this cut's subject, and neither changed here — and the
+   Swift/ObjC half is untouched by it (no file under `ios/` or `tools/` changed).
+5. **Android.** No APK was built for 1.9.24 (`versionCode` is bumped to 44 so the next one carries it), so nothing
+   here is evidence about the APK.
+
+Raw runs behind the tables and the counts (agent scratch, attached to the release card `t_bd2d1dae`):
+`npm-test-1924.txt`, `offline-check-1924.txt`, `offline-check-1924-run2.txt`, `offline-check-1924.json`,
+`spectrum-proof-1924.txt`, `ipa-build-1924.txt`, `assets-ipa-vs-dist-1924.txt`,
+`assets-fresh-build-vs-ipa-1924.txt`, `chunk-identifiers-1924.txt`, `chunk-strings-1924.txt`.
