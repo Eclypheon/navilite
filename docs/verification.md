@@ -3531,3 +3531,258 @@ Raw runs (this machine's agent scratch, `/Users/neokester/.hermes/profiles/nerd/
 `engine-native-window-before.txt` (the new test against `48f9497`'s engine: the failure above),
 `engine-native-window-after.txt` (the run quoted in 31.3), `npm-test-after.txt` (263/263).
 
+## 32. v1.9.27 — the release that carries both first-frame windows (2026-10-16)
+
+`48f9497` (`DECISIONS.md` §t_71dc787e — the browser's own first-frame window is the spectrum's word, not a
+capability verdict) and `36ddb14` (§t_c8cc01c6 — the other half, a native resume, and the per-item fact that
+keeps it honest) were on `main` and **unreleased** when they were written, and both said so. This is the cut that
+stamps and ships them: one version carrying those two fixes and nothing else. The sweep for this cut, run rather
+than assumed:
+
+```
+$ git log --oneline v1.9.26..HEAD            # before the release commit
+36ddb14 fix(unreleased): the native half of the first-frame window — a resume, and the per-item verdict that keeps it honest
+48f9497 fix(unreleased): the browser's own first-frame window is the spectrum's word, not a capability verdict
+9d5c6ae docs(v1.9.26): §29's closing line names where the raw runs actually live, and what is attached
+edabdb6 docs(v1.9.26): the release verification record — the counts, the harness's 42 checks, the chip readings on the surface he photographed, the artifact read back out of the IPA, and what is not claimed
+```
+
+The two `docs(v1.9.26)` commits are docs only and are in the build as history. **Nothing else on `main` was
+unreleased and verified.**
+
+**Two halves, one version — a routing decision, recorded because it is one.** `t_7481b20f` verified the web half
+at `48f9497` on its own and recommended shipping it alone, keeping the native follow-up out of the cut. This cut
+carries both, on the orchestrator's reasoning in `t_55732fc5`'s comment thread: the native half never entered the
+cut unverified (its own verification, `t_1c099158`, returned SHIP at `36ddb14` before this card started); the
+resume window is the half the owner actually reported; and he has asked not to be sent version after version. The
+isolation point behind Sage's caution is honoured as a *process* fact rather than a code fact — the cut was gated
+behind both writers, and every reading below was taken with the tree at the release commit, not mid-edit.
+
+**The version number, stated once because the commits around it disagreed with the files.** Both fix commits'
+comments and §30/§31 name **v1.9.27** while every version file still said 1.9.26 (Sage's note on `t_1c099158`,
+passed to this card). This cut lands as **1.9.27**: §32.2 lists the files it sets, the tag is `v1.9.27`, the
+changelog heading is `1.9.27`, and the artifact self-reports 1.9.27 (48) (§32.4). The claim and the files agree;
+no file is left claiming a version other than the one being shipped.
+
+**No production code changed in this cut.** The diff is the version files of `docs/VERSIONING.md` §3 (two of them
+the changelog copies), the release check, `DECISIONS.md` (both entries marked released as v1.9.27, plus the
+invariant entry they add up to), and this section. `src/player/engine.ts` is byte-for-byte `36ddb14`.
+
+### 32.1 What was run, and the counts for this cut
+
+```
+$ npm run typecheck             # tsc --noEmit — clean
+$ npm test                      # 263 tests, 263 pass, 0 fail, 0 cancelled, 0 skipped, 37.3 s
+$ npm run build                 # one vite build — the dist/ the three harnesses below ran against
+$ node tools/mock-subsonic.mjs --port 4691 --stress --dist dist
+$ node tools/offline-check.mjs --app http://127.0.0.1:4691 --online-playlist pl-stress-long
+                                # 42 ok, 0 FAIL, exit 0
+$ node tools/spectrum-proof.mjs --url http://127.0.0.1:4691
+                                # exit 0 — the readings are quoted in §32.3
+$ node --test test/chip-word-browser.test.ts
+                                # 2 tests, 2 pass, 0 fail, 13.3 s — the probe drives itself twice
+$ node --test --test-name-pattern="t_c8cc01c6" test/engine-native.test.ts
+                                # 1 test, 1 pass, 0 fail, 3.4 s — the readings are quoted in §32.3
+$ npm run ipa:unsigned          # one vite build + cap sync ios + one xcodebuild → the artifact in §32.4
+$ npm run build                 # a third vite build, for §32.4's byte-for-byte
+```
+
+**Three `vite` builds** (one for the harness runs, one inside `ipa:unsigned`, one fresh for the reproducibility
+read), **one `xcodebuild`**, **one `npm test`**, **one `offline-check`**, **one `spectrum-proof`**, **one browser
+run** (two probes inside it), **one fake-bridge run**, **one `typecheck`**. Each harness ran once for this cut:
+the runs are the release record, not a loop.
+
+### 32.2 The suite, and the release check
+
+`npm test` — **263 tests, 263 pass, 0 fail, 0 cancelled, 0 skipped, 37.3 s**, the same count `36ddb14` was
+verified at (`t_1c099158`: 263/263 in 37.2 s). This cut adds no test; it rewrites the release check's own version
+list and the two changelog copies. The release check is `test/changelog.test.ts`: it compares `CHANGELOG.md` with
+`src/ui/changelog.ts` item for item and asserts the version list ends at 1.9.27, so a bump that touched only part
+of `docs/VERSIONING.md` §3's list fails there. `tsc --noEmit` prints nothing.
+
+Version, per `docs/VERSIONING.md` §3, all in the one release commit: `package.json` and the lockfile's two
+`"version"` roots to 1.9.27; android `versionCode 47` / `versionName "1.9.27"`; iOS
+`CURRENT_PROJECT_VERSION 48` / `MARKETING_VERSION 1.9.27`, both places; the changelog entry in
+`src/ui/changelog.ts` and `CHANGELOG.md`, same words and same order; and the release check's version list. The
+per-platform counters the file warns against aligning: Android 46 → 47, iOS 47 → 48.
+
+The changelog entry leads with the owner's own report — the phone flashing `native audio` when he presses play
+again, and again when he comes back to the app from the background — then the same window on the web page. It
+says what he can see and nothing transparent to him; no build, no plumbing and no refactor entry is in it.
+
+### 32.3 The harnesses on this build
+
+**`tools/offline-check.mjs`** (§18–§23's block), the app in Chrome at 393 x 852 against a library that cannot be
+reached at all: **42 ok, 0 FAIL, exit 0**, and its own closing line unchanged:
+
+```
+RESULT: a downloaded playlist is browsable with no connection, one row per playlist, a mark on what is on this
+phone, the Library keeps its own door into the downloaded music with no server, nothing prints a URL at him, a
+view left mid-answer does not paint over the screen he moved to, and a store a 1.9.19 build wrote is named on the
+list he is looking at and on the bar of the track he is playing.
+```
+
+**`tools/spectrum-proof.mjs`**, exit 0:
+
+```
+  playing:            29775 lit pixels (checksum 1495355703) · 3 columns with a second run of lit pixels · 0 lit below the baseline
+  +700 ms / +900 / +1200 / +1500:   668 lit pixels each, the last three byte-identical
+  settled frame:      0 columns with a second run of lit pixels · 0 lit pixels below the baseline
+```
+
+v1.9.26's own run of the same tool read 30,898 lit pixels at checksum 787030170 (§29.3). The two readings are of
+different builds sampling a live audio pipeline at different moments; **this record does not claim the difference
+means anything**, and neither reading is used as evidence about the word the chip wears.
+
+**`test/chip-word-browser.test.ts`**, run against this build's `dist/` — 2 tests, 2 pass, 0 fail, 13.3 s
+(5.1 s + 8.1 s). Both probes:
+
+```
+# the ordinary run — a same-origin library, every stream measurable
+      every distinct word the chip wore (17):
+           359 ms  "loading…"    (the chip changed, state loading)
+           389 ms  "spectrum…"   (the chip changed, state playing)   ← the window, in the arming tone (92 ms)
+           481 ms  "spectrum"    (the chip changed, state playing)
+           ...
+          3054 ms  "spectrum"    (the chip changed, state playing)   ← the resume: no amber anywhere
+          3576 ms  "spectrum"    (resumed, on the playlist page, state playing)
+      distinct words across the run: ["loading…","spectrum…","spectrum","paused"]
+      of those, worn while the transport was not playing: ["loading…","paused"] (8 changes)
+      and worn while it WAS playing: ["spectrum…","spectrum"]
+
+# the tainted run — the app on 127.0.0.1, the library named `localhost`, --no-cors-stream
+           342 ms  "spectrum…"   — the window, on an item that turns out to be unmeasurable
+           ...
+          5380 ms  "theme"      — the item's own verdict, the reason line naming the case
+      the item, watched on: chip "theme" · spectrum false · arming false — the analyser returned silence
+```
+
+Read as the release reads it: on the surface that can wear it, **no capability word is worn while the item is
+playing** — the words are `spectrum…` then `spectrum`, at the start and at the resume alike — while the word is
+still reachable, still names the verdict, and now arrives **after** the window rather than instead of it.
+
+**`test/engine-native.test.ts`, the `t_c8cc01c6` case** — the half the owner reported, on the fake bridge:
+1 test, 1 pass, 0 fail, 3.4 s:
+
+```
+probe A1 native playing:        "spectrum" (spectrum true, arming false)
+probe A2 native paused:         "paused"   (spectrum false, arming false)
+probe A3 the instant resume() is called: state playing, spectrum false, arming true — the chip reads "spectrum…"
+     the window: the tap answers a read in 40 ms here, and its first frame ended the window 40 ms after this read;
+     1 emitted status inside it, a capability word on 0 of them
+probe A4 native resumed:        "spectrum" (spectrum true, arming false)
+2. back from the background, the player saying it is playing: the chip reads "spectrum…", ended by the tap's own
+   frame 41 ms later
+3. a tap reading digital silence: "native audio" — and at the resume, and after it: "native audio"
+4. a tap returning one frozen frame: "native audio" — and at the resume, and again 293 ms after it
+```
+
+`spectrumArming`'s derived reads are the fix; this run is the same case §31.3 records, re-read on the release
+commit's tree so that the cut's own record is off the shipped code rather than quoted from the fix's card.
+
+### 32.4 The artifact, and the bytes it carries
+
+```
+$ npm run ipa:unsigned
+** BUILD SUCCEEDED **
+built  artifacts/Navilite-1.9.27-unsigned.ipa
+bytes: 1031737            (v1.9.26: 1031417 — +320, +0.031 %)
+app version 1.9.27 (48), UIBackgroundModes[0]=audio
+```
+
+Read out of the archive itself, not out of a source file:
+
+```
+$ unzip -p artifacts/Navilite-1.9.27-unsigned.ipa Payload/App.app/Info.plist \
+    | plutil -p - | grep -E 'CFBundleIdentifier|CFBundleShortVersionString|CFBundleVersion'
+  "CFBundleIdentifier" => "app.navilite"
+  "CFBundleShortVersionString" => "1.9.27"
+  "CFBundleVersion" => "48"
+```
+
+`artifacts/Navilite-1.9.27-unsigned.ipa` is 1,031,737 bytes, sha256
+`7676bd74675c6efe0c123053ee936d1f52931d27a80c8654bfb2d29d2d46ae67`, and `file` reads it as `Zip archive data, at
+least v1.0 to extract, compression method=store`, carrying `Payload/App.app/` — 47 files, `Payload/App.app/App`
+among them.
+
+**The build stamp names the release commit.** `dist/sw.js` carries `const BUILD_ID = 'b40ec02';` — the commit the
+IPA was built from — and the same line is inside the archive:
+
+```
+$ unzip -p artifacts/Navilite-1.9.27-unsigned.ipa Payload/App.app/public/sw.js | grep "BUILD_ID ="
+const BUILD_ID = 'b40ec02';
+```
+
+That is the stamp the delivery guard reads (`~/.hermes/scripts/navilite_deliver.py`, whose build-order guard was
+rewritten on `t_a09d1ba7` to read the artifact's own bytes rather than the file's mtime, precisely because a
+release record always lands after the build it records). So the artifact the owner is offered names its own
+build, and the commit it names is the commit the tag `v1.9.27` sits on.
+
+**A fresh build of the release commit reproduces the shipped bundle.** The tree was clean at `b40ec02` when the
+third `npm run build` ran, and every one of the eight hashed assets in `dist/` is **byte-identical to the same
+member inside the IPA** (`cmp`, not size): `index-C2jLU_k3.js` (203,896 B), `index-QjmzHs0A.css` (14,071 B),
+`base-BjmtzVdu.js`, `esm-B4zyz82m.js`, `esm-COzjbbfU.js`, `native-D0fucyVa.js`, `web-B84SncK4.js`,
+`web-BKEosLDU.js`; `sw.js` likewise. The copy `cap sync` wrote into the project
+(`ios/App/App/public/assets/index-C2jLU_k3.js`, gitignored) is that same file byte for byte. The shipped chunk's
+sha256 is `95c7757f3d6052a60a312cd7d1343d850a48ffae3c44d167c12db94a6ea24b66`; the stylesheet's is
+`ac4b85a50758aca6cdcbd95a3a701703a1c7822acb7a451c3ecf1313473c8ca0`.
+
+The fixes are *in* the shipped bytes, read against the previous release's own chunk as the control — both read
+out of their IPAs, and v1.9.26's chunk hash (`66d2ec61baeacbbff9cee98f139c9df96985abc19fce5497c7056f6c64158cd2`) is
+§29.4's own recorded value, so the control is the file that record was written about:
+
+| in the bundle | v1.9.26's `index-Wt45tSM6.js` | v1.9.27's `index-C2jLU_k3.js` |
+| --- | --- | --- |
+| `analyserArming` (the web path's window, `t_71dc787e`) | 0 | 2 |
+| `tapArming` (the native path's window, `t_c8cc01c6`) | 0 | 2 |
+| `tapVerdictForItem` (the third fact) | 0 | 6 |
+| `zeroFrames` (the web register the window is read from) | 4 | 6 |
+| `visualiserWord` (the licence line itself) | 2 | 2 |
+| `native audio` (the word in code *and* in the changelog text he reads) | 16 | 18 |
+| `spectrum…` | 6 | 7 |
+
+**Order of operations.** The release body was committed first (`b40ec02`) with a clean tree, then tagged, then the
+IPA was built from that commit — `docs/VERSIONING.md` §6's order. The tag `v1.9.27` is on `b40ec02`, the commit
+the IPA was built from; commit and tag are pushed, and this section is the one commit after them, written from
+that build's readings. Nothing in the delivery guard's `SHIPPED_PATHS` (`src`, `public`, `index.html`,
+`vite.config.ts`, `capacitor.config.ts`, `ios/App/App`, `package.json`) moved after `b40ec02`, so the guard reads
+this artifact as current rather than stale:
+
+```
+$ git log --oneline b40ec02..HEAD -- src public index.html vite.config.ts capacitor.config.ts ios/App/App package.json
+                          # (no output — nothing he installs moved after the build)
+```
+
+### 32.5 Not verified here, and not claimed
+
+1. **His phone.** Everything above is a read of the shipped bytes and of Chrome at 393 x 852 on this Mac against
+   the mock; no device, no simulator, no native mixer. That the chip on his IPA reads `spectrum…` at a resume
+   instead of flashing `native audio` is a claim about the same code path, not a reading off his device
+   (§31.4.1). One pause and one resume on the installed build is what settles it — and that is the verification
+   card's job, not this one's.
+2. **The two named residuals are unchanged and are not claimed closed.** §30.5.3's ~1.8 s per item before a
+   genuinely unmeasurable stream earns its own verdict (a decision, not an accident, and the price of "per
+   item"), and §31.3.4's ~300 ms before a frozen tap's verdict is re-reached after a resume (observed,
+   explained, left alone). Both are stated in `DECISIONS.md`'s invariant entry, item 6, with no card filed
+   against either.
+3. **The transport words `ended` / `interrupted` / `error` are still only defined**, not read off a screen. This
+   cut changes no word and no state.
+4. **Android.** No APK was built for 1.9.27. `versionCode` is bumped to 47 and `versionName` to 1.9.27 so the next
+   APK carries them (`docs/VERSIONING.md` §3 does not require an APK for the parity), and nothing here is
+   evidence about the APK.
+5. **The installed IPA.** Unsigned on purpose (§15.4, `docs/ios-sideload.md`); the sideload and the 7-day re-sign
+   are the owner's own steps.
+6. **No production code changed in this cut.** The diff is the version files, the two changelog copies, the
+   release check, `DECISIONS.md` and this section. The two P3 notes earlier reviews left are untouched and
+   neither is claimed here.
+7. **This record is not the delivery.** Writing it, and building the artifact, is not shipping it: the cut that
+   wrote these bytes does not write the greenlight marker and does not deliver anything — a separate card reads
+   the shipped bytes and greenlights them, and only then does the automatic delivery run.
+
+Raw runs (this machine's agent scratch, `/Users/neokester/.hermes/profiles/nerd/cache/scratch/runs-1927/`):
+`build-a.txt` (the vite build the harnesses ran against), `offline-check-1927.txt`, `spectrum-proof-1927.txt`,
+`chip-word-browser-1927.txt`, `engine-native-1927.txt`, `ipa-build-1927.txt`, `build-c.txt` (the fresh build for
+the byte-for-byte read), plus `commit-msg.txt` and the two chunks read out of the IPAs for the control table.
+The `npm test` and `typecheck` counts are quoted from their own console output, which was not redirected to a
+file in this directory.
+
