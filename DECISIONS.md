@@ -864,3 +864,107 @@ unless it is written down that they are one rule.
    The two named residuals (§30.5.3's ~1.8 s per item on a genuinely unmeasurable stream, §31.3.4's ~0.3 s restart
    of a frozen tap's verdict after a resume) are stated there and are **not** closed by this release.
 
+## Honest silence is not a capability failure, and the word for it is one the chip already wears, 2026-10-16 (card `t_5c7fc694` — decision only, unreleased)
+
+The question, in the card's own terms: **is honest silence — the spectrum running, and this passage of the item
+genuinely silent — a capability failure?** Answered from the two cards that supplied the evidence, not from
+preference: the cold repro (`t_13b5cca0` — `docs/repro/t_13b5cca0/REPRO.md` and the traces, verdicts and fixtures
+in `docs/repro/t_13b5cca0/logs/`) and the trace from the analyser read to the returned word (`t_9c379c56` — raw
+readings at `/Users/neokester/.hermes/profiles/sage/cache/scratch/t_9c379c56/evidence-t_9c379c56.md`, attached to
+that card).
+
+1. **No. The repro separates "silent" from "capability dead" by measurement — same app, same graph, same seconds.**
+   On the shipped-shaped web build (`9271ab0`, shipped paths identical to the `v1.9.27` release commit `b40ec02`;
+   Chrome 155.0.8059.84, `--headless=new --mute-audio`, no device, no simulator) a 22 s item with a 5.000 s
+   passage whose PCM is **220,500 samples that are exactly zero**, played same-origin through the app's own
+   controls, read: `analyser maxByte 0, nonzeroBins 0 of 1024, rmsByte 0.0` with the element **playing**
+   (`paused false`, `currentTime 9.053 s`, `volume 1`, `muted false`, context `running`) — and the **same
+   analyser on the same element measured that same item's samples at `maxByte 255` a moment before and a moment
+   after** (`+14202 ms`, when the word returned to `spectrum`). The control run over a quiet-but-**nonzero**
+   passage holds `spectrum` across the very seconds in question (`maxByte` 181–186, `nonzeroBins` 5–6,
+   `themeAtMs: null`). So the capability the word `theme` claims to name — *"this browser cannot read this item"*
+   — was present and working, and the passage was **silent**: those are two different facts, and this build has
+   the second one while standing on the first.
+2. **What the code does with it is a capability claim built on a premise this repro falsifies.**
+   `src/player/engine.ts:510` states the premise in its own words — *"~1.8 s of silence from the analyser while
+   audio is definitely playing = not real samples"* — and `sample()` (`3738`) implements it: 18 consecutive
+   frames with no energy (`3772-3777`, 18 × `METER_INTERVAL_MS` 100 ms = 1800 ms) set `spectrumLive = false` and
+   write a reason line, and `visualiserWord` then reaches `engine.ts:1555`
+   (`if (this.state === 'playing') return this.backend === 'native' ? 'native audio' : 'theme'`) and spends the
+   amber capability word. Measured on that run: `theme` at **+10903 ms — 1801 ms after the first all-zero read**,
+   over 4.902 s of the playing item (`+9102 → +14003 ms`), with the engine's own reason line blaming *"a tainted
+   cross-origin stream"* on a stream that is same-origin, untainted and measurable. Silence-amplitude is being
+   read as an unmeasurability verdict; the item's real, readable, quiet-passage PCM is the thing that produces it.
+3. **Nothing inside the analysis window can tell the two states apart, which is why this was not visible as a
+   local bug.** `t_9c379c56` traced every hop and measured the ambiguity: the analyser's zeros are the same zeros
+   for a digitally silent song and for a stream the browser will not hand over (measured in Chrome through the
+   engine's own analyser config: 1024/1024 zero bins while the element plays, for both), the frozen rule (`3756`,
+   the same frame `FROZEN_FRAMES_BEFORE_THEME` 10 times) reaches the same licence, and both states end at the same
+   line `1555`. The two facts that would discriminate are **outside** that window: whether this item's load refused
+   sample access (`handleMediaError`, `3811`, refusal named at `3813-3816`, observed per item and then overwritten
+   by the silence verdict at `3773-3777`) and
+   whether the context is suspended (`3785`, used only to choose a sentence). So the defect is not a bad sentence —
+   it is that the word was decided by a count of quiet frames instead of by the item's own evidence about its
+   samples.
+4. **The decision, and the defect in one sentence.** Honest silence is **not** a capability failure; the defect is
+   that on the web path the app spends the capability word `theme` — and the reason line that accuses a tainted
+   cross-origin stream — on ≥1.8 s of all-zero frames from an item whose own samples the same browser read at 255
+   immediately before and immediately after, i.e. it states *"this build cannot measure this item"* about an item
+   it is measuring. The fix's acceptance criteria are in item 6; the work is card `t_4253898e`, not this one.
+5. **The correct word already exists: `spectrum` — so no word is coined, and no owner's call is needed.**
+   §634.2 defines `spectrum` as *"the bars are being fed by the item in hand now"*, and that is exactly what is
+   true of an honest silent passage: the bars **are** being fed, by the item in hand, with that item's own
+   samples — a flat spectrum is still this item's own measurement, and the bar's flatness is the honest picture of
+   it. The state does not need its own word, because no distinct truth is left over: the three states the user must
+   be able to tell apart are *measuring now* (`spectrum`), *not answered for this item yet* (`spectrum…`, §515.4's
+   owner's call, unchanged) and *this build cannot measure this item* (`theme` / `native audio`), and honest
+   silence is the first of them. This is the same method the two previous cards used (v1.9.26 and v1.9.27, §833.3:
+   *"no new vocabulary, therefore no owner's call was needed"*). **Coining a word for it would be the owner's call**
+   — the chip's dictionary is his (§634.2, the dictionary in `CHANGELOG.md` 1.9.26) — but it is not needed here, so
+   no question is put to him, nothing is sent to the orchestrator on that account, and this card does not stop on
+   one. What is spent on the silent passage is §515.4's rule read one step further: the item's own measurement
+   decides the word, and its own measurement says *real samples, currently flat*, not *no samples*.
+6. **Fix acceptance criteria (card `t_4253898e`).** The term must be an **evidence-based per-item fact**, never a
+   count of quiet frames; no timer, no frozen word, no masking.
+   1. **The term.** While the transport is playing, whether a capability word may be worn must be decided for the
+      item in hand by whether **this item's** samples are readable — a question the engine already has an answer
+      to for the item, observed per item at the load's own refusal of cross-origin sample access (`3813-3816`),
+      with the build-level absence (a graph that could not be built, `graphFailedReason` set at `3672` and
+      `3703`, read through `measuringPathForTheItem`, `1579`)
+      read as it is today. That register is this item's, and is cleared where this item's other registers are
+      (`startWeb`, `2643-2645`), so it can never answer for another item. `zeroFrames >= ZERO_FRAMES_BEFORE_THEME`
+      (`3773`) may no longer *by itself* end the third word while playing.
+   2. **The behaviour.** On an item whose samples the browser will hand over, every all-zero analyser read is that
+      item's **own silence**: the word stays `spectrum` for as long as the transport plays and the samples are this
+      item's, and the reason line names the item's own silence — never a tainted cross-origin stream
+      (`silenceReason`, `3784-3790`).
+   3. **`theme` keeps its reach, unchanged.** The case where the stream genuinely is not handed over still reads
+      `theme` while playing (the second run of `test/chip-word-browser.test.ts` covers it), so the legitimate
+      statement is not deleted by this fix. Nothing is pinned or hidden: the word is recomputed from current facts
+      on every status event.
+   4. **No clock, no budget, no frozen word.** §515.1's rule (v1.9.24) holds: no elapsed-ms, retry, poll or frame
+      budget is added as a term, and no word is frozen across a transition to keep a screen quiet.
+   5. **Fail-before and green on the same cold repro, muted.** `docs/repro/t_13b5cca0/silent-passage-probe.mjs
+      --fixture silent-gap` and `--fixture quiet-only` (headless Chrome, `--mute-audio`, no simulator). Before
+      (fixed reverted): the shipped run's own record — `logs/verdict-silent-gap.json`, `theme` at `+10903 ms`.
+      After: the silent-gap run's word sequence is `spectrum…` → `spectrum` for every read (`themeAtMs: null`)
+      with the element playing and the analyser all-zero across the 5.000 s, and the `quiet-only` control's word
+      sequence is unchanged (`spectrum…`, then `spectrum` across all 219 reads). Raw command output and both logs
+      on the fix card.
+   6. **Scope and release discipline.** Web path only: no native file, `test/engine-native.test.ts` untouched,
+      §515.1's silence verdict and §515.4's word stand as the owner set them. Unreleased: no version bump, no tag,
+      no artifact, `CHANGELOG.md`'s release heading untouched.
+7. **What this entry does not decide, named so the next card confronts it instead of inheriting it.** (a) The
+   native path's silence verdict (§515.1: this item's tap reading silence ends the third word) has the same shape —
+   a reading with no energy spent as a verdict about the samples — and the tap has no equivalent *per-item read*
+   fact; it is the owner's own call of 2026-10-16 and is deliberately **not** re-litigated here. (b) In the same
+   family, `t_9c379c56`'s second finding (a suspended `AudioContext` reaching the capability word through the
+   frozen rule, with no silent audio at all) is unrepaired and is not this entry's subject. (c) Post-fix,
+   `docs/verification.md` §30.5.4's sentence (*"`theme` is still reachable while playing — by design, on an item
+   whose own samples have answered"*) is true only in its narrowed sense — *answered that the browser will not hand
+   them over* — and the fix's own record should say so rather than leave the wider reading standing.
+8. **Nothing shipped, and nothing was implemented.** This card is a decision in writing: `DECISIONS.md` only, no
+   version bump, no tag, no artifact, `CHANGELOG.md`'s release heading untouched, `src/` and `test/` untouched (the
+   fix, with its fail-before proof, is card `t_4253898e`; the release that may carry it is a later card, per the
+   owner's rule of 2026-10-16).
+

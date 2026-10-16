@@ -460,4 +460,11 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The same flash is gone on the web page and the installed web app, in the word it wore there: a song whose bars were still on their way no longer says the browser cannot read that song either. A song the phone or the browser really cannot read still says so — "native audio", or "theme" on the web — before and after a pause.',
       ],
     },
+  {
+      version: '1.9.28',
+      date: '2026-10-16',
+      items: [
+        'The player bar at the bottom keeps one size: it no longer grows or shrinks when the spectrum picks up the song or loses it.',
+      ],
+    },
   ];

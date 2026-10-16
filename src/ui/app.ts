@@ -3434,7 +3434,11 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   if (shell.barChip.title !== detail) shell.barChip.title = detail;
   const reason = abnormal ? detail : '';
   if (shell.barReason.textContent !== reason) shell.barReason.textContent = reason;
-  shell.barReason.classList.toggle('hidden', !abnormal);
+  /*
+   * v1.9.28 — **the reason line is not shown any more.** Showing it added a row to this grid, so
+   * the whole bottom container grew and shrank every time the spectrum was picked up or lost — the
+   * owner's report. The text and the chip's tooltip still carry the diagnostic; the bar keeps one size.
+   */
 
   shell.lyrics.position(positionMs);
 }

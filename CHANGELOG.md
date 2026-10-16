@@ -306,3 +306,7 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - Pressing play again after a pause no longer flashes "native audio" on the player bar — and neither does coming back to the app from the background. For a moment the bar said the app could not read the song that was playing, when the only thing true about it was that the phone had not answered yet about that song. It says "spectrum…" until the phone answers, and then "spectrum", exactly as it does when a song starts.
 - The same flash is gone on the web page and the installed web app, in the word it wore there: a song whose bars were still on their way no longer says the browser cannot read that song either. A song the phone or the browser really cannot read still says so — "native audio", or "theme" on the web — before and after a pause.
+
+## 1.9.28 — 2026-10-16
+
+- The player bar at the bottom keeps one size: it no longer grows or shrinks when the spectrum picks up the song or loses it.
