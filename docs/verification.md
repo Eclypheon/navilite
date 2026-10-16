@@ -3968,3 +3968,162 @@ release-body commands as one script), `fail-before-engine-native.txt` (the 34/36
 `build-c.txt` (the fresh build of `03eb486`), `ipa-index.js` (the chunk out of the IPA) and `control/` (the chunk
 out of the `v2.0-beta` IPA).
 
+## 34. v2.0.0-beta.3 — the release that carries the scroll fix (2026-10-17)
+
+His report, in his words: *"tap it again and you get the spectrum… it scrolls upwards a random chunk… i'm not able
+to tap again when the song title is on the screen to go into spectrum view."* One cause, one level below the key
+the brief suspected: the scroll target was the **first row the registry ever saw** for the song, and a view that
+paints its list twice inside one route render — the playlist page draws the phone's manifest and then the server's
+answer; search repaints on every submit — leaves that first batch registered and **detached**, at a `(0,0,0,0)`
+rect. A zero rect sits *above* the scroll box, so the first tap jumped the list to its top and the app never read
+the row as visible, so the second tap re-ran the scroll branch and never opened the spectrum view. This is a
+rebuild of the same beta train carrying that fix and nothing else. The sweep for this cut, run rather than assumed:
+
+```
+$ git log --oneline v2.0-beta.2..b3ccd9c        # everything unreleased on main, before the cut
+b3ccd9c release(v2.0.0-beta.3): the tap lands on the row the list shows as playing
+961ed82 fix(beta-3): the tap scrolls to the row the view marks — one move, clamped at the list's ends, and the second tap on visibility
+24f1547 docs(beta-3): the tap scrolls to the row the view marks — the ghost row in ctx.rows is why it walked up and why the second tap died
+eadcf73 docs(v2.0.0-beta.2): the release verification record — the counts, the fail-before, the plist read back out of the IPA, and the shipped bytes against the beta he has
+```
+
+**One `src/` commit was unreleased, and it is the fix** (`961ed82`, card `t_691c88c8`, verified SHIP by card
+`t_d20b6cd9` against the shipped `v2.0.0-beta.2` bytes). The two commits above it are docs only — the beta.2 release
+record and the beta-3 design. **The duration fix is not carried again**: it shipped as `v2.0.0-beta.2` (card
+`t_a7f2fc72`, verified `t_98bc3da6`, SHIP) and `main` already contains it. Nothing else is in this cut: no feature,
+no refactor, no opportunistic fix.
+
+**No production code changed in this cut.** The diff of `b3ccd9c` is eight files, all version bookkeeping and the
+release's own invariants: `package.json` + the lockfile root (`2.0.0-beta.2` → `2.0.0-beta.3`),
+`android/app/build.gradle` (`versionCode 50 → 51`, `versionName 2.0.0-beta.3`), `project.pbxproj`
+(`CURRENT_PROJECT_VERSION 51 → 52`, `MARKETING_VERSION` — both places), `src/ui/changelog.ts` + `CHANGELOG.md` (the
+same two items, same order), `test/changelog.test.ts` (the release check's version list) and `DECISIONS.md` (the
+beta-3 design entry marked *released as v2.0.0-beta.3*, plus the two invariants the release rests on — one source of
+truth for the current row, and the second tap keyed on visibility rather than on centring). **`src/` is
+byte-for-byte `961ed82`**: not one line of player code is touched by the cut that ships it.
+
+**The version reads `2.0.0-beta.3` in the package and `2.0-beta.3` in the list he reads**, the same split `v2.0-beta`
+and `v2.0.0-beta.2` used. Two deliberate divergences, both recorded rather than silent:
+
+1. **`MARKETING_VERSION` is non-numeric** (`2.0.0-beta.3`), as in §33: this cut has to read the release's own
+   version back out of the IPA (`docs/VERSIONING.md` §4), so the plist cannot read a bare `2.0.0`. Xcode accepted it
+   and built it (§34.3.1) and the plist reads it back (§34.3.3). The installer consequence is unchanged from
+   §33.4.4 and is restated in §34.4.5 rather than hidden.
+2. **The artifact carries the name the card requires, not the name the build script derives.**
+   `tools/build-ios-ipa.sh` wrote `Navilite-2.0.0-beta.3-unsigned.ipa` (from `package.json`); it was moved to the
+   exact path `artifacts/Navilite-2.0.0-beta-3-unsigned.ipa`, the same correction §33.0.2 made for beta.2. The bytes
+   are the build's bytes — nothing was rebuilt, edited or renamed inside the archive (§34.3.2) — and no other `.ipa`
+   was written by this cut.
+
+### 34.1 What was run, and the counts for this cut
+
+```
+$ npm run typecheck                         # tsc --noEmit — rc=0, prints nothing
+$ npm test                                  # 267 tests, 267 pass, 0 fail, 0 cancelled, 0 skipped, todo 0, 40.0 s
+$ node tools/mock-subsonic.mjs --port 4651 --stress --dist dist      # the fixture, this cut's dist/
+$ node tools/container-tap-check.mjs --url http://127.0.0.1:4651 --json harness.json   # 91 ok, 0 FAIL, rc=0
+$ npm run cap:sync                          # patch:native + one vite build + cap sync (iOS and Android)
+$ bash tools/build-ios-ipa.sh               # one xcodebuild → §34.3
+```
+
+**One `vite` build, one `xcodebuild`, one `npm test`, one `typecheck`.** The tap harness ran twice — once inside
+`npm test`, where `test/container-tap.test.ts` spawns it against its own mock and asserts the numbers, and once by
+hand against this cut's `dist/` for the 91 ok / 0 FAIL above — and no other harness was run for this cut. **The
+`cap:sync` was run by hand before the build script**, as the card requires: the beta.2 cut shipped an unsynced
+bundle once (the IPA carried the old JS under the new version stamp), and §34.3.2 is the check that this one did
+not. No new verification scaffolding was written: the harness that owns this rule is the one `961ed82` extended.
+
+### 34.2 Fail-before: quoted from the verification of the fix, not re-run here
+
+Card `t_d20b6cd9` ran the same harness against the **shipped `v2.0.0-beta.2` bytes** (an isolated worktree at
+`03eb486`) with the same fixture: **15 checks red, exit 1**, reproducing both halves in his shape — the ghost scenes
+never moved the list (0 scroll events), never centred, and the second tap never reached `#/now`; the first-row case
+walked up twice (`600 → 120 → 0`, the second tap still in the scroll branch); the album and search cases likewise.
+The old target was identified by arithmetic: `600 + (0 + 0) − 480 = 120`, measured at exactly 120 — the detached
+zero-rect row. After the fix: exit 0, no skips, one scroll event per centring tap and zero on the tap that opens.
+
+**This cut does not re-run it.** What this cut has to prove is the *after* side on the bytes that ship, which is
+§34.3; the before side is a property of `v2.0.0-beta.2`, which has not changed and is measured in
+`docs/verification.md` §33's own artifact.
+
+### 34.3 The artifact, and the bytes that ship
+
+**34.3.1 The build.** `xcodebuild -configuration Release -sdk iphoneos`, unsigned, one run: `** BUILD SUCCEEDED **`
+with `builtin-validationUtility … -validate-for-store` in the log, and the script's own read-back —
+`app version 2.0.0-beta.3 (52), UIBackgroundModes[0]=audio`.
+
+**34.3.2 The bundle inside the archive is this commit's build, not a stale sync.** This is the failure the card
+warns about, so it is measured on the archive rather than asserted: `npm run cap:sync` copies `dist/` into
+`ios/App/App/public`, and the IPA's copy of that directory is what the installed app runs.
+
+```
+$ shasum -a 256 dist/assets/index-Ddhd1zjp.js
+82aaaf5c86068a075051635a0d6ad1c72dec2f2ce6755f29312fcf41a0636450  dist/assets/index-Ddhd1zjp.js
+$ unzip -p artifacts/Navilite-2.0.0-beta-3-unsigned.ipa Payload/App.app/public/assets/index-Ddhd1zjp.js | shasum -a 256
+82aaaf5c86068a075051635a0d6ad1c72dec2f2ce6755f29312fcf41a0636450  (the same chunk, out of the archive)
+$ cmp <chunk out of the IPA> dist/assets/index-Ddhd1zjp.js     # silent — identical byte for byte
+$ grep -c "takes you to the right row again" <chunk out of the IPA>   # 1 — this release's own words are in it
+$ grep -c '\.row\.playing' <chunk out of the IPA>                     # 1 — the fix's own selector is in it
+$ unzip -p …index.html | grep -o 'index-…\.js'  → index-Ddhd1zjp.js   # the archive's index.html names it
+$ unzip -p …public/sw.js | grep BUILD_ID        → BUILD_ID = 'b3ccd9c'  # the release commit
+```
+
+So the version stamp, the fix and the new "What's new" entry are all in the bytes that ship, and the archive names
+the commit `b3ccd9c` itself.
+
+**34.3.3 The artifact itself.**
+
+```
+artifacts/Navilite-2.0.0-beta-3-unsigned.ipa
+sha256 9fe3d9724b198c7e6e5861581d54b9cb39a0690103d9842e55bfc457d9202241
+1,032,923 bytes · unsigned on purpose (docs/ios-sideload.md)
+
+unzip -p …Info.plist | plutil -p -
+  CFBundleShortVersionString => "2.0.0-beta.3"
+  CFBundleVersion            => "52"
+  CFBundleIdentifier         => "app.navilite"
+  UIBackgroundModes          => [0 => "audio"]
+```
+
+**The tag and the commit.** `git tag v2.0-beta.3` (annotated, *"v2.0.0-beta.3 — the tap lands on the row the list
+shows as playing"*) is on **`b3ccd9c`**, the commit the IPA was built from; `main = origin/main = b3ccd9c`; the tag is
+contained in `main` (`git merge-base --is-ancestor v2.0-beta.3^{commit} main`) and `git branch --contains v2.0-beta.3`
+prints `main` and nothing else; `git status --porcelain` was empty before the build and after it. Nothing in the
+delivery guard's shipped paths moved after the release commit:
+
+```
+$ git log --oneline b3ccd9c..HEAD -- src public index.html vite.config.ts capacitor.config.ts ios/App/App package.json
+                          # (no output — this record is the only commit after the build, and it is docs only)
+```
+
+### 34.4 Not verified here, and not claimed
+
+1. **His phone.** There is no device and no simulator boot in this cut. That the tap on his build now puts the
+   highlighted row in the middle and that the second tap opens the spectrum is a claim about the same code, and the
+   two taps on the installed build are what settle it — the verification card's job, not this one's.
+2. **Acceptance row 9 is unexercised.** A late paint that inserts rows *between* the two taps (a partially
+   downloaded playlist) has no scene in the harness; it is bounded structurally (at most one write per tap) but not
+   measured. Recorded here because `t_d20b6cd9` could not exercise it either.
+3. **Chrome's input pipeline only.** Everything in §34.1 is Chrome at 393 × 852 against loopback, muted. WebKit's
+   own gesture handling and the iOS round trip are not measured by anything in this cut.
+4. **Android.** No APK is built for this cut. `versionCode 51` / `versionName 2.0.0-beta.3` are set so the next APK
+   carries them, and nothing here is evidence about the APK.
+5. **`2.0.0-beta.3` as an `Info.plist` version string — measured for the build, flagged for the installer**, exactly
+   as §33.4.4: iOS's own install decision is `CFBundleVersion`, which moves **51 → 52**; a sideloader that compares
+   the *marketing* string as semver reads `2.0.0-beta.3` as below the `2.0.0` on his phone, and this cut does not
+   settle which sideloader he uses. The numeric-marketeting one-line change and rebuild remains available.
+6. **The adversarial `wanted === scrollTop` probe from `t_d20b6cd9` is quoted, not re-run here**: Chrome snaps a
+   written offset to a whole CSS pixel (611.6666 reads back 612) while this app's rows are fractional at dpr 3, and
+   forcing that branch on the real app still opened `#/now`. The equality is only reachable at the ends of a list,
+   where the clamp is an integer.
+7. **This record is not the delivery.** No `.greenlit` marker was written and nothing was handed over: Sage's
+   verification card `t_ded659fb` is gated on this one, its SHIP writes the marker, and the orchestrator hands the
+   IPA over. The artifact sits in `artifacts/` with no marker beside it.
+
+Raw runs (this machine's agent scratch,
+`/Users/neokester/.hermes/profiles/nerd/cache/scratch/runs-beta3/`): `commit-msg.txt` (the release commit's body),
+`typecheck.txt`, `npm-test.txt` (the 267/267), `cap-sync.txt` (the vite build and both platform syncs),
+`mock.log` (the fixture), `harness.txt` and `harness.json` (the 91 ok / 0 FAIL, with the scroll counts and the
+Rects behind every number), `ipa-build.txt` (the `xcodebuild` log and the script's own version/build read) and
+`ipa-index.js` (the chunk out of the archive, byte-identical to `dist/`).
+
