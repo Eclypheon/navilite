@@ -436,4 +436,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'A song\'s row now has a name for the screen reader. The row\'s spoken name was written before the title it carries had been filled in, so with VoiceOver a row announced itself as "Play, downloaded" — no song name — while the title was right there on the screen. The name is written after the title now, every time the row is drawn.',
       ],
     },
+    {
+      version: '1.9.25',
+      date: '2026-10-16',
+      items: [
+        'Skipping out of a loud passage no longer leaves the bars flat. On the song you landed on, the bar could read "native audio" while music was plainly playing, and the spectrum stayed dark for the rest of the track — the app had stopped reading the song you were on. The bars now follow the song that is playing from the moment you land on it.',
+        'The spectrum is drawn only from the song you are hearing. What is on the screen is the shape of the song that is playing, never a leftover of the one you just left.',
+      ],
+    },
   ];
