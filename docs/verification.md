@@ -2079,3 +2079,87 @@ foreign library, and `pager-kill-pre.log`, the failure), the post-change squat p
 `plumbing-probe.mjs`'s output, and the ports the suite's own mocks listened on. The ten `npm test` logs
 themselves and the three throwaway scripts are agent scratch and are not attached; every number this section
 quotes is above, and the ten runs' own summary blocks are reproducible in 7 minutes with `npm test`.
+
+## 22. v1.9.23 — the repaired row reaches the screen he photographed, and the queue with it (2026-10-16)
+
+The release the owner installs: it carries bug A (the spectrum after a rapid skip, verified on v1.9.22's code
+and unchanged here — no `src/player/engine.ts`, no Swift file is touched) and bug B, which v1.9.22 fixed in the
+*store* and nowhere else. This section is the record of bug B's second half.
+
+### 22.1 The finding this release answers
+
+`repairMetadata` filled the store, and nothing that draws from it: the row's title/sub-line/time were written
+once, at build (`songRow`), and the only store-driven row repaint was the download glyph — so opening
+**On this phone** drew exactly the owner's screenshot (blank titles, `--:--`) and kept drawing it until he left
+the screen and came back. The queue held the same stale objects (`items` is built from that paint and handed to
+`queue.select`), and the bar prints them: its title is `currentSong`, and its total is
+`status.durationMs || (song.duration ?? 0) * 1000` = `0:00` for a request that carried no duration.
+
+### 22.2 What changed
+
+| file | change |
+| --- | --- |
+| `src/ui/app.ts` (`songRow`) | the row's title/sub-line/time are **nodes**, and `paintText` re-reads them from `ctx.offline.songFor(id)`; registered through the same store-repaint list the download mark always used (the list is renamed `storeRepaints`, since it no longer paints only marks) |
+| `src/ui/app.ts` (`renderRoute`) | the store listener also calls `ctx.queue?.applyMetadata((id) => ctx.offline?.songFor(id) ?? null)` — on **every** route, because the repair's second pass lands after the list it started on may be gone |
+| `src/state/queue.ts` (`applyMetadata`) | fills the queue's own copies of its songs in place (the objects the rows were drawn from are the objects it holds), and redraws through `onChanged` — a paused queue emits no status events |
+| `src/state/offline.ts` (`songFor`) | the store's answer for one id, in the shape `downloadedSongs()` draws from (`rowAsSong` is now that one mapping, used by both) |
+| `src/state/song-metadata.ts` (new) | `fillSong(target, from)` — **the one rule both callers fill through**: empty fields only, so a song the library answered with is never overwritten and a row nobody can name yet keeps `--:--` and an empty title instead of its id or a zero |
+| `src/state/offline.ts` (`repairMetadata`) | B4's two loose ends: a lookup that **failed** is forgotten again (`askedServer.delete`) so the next pass in the session retries it — which is what the v1.9.22 comment already claimed — and the sweep is capped at `SERVER_ASKS_PER_PASS` = 20 rows a pass, in row order, so one visit with the manifests gone is 20 round trips rather than 497, and the next pass names the next batch |
+
+### 22.3 The fail-before, on the screen path (the reading the SEND BACK asked for)
+
+The four new browser checks were run against a **pre-fix build** of the same tree — the same harness, the same
+fixture, the same assertions:
+
+```
+$ git checkout 51c7d82 -- src/ui/app.ts src/state/offline.ts src/state/queue.ts
+$ npx vite build            # tsc is skipped on purpose: the new test file names APIs this tree does not have
+$ node --test test/offline-views.test.ts
+```
+
+| check | pre-fix reading (`dist/assets/index-CYvYhKJ2.js`) | post-fix reading (`dist/assets/index-Bnzfna-r.js`) |
+| --- | --- | --- |
+| the rows a 1.9.19 build wrote, on `#/downloads`, no navigation | `4 rows · [["","--:--"],["","--:--"],["","--:--"],["","--:--"]]` after 5 s of waiting | `3 rows named by the record · [["海底、月明かり","ヨルシカ · 盗作","3:34"], …]` in 2 ms |
+| a row nobody can name | 4 unnamed rows (nothing is named at all) | 1 unnamed row: `["", "--:--", "Play , downloaded"]` — no id, no invented length |
+| the bar of the track tapped while its row was blank, list since left | `"" → ""` | `"" → "Track 1 · 110/330/1320 Hz"` (the library's own name for it) |
+| …and its total | `0:00 → 0:00` | `0:00 → 0:20` (its real 20 s) |
+
+So the owner's symptom is reproduced on the screen path *and* fails there before the fix — not merely an absent
+method (the v1.9.22 evidence's weakness). After the fix the same command exits 0, with the four checks green.
+
+### 22.4 The suite, the type check and the artifact
+
+| check | reading |
+| --- | --- |
+| `npm run typecheck` | exit 0 |
+| `npm test` (full suite, once, on this build) | **255 tests, 255 pass, 0 fail, 0 skipped** in 38.7 s — 6 more tests than 1.9.22's 249 (4 new in `test/offline-repair-visible.test.ts`, 2 in `test/offline-browse.test.ts`); `test/pager.test.ts` green in 38.2 s (t_744cba0b's port collision is fixed and this run is the first where a pager failure would have been a real signal) |
+| `test/offline-views.test.ts` | green in 31.0 s: the harness's own `checks` all ok, including the four above |
+| `artifacts/Navilite-1.9.23-unsigned.ipa` | `CFBundleShortVersionString` **1.9.23**, `CFBundleVersion` **44**, `UIBackgroundModes[0]` audio |
+| the bytes in the IPA | `Payload/App.app/public/assets/index-Bnzfna-r.js` is **byte-identical** to `dist/assets/index-Bnzfna-r.js` (sha256 `bb57b25b…0d88`), and it carries `applyMetadata`, `songFor` and the 1.9.23 changelog sentences; the version list in `test/changelog.test.ts` and both changelog copies carry 1.9.23 |
+
+Version files touched, per `docs/VERSIONING.md` §3: `package.json` + `package-lock.json`, `build.gradle`
+(`versionCode 43`, `versionName 1.9.23`), `project.pbxproj` (`MARKETING_VERSION = 1.9.23` and
+`CURRENT_PROJECT_VERSION = 44`, both in two places), `src/ui/changelog.ts`, `CHANGELOG.md`,
+`test/changelog.test.ts`.
+
+### 22.5 Not verified here, and not claimed
+
+1. **No device and no simulator.** Both new readings are browser readings of the app's real code path (Chrome
+   at 393 × 852, the shipped `dist/`), and the *queue* reading is driven so that only the queue's own copy can
+   fill the bar (a row only the server can name, every API answer held, the list left before the answer lands).
+   The owner's install is the acceptance for the real thing — see the card's summary for what to do on the
+   phone.
+2. **The bar's artwork and the shell's palette are not repainted by a repair.** `updatePlayerBar` rebuilds the
+   bar's cover only when the *song* changes, and `syncPalette` keys on the song id, so a `coverArt` that
+   arrives with the repair does not re-draw the cover or re-theme the shell for the track already playing; the
+   title, the sub-line and the total do. This release claims the title and the total (the card's acceptance)
+   and nothing about the artwork.
+3. **The 2 s hold in the bar case is a harness lever, not the phone's timing.** On the phone the window is the
+   round trip the repair's server pass is waiting on; the harness makes it deterministic with `/__slow`.
+4. **The store's row fill (`fillFrom`) and the shared `fillSong` are two shapes of one rule**, not one
+   function: the row's fields are `durationSec`/`coverArt` against a `Song`'s `duration`/`coverArt`. Both are
+   documented as "empty fields only", and `test/offline-repair-visible.test.ts` pins the `Song` one.
+5. **The cap's number is a judgement, not a measurement.** 20 rows a pass (~2 s on a tailnet) was chosen so one
+   visit cannot fire hundreds of round trips while the work still finishes; 497 rows in the owner's case are
+   named twenty at a time, over passes.
+
