@@ -322,3 +322,8 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - A song no longer changes length under you. The track that is 3:30 stays 3:30 after you seek, and at the end: it used to read 70:01 the moment you dragged the time bar, because the phone's own guess at the length of an Opus file was believed over the length the song itself carries. Every Opus track in your library was affected that way.
 - The song after it plays by itself again. At the end of one of those tracks the app took the end for the music stopping on its own, so the queue stayed where it was instead of moving on. The next song now follows on.
+
+## 2.0-beta.3 — 2026-10-17
+
+- The song in the bottom bar takes you to the right row again. Tapping it used to throw the list upward by a random chunk — often all the way to the top — and the song you asked for was left wherever it landed. The list now moves to the row it is showing as the one playing, and puts that row in the middle of the screen.
+- And a second tap gets you the spectrum again. On a playlist you have downloaded, the second tap used to nudge the list and go nowhere at all: it now opens the spectrum for that song whenever that song's row is on the screen. When the row is already on the screen, one tap goes straight there; and at the top or the bottom of a list, where the app cannot put the row in the middle, the tap takes you to the spectrum as well.

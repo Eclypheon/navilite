@@ -485,4 +485,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The song after it plays by itself again. At the end of one of those tracks the app took the end for the music stopping on its own, so the queue stayed where it was instead of moving on. The next song now follows on.',
       ],
     },
+    {
+      version: '2.0-beta.3',
+      date: '2026-10-17',
+      items: [
+        'The song in the bottom bar takes you to the right row again. Tapping it used to throw the list upward by a random chunk — often all the way to the top — and the song you asked for was left wherever it landed. The list now moves to the row it is showing as the one playing, and puts that row in the middle of the screen.',
+        'And a second tap gets you the spectrum again. On a playlist you have downloaded, the second tap used to nudge the list and go nowhere at all: it now opens the spectrum for that song whenever that song\'s row is on the screen. When the row is already on the screen, one tap goes straight there; and at the top or the bottom of a list, where the app cannot put the row in the middle, the tap takes you to the spectrum as well.',
+      ],
+    },
   ];

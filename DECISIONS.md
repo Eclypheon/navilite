@@ -1101,7 +1101,7 @@ it it suddenly becomes 70:01 long — not sure how this error even came about."*
 
 ---
 
-## The row a tap scrolls to is the row the view marks on the screen — one move, clamped, and the second tap on visibility, 2026-10-17 (design for beta-3 — card `t_f32b823f`, implemented by `t_691c88c8`, unreleased)
+## The row a tap scrolls to is the row the view marks on the screen — one move, clamped, and the second tap on visibility, 2026-10-17 (design for beta-3 — card `t_f32b823f`, implemented by `t_691c88c8`, released as v2.0.0-beta.3)
 
 The design is `docs/design-beta-3-scroll.md`. This entry records the one decision it makes and the two
 claims it corrects. **Nothing is shipped by this card**: no `src/`, no version, no tag, no artifact.
@@ -1162,3 +1162,37 @@ claims it corrects. **Nothing is shipped by this card**: no `src/`, no version, 
    simulator, no build — the fail-before on the shipped bytes is card `t_691c88c8`'s first job
    (`docs/design-beta-3-scroll.md` §4.2), and if it does not reproduce the two symptoms *in his shape*,
    the diagnosis is incomplete and must come back to the design rather than be fixed around.
+
+---
+
+## The row a tap scrolls to: the row the drawn view marks, and the second tap on visibility rather than on centring, 2026-10-17 (card `t_7ec168d4` — released as v2.0.0-beta.3)
+
+The design is `docs/design-beta-3-scroll.md` (card `t_f32b823f`), the fix is `961ed82` (card `t_691c88c8`),
+verified by `t_d20b6cd9` (SHIP) on the shipped `v2.0.0-beta.2` bytes as the before-side. This cut carries that
+fix and nothing else. Two invariants are what the release rests on; both are read out of the shipped code, and
+both are what a later change must not undo.
+
+1. **One source of truth for the current row.** `currentRowInView(shell)` is
+   `shell.view.querySelector('.row.playing')` — the mark the *drawn* list itself carries, first in document
+   order, the same class `styles.css` draws and both harnesses read. The registry read that used to decide the
+   target (`[...ctx.rows.get(id)][0]`) is gone from the tap path: it kept rows a view had **detached when it
+   painted its list a second time**, and a detached row's rect is `(0,0,0,0)`, which sits *above* the scroll box
+   — that one fact is the whole of both symptoms he reported. `ctx.rows` keeps its job of *marking* rows and
+   stops being a way to *find* one. The rejected alternative — keep the registry read and filter `isConnected` —
+   was deliberately not taken (`docs/design-beta-3-scroll.md` §3.1): it leaves two sources of one fact, which is
+   the shape this change exists to delete.
+2. **The second tap keys on visibility, not on centring.** The rule as shipped: no row for the song in this view
+   → open the now screen; the row is on screen (`visibleInBand`: inside the scroll box **and** clear of the
+   player bar's top edge, with a hidden bar handled explicitly, since `display: none` gives a zero rect) → open
+   with **no movement at all**; the list cannot move the row any closer (`centreOffset` already returns the
+   offset the list is at — the first or last row, or a list shorter than the box) → open; otherwise **exactly
+   one** clamped write derived from the row's own rect, and no navigation. Nothing keys on "did the row end up
+   centred", which is the difference that makes the ends of a list work: an end-of-list row the list cannot
+   centre still opens, the honest form of his own rule ("as long as it is on screen"). No timer, no retry, no
+   second move from one tap.
+3. **Released as v2.0.0-beta.3** (card `t_7ec168d4`): the version bump, the "What's new" entry, the tag
+   `v2.0-beta.3` and the artifact in one commit. Unreleased on `main` when the cut was made: the fix `961ed82`
+   and the two docs commits above it (`24f1547`, `eadcf73`) — no feature and no refactor rides along, and the
+   duration fix stays where it shipped (`v2.0.0-beta.2`) instead of being carried a second time. Proof on the
+   harness that owns this rule (`tools/container-tap-check.mjs`, pinned in `npm test` as
+   `test/container-tap.test.ts`) and on the bytes that ship: `docs/verification.md` §34.
