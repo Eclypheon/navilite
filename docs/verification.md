@@ -2246,3 +2246,262 @@ the next release rebuilds and re-stamps it.
    single one; `src/ui/app.ts` was untouched by it. If that card re-applies the same swap, the anchor will
    no longer match — the order is already `paintText` then `paintMark`.
 
+
+## 24. the spectrum falls back to native audio on a track change — the diagnosis (2026-10-16, unreleased, no code change)
+
+Task `t_183f4708`, the look-before-you-leap gate for the owner's report on the installed build (v1.9.22/v1.9.23):
+
+> *"the spectrum still doesn't work most of the time when i go to different tracks, it defaults to native audio and
+> turns spectrum off. … it could be because songs are starting up really fast now that they are starting from my
+> phone's local storage after being downloaded so the spectrum attaching can't keep up. sometimes it appears the
+> attach then immediately detach."*
+
+**No production code is changed by this section, and no version is bumped.** It is the diagnosis the implementing
+card (`t_bec7b1bd`) is gated on. Everything below is either a line of this repo's own source or a reading from the
+probe described in §24.5.
+
+### 24.1 The finding, in one paragraph
+
+The engine's answer to *"can this track have a spectrum?"* is not a fact about the track; it is a **verdict written
+by a clock**. Five of the six places that turn the chip to *native audio* are reached by spending a budget of
+milliseconds (396 ms, then 1000 ms per re-check, then a 5000 ms retry), and one of them asks whether the tap has
+*"answered for this item"* by reading `frame.frames` — a counter the tap keeps for the **life of the app process**,
+not for the item. On any track after the first one that ever produced a spectrum frame, a tap that has produced
+**nothing at all** for the new item is therefore judged to have *"answered digital silence"* after 12 polls
+(≈ 0.4 s) and the chip is switched off while the attach it is waiting for is still in flight. That is the owner's
+*"defaults to native audio"*, and it is chosen *because* the attach has not landed yet — the exact inversion the
+brief forbids. The tap itself is not broken and nothing is detached on purpose: the app's own re-attach is
+*synchronous in intent and asynchronous in fact*, and every way it can be late or refused is charged to a budget
+that ends the arming window.
+
+**Why this is not the two earlier fixes.** `a0d296e` (the paint guard) and `9a2490b` (the rapid-skip race: the
+`src/player/engine.ts` lifecycle plus the Swift install guard) both closed a **race about which item the tap ends
+up on**: a stale install attaching to the item the player had left, and an install superseded mid-await. That is
+one *cause* of the tap being off the item; both are genuinely closed (§24.4's guards are the ones that were added,
+and they hold). Neither touched the rule that turns a *late* or *refused* attach into a stated capability. So the
+earlier work is 8/8 → 0/8 on the reading it was aimed at while the symptom on his phone is unchanged: what he sees
+is not the race, it is the verdict written while the race is being won slowly.
+
+### 24.2 Every transition path, and where the analyser is attached
+
+One attach site per start, one verify per transition, one decide-to-off rule reached from six places. The URL a
+downloaded track resolves to is the local file (`src/state/library.ts:102`: `streamUrl()` asks the offline resolver
+first, so the audible load, the warm pool **and** the queue published to the native side all carry that one string,
+`src/state/queue.ts:779`, `:888`); nothing in the spectrum path treats it differently from a stream, which is the
+point of the v1.9.16 patch below.
+
+| path | why it starts | the analyser is attached at | the off-rule is reached from |
+| --- | --- | --- | --- |
+| skip next / previous | `queue.next()` `src/state/queue.ts:430` → `startCurrent()` `:603` → `engine.play` `:685` | `src/player/engine.ts:2397` (after `bridge.play()`, inside the start's `finally`-adjacent block) + verify at `:2429` | `pollSpectrum` `:2599` / `:2660` / `:2750` / `:2774`, and `attachSpectrum` `:2885`/`:2894` |
+| play-all / queue jump | `queue.play()` `:245` → `start()` → `startCurrent()` `:603` | same as above | same |
+| end-of-track auto-advance (zero gap) | `engine.onEnded` `:187` → `advance()` `:570` → `startCurrent()` `:603`; or the native boundary's own advance → `engine.adoptNativeAdvance` `:1779` | `:2397`, or `:1801` for the adopted track | same |
+| native adopt (player took the boundary while away) | `onAdvanced` → `queue.adoptNativeAdvance` → `engine.adoptNativeAdvance` `:1779-1802` | `:1801` (`attachSpectrum(track)`), arming set `:1791` | same |
+| resume / foreground | `resume()` `:1853` → `confirmPlaying` `:1874` → `startNative` `:1899`; `handleVisibility(false)` `:2084-2145` | `:2397` on a real restart, else **verify only**: `:2144` → `:2827` | same |
+| **local-file start** (a downloaded track) | identical to the row above: `library.streamUrl` returns `file://…` (`:102`), so `bridge.load`/`adopt` and `startSpectrum` all carry the file URL | `:2397`, `:1801` | same |
+
+The engine/native choice itself is not a per-path decision: it is `src/player/engine.ts:1520-1537` (`nativePlatform`
+⇒ `backend = 'native'`, and no fallback that plays, `:1526-1534`), with `startWeb` at `:2153` for the browser only.
+`startConsumers` `:2478-2529` is the only place that arms the poll, and it is reached from exactly one transition —
+`applyState('playing')` `:895-907`. **That single-entry discipline is intact and is not the defect.**
+
+### 24.3 The decision that turns the spectrum off
+
+The chip's word is `src/ui/app.ts:3356`:
+`status.spectrum ? 'spectrum' : status.spectrumArming ? 'spectrum…' : status.backend === 'native' ? 'native audio' : 'theme'`,
+and `spectrumArming` is only reported while a native track is actually playing (`src/player/engine.ts:1183`). So
+**"native audio" means exactly: `backend === 'native'`, `state === 'playing'`, `spectrumLive === false`, and the
+engine has cleared `spectrumArming`.** Six writers clear it:
+
+| # | file:line | what it is decided from | timing or capability? |
+| --- | --- | --- | --- |
+| 1 | `engine.ts:2495` | this build has no spectrum plugin at all | capability — **legitimate, keep** |
+| 2 | `engine.ts:2650` | the tap reported `itemIsCurrent === false` on `MAX_SPECTRUM_RECHECKS` (3, `:422`) sightings, one per `SPECTRUM_ORPHAN_RECHECK_MS` (1000 ms, `:387`) | timing |
+| 3 | `engine.ts:2704` | 12 zero-frames (`:360`) then `SPECTRUM_RECHECK_MS` (5000 ms, `:403`) × 3 re-checks | timing |
+| 4 | `engine.ts:2752` | **12 zero-polls (≈ 0.4 s) and `answered`** | timing, on a false input — see below |
+| 5 | `engine.ts:2778` | the tap returned the same non-silent frame 10 times (`FROZEN_FRAMES_BEFORE_THEME`, `:469`) | reading about *this item* — legitimate, keep |
+| 6 | `engine.ts:2885`, `:2894`, `:2954` | `startSpectrum` answered `false`, or rejected, plus a 5 s timer retry | **timing presented as capability** |
+
+**#4 is the one that fires on a fast start, and its input is not about this item.** `engine.ts:2749` is
+`const answered = frame.frames > 0;` — and `frames` is the tap object's own lifetime counter:
+`ios/App/App/NaviliteSpectrum.swift:605` (`frames += 1` inside `analyze()`, one `AudibleSpectrumTap` per plugin,
+`:720`), and it is reset by **nothing** — `detach()` (`:378-391`) clears `bands` and `lastFrameLive` only, and
+`unprepare()` (`:611-631`) clears the PCM ring only. `src/player/native.ts:144-145` documents the field for what it is
+(*"FFT frames the tap has produced since it started"*). The engine reads it as *"the tap has answered for the item
+playing now"*. After the first track of a session those two sentences differ by one item, and the difference is
+taken as a decision 396 ms into every later track.
+
+So the answer to the brief's question: **yes — the condition is true precisely because the attach has not landed
+yet.** It is true whenever the tap is installed on the item being played and has not yet produced a frame *for that
+item*: the window between the mix landing and the tap's first window of PCM (the tap needs a 1024-sample hop after
+`prepare`, `:119-120`, `:548-556`), and the longer window when the item is not yet rendering because the player is
+still filling (a remote stream — the *fast* local start actually shortens this one). What makes the fast local start
+worse is elsewhere: the load is a few milliseconds, so the *whole* of the transition is the attach's own latency,
+and the attach is asynchronous by construction (`begin`'s `Task`, `:798`; the `await` of the item's track list,
+`:810`; the 100 ms retry loop, `:850-857`) while the engine's judgement of it is on three clocks.
+
+And the two facts the plugin already sends about exactly this are **never read**: `attached` (`NaviliteSpectrum.swift:422`)
+and `silentFrames` (`:417`) travel the bridge (`src/player/native.ts:137-166`) into a frame object the engine
+destructures by hand (`engine.ts:2577`, `:2599`, `:2660`, `:2717`, `:2749`, `:2770`) and drops. The engine
+therefore cannot tell *"no tap at all"* from *"a tap on an item the player has left"* — both read
+`itemIsCurrent === false` (`:432`: `item != nil && item === player?.currentItem`) — and it describes both on screen
+with the orphan branch's sentence, *"the tap is on the item the player has moved off"*, which is false in the first
+case.
+
+### 24.4 attach-then-immediately-detach, in order
+
+**Who detaches.** Nothing in `src/` ever asks for it: `NativeBridge.stopSpectrum` (`src/player/native.ts:1447`,
+which is the only caller of `NaviliteSpectrum.stop`, `:866-872`, whose body is `spectrum.detach()`) has **no caller
+in the application** — the engine detaches the tap nowhere, and `disarmConsumers` (`engine.ts:2545-2557`) is
+explicitly the place that does *not*. The detach the owner sees comes from three native places:
+
+1. **`attach`'s own prologue** — `NaviliteSpectrum.swift:263`, the first statement after `carriesOurTap` returns
+   false (`:348-352`). `attach` is reached from `install` (`:835`), and `detach()` takes the mix off `self.item`
+   (`:379-381`), zeroes the published bands and forgets the item and the player. So *every* install on a different
+   item is a detach first. With the v1.9.22 re-tests in place (`:833`, both the generation and
+   `player.currentItem === item` re-read after the await) the item being stripped is no longer the playing one, so
+   this is now the harmless half of what it was — but the *sequence* the owner describes is this sequence, and it
+   is the mechanism by which a request that arrives at the wrong instant (see 3) leaves nothing attached.
+2. **The vendor plugin's own slot lifecycle** — `fillSlot` unloads before it preloads
+   (`src/player/native.ts:791-808`), and `RemoteAudioAsset.unload` (`node_modules/@capgo/capacitor-native-audio/ios/Sources/NativeAudioPlugin/RemoteAudioAsset.swift:261-275`)
+   drops `players = []` and the items with them. The tap's item goes away with it. **No code in this app performs
+   that detach and nothing in the app observes it** — the only trace is the next frame's `itemIsCurrent: false`,
+   which is the same value as "there was never a tap".
+3. **The plugin's refusal**, which is not a detach but is read as one: `NaviliteSpectrum.start` looks the playing
+   slot up by the id the *bridge* passes (`src/player/native.ts:1436-1440`, `assetId: audibleId`), and a slot that
+   has no loaded item at that instant is a **rejection** (`NaviliteSpectrum.swift:763-765`). `NativeBridge.startSpectrum`
+   turns every rejection into `false` (`src/player/native.ts:1443-1445`). The load is exactly such a moment —
+   `fillSlot` unloads, then preloads, `src/player/native.ts:791-808` — and the engine issues its requests *into*
+   that window: one install at `engine.ts:2397` right after `bridge.play()`, one verify at the close of the load
+   (`:2429`), and one more per orphan sighting (`:2656` → `:2849-2853`).
+
+**Why the re-attach loses.** Because it is not superseded, it is refused and then *charged to a budget*:
+
+- `verifySpectrum` ignores its own answer entirely (`engine.ts:2850-2853`: `.then(started => settleSpectrumInstall(serial, started === true))`
+  — the boolean is used for nothing else), while the sighting that issued it has already spent a re-check
+  (`:2646`). Three refusals in ~2 s are indistinguishable from three real failures, and the third writes
+  *"the tap is on the item the player has moved off and would not re-attach"* (`:2650-2652`) — the word
+  *"would not"* is a capability claim made out of two momentary refusals.
+- `attachSpectrum`'s `false` / rejection is a **hard verdict**: `spectrumArming = false` and
+  *"the native spectrum tap did not start"* (`:2885-2887`, `:2893-2897`), and the only recovery is a **fixed
+  5 s timer** (`retrySpectrumOnce`, `:2948-2959`) — the shape the brief explicitly rejects.
+- The next sighting after that (`:2643`) is rate-limited to one per second, and after the budget is reset
+  (`:2648`) it can only slow down, never re-arm: `spectrumArming` is set true in exactly three places — the start
+  (`:2246`), the adopted boundary (`:1791`) and the *first* orphan sighting of a track (`:2645`) — so once it is
+  false for a track, only a new track can raise it again. From the owner's side that is *"it turns spectrum off"*,
+  and it is why the state survives to the next song rather than flickering.
+
+**What the native side does when a new item arrives while the previous attach is in flight** is now, correctly,
+nothing: the new request carries a new generation (`begin`, `:780`), the older request re-tests it after its await
+(`:833`) and either retries on the *new* current item or rejects (`:805-807`). That guard is the v1.9.22 fix and it
+holds — in the source and in the probe (the install never lands on the stale item). It does not, however, make the
+*engine* wait: the engine has already decided, and the guard's correctness is invisible to it.
+
+### 24.5 The readings
+
+Driving the **real** `AudioEngine` (`src/player/engine.ts`, unmodified) with a fake bridge that models the plugin's
+own install semantics — `startSpectrum` reads the current item, awaits its track list, attaches to *that* item;
+`frames` is a lifetime counter; `itemIsCurrent` is `item === player.currentItem` and is false when nothing is
+tapped; the two re-tests of `NaviliteSpectrum.install:833` are honoured. The probe is not a repo artifact; it is
+this file plus the numbers below. A first track plays so the lifetime frame counter is non-zero, which is the
+state his phone is in after the first song.
+
+**(a) A downloaded (`file://`) start whose tap IS on the playing item but has produced no frame yet.** Install
+latency 5 ms (it lands), first frame for the new item at +800 ms:
+
+```
+change at t+737 ms
+t+ 770  spectrum…    spectrum=false arming=true  playing  tap frames=20 (all 20 from the previous track)
+t+1181  native audio spectrum=false arming=false playing  tap frames=20 — the native tap is reading digital silence — the audio itself is silent, so the bars are flat
+t+1562  spectrum     spectrum=true  arming=false playing  tap frames=21 — real spectrum — an FFT of the stream this player is playing, read from the native audio tap
+```
+
+411 ms after the transition into `playing` — 12 polls × 33 ms — the engine states digital silence about a tap that
+has produced **nothing** for this item, and the chip reads *native audio*. That number is the whole of finding #4,
+and the sentence it writes is false.
+
+**(b) The same for a streamed start, and the same 900 ms-late install on both** — identical behaviour (`file://` and
+`http` produce the same timeline; the local case is not a separate defect). With the install 900 ms late the chip
+shows `spectrum…` and heals at ~1.7 s, because while the tap is on the *previous* item the orphan branch returns
+first (`engine.ts:2599`) and the zero-poll verdict is never reached. So the false verdict needs the tap **on** the
+item without a frame; the orphan budget needs it **off** the item.
+
+**(c) A local start, then a second change 250 ms later** (his *"moving through tracks"*): the same false verdict
+appears at +1470 ms, and the tap is re-installed four times (`installs=4 verifies=3` for three tracks), i.e. the
+transition can issue several requests per track — the install, the verify at the close of the load, and one per
+orphan sighting.
+
+**(d) A tap that never lands on the item**: `spectrum…` for ~3 s (three orphan sightings, one per second), then
+*native audio* permanently — `engine.ts:2650`'s sentence. **(e) Every install refused** (the named slot has no
+loaded item, which is a real state for the length of a `fillSlot`): the same permanent verdict at +2850 ms, with
+*"would not re-attach"*.
+
+**What the harness structurally cannot see.** It drives JavaScript with a *model* of the plugin: it cannot tell
+whether the mix actually lands on a file-backed `AVPlayerItem`, whether `MTAudioProcessingTap.prepare/process` are
+called for it, whether `player.timeControlStatus` is `.playing` at the instant `snapshot()` is built, or how long
+`loadTracks` takes for a warm local file versus a replaced remote one. §24.8.
+
+**In Chrome the symptom does not exist, and that is itself a reading.** On the web path the analyser is built once
+and sits in front of the element that is making the sound (`ensureGraph` `engine.ts:2978-3018`); there is no tap to
+attach, no `itemIsCurrent`, and no budget: the only ways to "off" are a suspended `AudioContext` (`:3003-3008`) and
+the frozen-frame check (`:2774` web twin, `:3069`). A fast start cannot lose a race there, so a PWA run cannot
+reproduce what he reports — which locates the defect in the native decision layer rather than in the transition
+machinery.
+
+### 24.6 The invariants the fix must hold
+
+1. **Attached before or at the first frame, on every path.** When the engine says `playing` for a track, the tap is
+   on the item the player is playing (or the request that will put it there is outstanding *and the engine knows
+   it is*). No path may leave `playing` with the tap knowably elsewhere and the app silent about which of the two
+   it is.
+2. **A lost attach is retried for the current track only, on evidence, not on a clock.** The retry's trigger is the
+   *player's* item (`itemIsCurrent`, and the tap's own `attached`), and its unit is the item, not a 1 s/5 s timer.
+   A refusal that names a reason ("the slot has no loaded item") is a reason to ask again when that condition has
+   ended, not a verdict.
+3. **The spectrum is never turned off for a track whose audio can be analysed.** The only inputs that may state
+   *native audio* are: this build has no tap (`:2495`); the tap is on the wrong item **and the engine has said so
+   in those terms, with a remedy in flight**; the tap is genuinely frozen (`:2778`) or reading digital silence
+   **of this item**; or a refusal that carries the plugin's own reason for *this* item. A budget expiring is none
+   of those.
+4. **The fallback is a capability decision, never a timing one.** No count of polls, no elapsed milliseconds and no
+   timer may be a term in "there will be no spectrum here".
+5. **Per-item facts must be per item.** Anything used as "the tap has answered for this track" counts frames (or
+   time) *since this item was attached* — the `frames` counter as shipped is process-lifetime
+   (`NaviliteSpectrum.swift:605`, never reset) and must not be read as this item's answer.
+6. **`attach` is idempotent per item and the detach is not its prologue.** An item that already carries the tap is
+   verified, never re-installed (`:348`), and the mix is taken off an item only when that item is genuinely no
+   longer the player's current one. The two `attached`/`itemIsCurrent` facts must agree with what the engine
+   believes; the engine must stop describing "no tap" as "the tap is on an item the player has moved off".
+7. **The one-engine rule is untouched.** Nothing here may reintroduce a second player, a second clock, a second
+   decode, or an `<audio>` element feeding an analyser in a wrapped build.
+
+### 24.7 Fixes this diagnosis rejects
+
+A timer-driven re-attach; a fixed retry delay; a synthetic or idle envelope drawn while the tap is dark; treating a
+detached analyser as "just leave it"; re-arming `spectrumArming` on a clock instead of on an answer; and — the
+tempting one — making the chip *lie* by keeping it on "spectrum…" indefinitely while nothing is attached. Each of
+those makes the symptom invisible without making the tap land, which is the failure this repo has already shipped
+twice.
+
+### 24.8 Not verified here, and not claimed
+
+1. **No phone, no simulator, no native mixer.** The Swift/ObjC half is read, not run: whether the mix lands on a
+   `file://`-backed `AVPlayerItem`, whether the tap's `prepare`/`process` are reached for it, and what
+   `timeControlStatus` is at the instant the frame is built are the phone's answers, not this machine's.
+2. **The bridge in the probe is a model**, faithful to the plugin's ordering and to the two facts the engine reads,
+   but not to its timings: the real install latency for a downloaded file is unmeasured here, and with it the
+   frequency of the false 0.4 s verdict on his phone. What is measured is that the verdict is available at 411 ms
+   and that it is written from a counter that does not describe the item.
+3. **The v1.9.16 `file://` transport patch is verified present** in the tree this section was written against
+   (`tools/patch-native-audio.mjs:194-226`; the marker `NAVILITE_BUFFER_PATCH:ios-file-transport` at
+   `node_modules/@capgo/capacitor-native-audio/ios/Sources/NativeAudioPlugin/Plugin.swift:1399`, in the
+   `preloadAsset(_:isComplex:)` the app's own `preload` call reaches, `Plugin.swift:551-553`), so "a downloaded
+   track reaches a transport with no `players` array" is closed and is **not** offered here as a cause.
+4. **The engine's own suite is green on this tree** (`npm test` → 255 tests, 255 pass, 0 fail in 36.4 s) — i.e. the
+   defect above is not caught by any existing test: the two tests that guard this window use a *first* track, where
+   the lifetime frame counter is still zero (`test/engine-native.test.ts:1691`, `:1736`).
+5. **How the implementer can tell the fix worked.** With the same probe: a track change on which the tap's first
+   frame for the new item arrives at +800 ms, at +2 s, and never-but-installed must **never** print *native audio*
+   while `state === 'playing'`, and the reason line must not claim silence or a re-attach failure about an item the
+   tap is on. On the phone: `NaviliteSpectrum`'s own `installs`/`verifies` counters (in `bands()`, `:435-436`) and
+   the reason line stay readable at every change, and the chip's third word is the only one allowed between the
+   transition and the tap's first frame.
