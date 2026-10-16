@@ -1098,3 +1098,67 @@ it it suddenly becomes 70:01 long — not sure how this error even came about."*
    file at `9484e12`) back with these three tests in place fails exactly those two — 34/36, `4201840` against the
    expected `210348` and "the end of the track is reported to the queue" `false` — while all 33 tests that predate
    the fix pass in both worlds (`docs/verification.md` §33).
+
+---
+
+## The row a tap scrolls to is the row the view marks on the screen — one move, clamped, and the second tap on visibility, 2026-10-17 (design for beta-3 — card `t_f32b823f`, implemented by `t_691c88c8`, unreleased)
+
+The design is `docs/design-beta-3-scroll.md`. This entry records the one decision it makes and the two
+claims it corrects. **Nothing is shipped by this card**: no `src/`, no version, no tag, no artifact.
+
+1. **His hypothesis is wrong at the key, and right about the source.** He suspected the scroll "is
+   trying to base its scroll on the current track that is playing rather than which is
+   highlighted/selected on the list". In the shipped `v2.0.0-beta.2` bytes the mark and the target read
+   **the same fact** — `ctx.queue.currentSong.id` (`src/ui/player-bar.ts:20-46` and `:289-293`, and the
+   same two functions minified in the IPA's own `public/assets/index-ugOtIRG3.js`) — so there is no
+   playing-track-vs-highlighted-row mismatch to fix, and no re-keying to do. What is wrong is one level
+   down: **which element answers for that id.**
+2. **The defect, stated once.** The target is `[...ctx.rows.get(id)][0]` — the **first element
+   registered this route render** — and the registry keeps rows a view **detached when it painted its
+   list a second time** (`src/ui/app.ts:99`, `:2179-2184`, cleared only per route render at `:694`;
+   `replace()` detaches at `src/ui/dom.ts:52-55`). The playlist page paints twice (its own manifest at
+   `src/ui/app.ts:1772`, the server's answer at `:1795`) and search re-registers on every submit
+   (`:1960-2008`). A detached row's rect is `(0,0,0,0)`, which sits **above** the scroll box: the move
+   goes **upwards to the top of the list**, the row he asked for is never centred, and the second tap
+   re-takes the scroll branch because `rowInFull(ghost)` is `0 >= box.top` — false for every list whose
+   scroller starts below the header. **One cause, both of his symptoms** (the upward chunk, and the
+   dead second tap while his title is on the screen).
+3. **The decision.** The scroll target is **the row the view on screen marks as current**, resolved
+   from that mark and nothing else: the `.playing` row inside the drawn view, first in document order.
+   The registry keeps its job of *marking* rows and stops being a way to *find* one. The rejected
+   alternative — keep the registry read, filter `isConnected`, take document order — is written down in
+   the design (§3.1) and deliberately not chosen: it leaves two sources of one fact, which is the shape
+   this card exists to delete.
+4. **One move, and the ends are not failures.** The offset is computed from the row's own rect, once,
+   clamped to the list's own range — one read pair before the one write (P1's rule), no direction guess,
+   no step, no timer, no retry. Read against the shipped bytes, **there is no chunk-walking code in the
+   tap path**; the walk he describes is the wrong target seen from a mid-list position.
+5. **The second tap keys on visibility, and at the ends on "the list cannot do better".** A row already
+   fully on screen → the tap opens the now screen with **no movement at all**. Otherwise one move — and
+   if the list cannot move the row any closer (the first/last row, or a list shorter than the box), the
+   tap **opens**, which is what makes the clamped cases behave like the centred one. Visibility is
+   measured against the scroll box **and above the player bar's top edge** (the bar is `position: fixed`
+   over the scroller, `src/styles.css:712-715`); the header is not part of that question because it is a
+   row of the shell *outside* the scroller (`src/styles.css:135-152`, `src/ui/shell.ts:115`).
+6. **The clearance at the bottom is thin, and the harness decides it.** *Derived from the CSS*: the end
+   of every list reserves `--bar-height + 28px` = 100 px while the bar is 72 px on the desktop harness
+   and ~94 px on his phone (its 34 px home-indicator inset is inside the box) — ~28 px of room there,
+   ~6 px here. The last-row check reads both rects; if the row cannot be fully visible at the list's own
+   limit, the tap still opens (the tap must never be the wrong part) and the padding gets
+   `+ env(safe-area-inset-bottom)` in the implementation card.
+7. **Accepted cost, recorded rather than hidden.** A view that paints its list a second time can move
+   the target under a tap that has already run, which costs **one extra tap** on a partially downloaded
+   playlist. A paint that re-centres would be a second move from one tap, which the card forbids; the
+   real cure — painting the server's answer into the existing rows instead of replacing them — is a
+   different card.
+8. **Two claims corrected.** (a) `playingRowForThisView`'s comment says "the first row in **document
+   order** answers for a song listed twice" (`src/ui/player-bar.ts:283-288`); a `Set` iterates in
+   **insertion** order, so the shipped code does what the comment does not say. (b) v2.0-beta named
+   this exact shape as its own risk 6 — *"`ctx.rows` answers for a view he has left"*
+   (`docs/design-v2.0-beta.md:483`) — and mitigated it with `ctx.rows.clear()` **per route render**,
+   which does not cover a **second paint inside one render**. The shape was known; the population was
+   not.
+9. **Nothing in this card proves the mechanism by running anything.** No browser, no harness, no
+   simulator, no build — the fail-before on the shipped bytes is card `t_691c88c8`'s first job
+   (`docs/design-beta-3-scroll.md` §4.2), and if it does not reproduce the two symptoms *in his shape*,
+   the diagnosis is incomplete and must come back to the design rather than be fixed around.
