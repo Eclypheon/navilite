@@ -31,7 +31,7 @@ import type { Song } from '../src/api/types.ts';
  * module-scope DOM access (importing it boots nothing: `boot()` is what draws), so a node test can
  * read them the way the app does.
  */
-import { grownControlLabel, playlistRowLabel, playlistSubLine } from '../src/ui/app.ts';
+import { downloadControlLabel, grownControlLabel, playlistRowLabel, playlistSubLine } from '../src/ui/app.ts';
 
 const song = (id: string, size = 1000): Song => ({ id, title: `Track ${id}`, artist: 'Someone', album: 'Something', duration: 10, size });
 
@@ -285,6 +285,43 @@ test('the badge is read from complete files, and a grown playlist is never calle
   assert.equal(store.playlistBadge('pl-2').state, 'partial');
   assert.equal(store.playlistBadge('pl-2').done, 1);
 
+  /*
+   * **The same two screens, for a download that is not `complete`** (v1.9.21's leftover). pl-2 has
+   * landed one of the two files it asked for, and its playlist has grown to three tracks since —
+   * the state `7453ebd` never reached: the control's `partial` and `downloading` branches printed
+   * `record.total`, the **manifest's** length, so this playlist's own page read `1 of 2 · retry`
+   * under a row that read `3 tracks · 1 of 3 on this phone`. One fact, two numbers, in the very
+   * state the pair was introduced to fix, which is why the agreement is asserted for it too.
+   *
+   * The `downloading` branch is the same one call and is asserted in the lyric-in-flight test below.
+   */
+  const partialBadge = store.playlistBadge('pl-2', 3);
+  assert.equal(partialBadge.state, 'partial', 'one file landed of two asked for, and the playlist has grown');
+  const grownSongs = [covered('c', 'cover-a'), covered('d', 'cover-a'), covered('e', 'cover-a')];
+  const partialRow = { id: 'pl-2', name: 'Stopped', songCount: grownSongs.length };
+  /*
+   * The control's own sentence, from the facts `downloadControl` resolves for it: the record the
+   * store holds (whose `total` is still the manifest's two) and the playlist in front of the owner.
+   * The size is passed in already formatted, the way the adapter hands it over — `partial` prints no
+   * size, so it is a literal here and cannot flatter the assertion.
+   */
+  const partialRecord = store.record('pl-2')!;
+  const partialControl = downloadControlLabel({
+    state: partialRecord.state,
+    done: partialRecord.done,
+    total: partialRecord.total,
+    songs: grownSongs,
+    size: 'up to 24 MB',
+    missing: store.missingCount('pl-2', grownSongs),
+    missingCovers: store.missingCovers(grownSongs),
+  });
+  assert.equal(partialControl, '1 of 3 · retry', 'the control reads the playlist’s own length, never the manifest’s');
+  assert.equal(
+    /· (\d+ of \d+) on this phone$/.exec(playlistSubLine(partialRow, partialBadge))?.[1],
+    /^(\d+ of \d+) · retry$/.exec(partialControl)?.[1],
+    'the row and the page’s own control agree for a partial download of a grown playlist too',
+  );
+
   await store.remove('pl-1');
   assert.equal(store.playlistBadge('pl-1').state, 'none', 'and a removed download is not marked at all');
 });
@@ -312,6 +349,31 @@ test('a grown playlist with a lyric still in flight prints the playlist’s own 
     playlistSubLine({ id: 'pl-1', name: 'Driving', songCount: 4 }, badge),
     '4 tracks · 2 of 4 on this phone',
     'the denominator is the playlist in front of the owner, not the manifest',
+  );
+
+  /*
+   * …and the page's own control, whose `downloading` branch is the other half of the same pair,
+   * reads the same numbers — `2 of 4`: the record it draws from is the one the store holds, whose
+   * `total` is still the manifest's two, and the length it prints comes from the playlist in front
+   * of the owner, exactly as the row's does (v1.9.21's leftover). This is the branch the defect was
+   * not filed against and the one a lyric still in flight lands in.
+   */
+  const grownSongs = [covered('a', 'cover-a'), covered('b', 'cover-a'), covered('c', 'cover-a'), covered('d', 'cover-a')];
+  const grownRecord = store.record('pl-1')!;
+  const control = downloadControlLabel({
+    state: grownRecord.state,
+    done: grownRecord.done,
+    total: grownRecord.total,
+    songs: grownSongs,
+    size: 'up to 24 MB',
+    missing: store.missingCount('pl-1', grownSongs),
+    missingCovers: store.missingCovers(grownSongs),
+  });
+  assert.equal(control, '2 of 4 · up to 24 MB', 'the playlist page’s own control, while a lyric is still in flight');
+  assert.equal(
+    /· (\d+ of \d+) on this phone$/.exec(playlistSubLine({ id: 'pl-1', name: 'Driving', songCount: 4 }, badge))?.[1],
+    /^(\d+ of \d+) · up to 24 MB$/.exec(control)?.[1],
+    'the row and the page’s own control agree while a lyric is still in flight, too',
   );
 });
 

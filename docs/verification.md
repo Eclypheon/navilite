@@ -1896,9 +1896,13 @@ member read straight out of the archive), so the shipped bundle is a fresh build
 | `sw.js` | `9ee133a51619bb69299c434daaf54e4b8f611a36dfeba61730c5faba3e9fdf59` (stamped `a5bb600`, the commit it was built from) |
 
 The previous release's chunk was `index-jr7GwDk1.js` (190,985 B, sha256 `62b3ff94…`), so this is not
-v1.9.20's bundle — and the new code is *in* it: `A slow answer can no longer draw itself over the screen
-you are looking at.` and `34 of 35` both appear in `index-BeHJDgul.js`, which is the same chunk the
-app's About line and Settings → **What's new** read from.
+v1.9.20's bundle — and the new code is *in* it: `index-BeHJDgul.js` carries the guard itself,
+`function Q(e,t){return e.viewRoute!==t}`, at **10 call sites** (counted in the minified file: the
+definition plus ten calls), which are the ten `overtaken()` sites in `src/ui/app.ts` — and the
+harness's five race cases above pass against that same `dist/`. The changelog's own sentences
+(`A slow answer can no longer draw itself over the screen you are looking at.`, and `34 of 35`) are in
+there too, but they say only that the *changelog* shipped: they are written once and grow with every
+release. The call sites are the guard.
 
 **Order of operations, and what was built.** The release body was committed first (`a5bb600`), then
 `dist/` was rebuilt from that commit and the IPA made from it — `docs/VERSIONING.md` §6's order, and one

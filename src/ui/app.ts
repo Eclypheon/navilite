@@ -22,7 +22,7 @@ import { platformInfo, type PlatformInfo } from '../platform.ts';
 import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
-import { OfflineStore, estimateBytes, formatBytes, type DownloadedPlaylist, type PlaylistBadge, type SizeEstimate } from '../state/offline.ts';
+import { OfflineStore, estimateBytes, formatBytes, type DownloadedPlaylist, type PlaylistBadge, type PlaylistDownloadState, type SizeEstimate } from '../state/offline.ts';
 import { createDownloadsBridge, localFileSrc } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
@@ -1914,9 +1914,90 @@ function storePlaylistInput(ctx: AppContext, entry: DownloadedPlaylist): Playlis
  * Both the row's sub-line and its accessible name read their numbers from here, because `… of …
  * downloaded` is also what VoiceOver says out loud. `test/offline-browse.test.ts` asserts this pair
  * against the one the playlist page's own control prints for the same playlist.
+ *
+ * The playlist page's own control reads this same function with the same two inputs — the record it
+ * already holds and the playlist in front of the owner — so there is one arithmetic behind both
+ * screens (`controlFigures`), not two that have to be kept in step by hand.
  */
-export function downloadedFigures(badge: PlaylistBadge, songCount?: number): { done: number; total: number } {
-  return { done: badge.done, total: Math.max(badge.total, songCount ?? badge.total) };
+export function downloadedFigures(
+  figures: { done: number; total: number },
+  songCount?: number,
+): { done: number; total: number } {
+  return { done: figures.done, total: Math.max(figures.total, songCount ?? figures.total) };
+}
+
+/**
+ * Every fact the download control's sentence is made of, resolved from the store and from the
+ * playlist in front of the owner — so the sentence itself is a pure function of them
+ * (`downloadControlLabel`) and a node test can read what the button really prints, in each state.
+ */
+export interface DownloadControlFacts {
+  /** The store's record state, or `none` for a playlist nothing was ever asked of. */
+  state: PlaylistDownloadState | 'none';
+  /** Complete files among the manifest's songs (`record.done`). */
+  done: number;
+  /** The **manifest's** length — what was asked for when the playlist was downloaded. */
+  total: number;
+  /** The playlist in front of the owner, which may be longer than the manifest. */
+  songs: Song[];
+  /** The size the button prints, already formatted (`up to 312 MB` / `312 MB`). */
+  size: string;
+  /** Tracks this download does not cover (`missingCount`). */
+  missing: number;
+  /** Covers this download has not got (`missingCovers`). */
+  missingCovers: number;
+}
+
+/**
+ * The pair the playlist page's own control prints while its download is not yet `complete` —
+ * **n of m**, and the same pair the Playlists row prints about the same playlist.
+ *
+ * `record.total` is the **manifest's** length — what was asked for when the playlist was downloaded
+ * — and it is not the length of a playlist the owner has added to since. The control's `downloading`
+ * and `partial` branches used to print it, so a download that stopped at one of two files and whose
+ * playlist has grown to three read `1 of 2 · retry` on its own page while the row under the same
+ * hollow mark read `3 tracks · 1 of 3 on this phone`: one fact, two numbers, in exactly the state
+ * `7453ebd` did not reach (v1.9.21's own leftover, closed here). The `complete` branch already
+ * agreed with the row (`grownControlLabel`), and all three read the denominator the same way now.
+ */
+function controlFigures(facts: { done: number; total: number; songs: Song[] }): string {
+  const { done, total } = downloadedFigures(facts, facts.songs.length);
+  return `${done} of ${total}`;
+}
+
+/**
+ * The playlist page's own download control, as one sentence per state — §5's machine, and §5.8's
+ * covers-only fetch inside `complete`.
+ *
+ * It is a function of `facts` alone because `test/offline-browse.test.ts` has to be able to read the
+ * sentence the button prints: **this is the formatter the two screens' agreement is about**, and
+ * before it was one, the control's own text could not be asserted anywhere (`downloadControl` needs
+ * a DOM). `complete` is where the two screens can differ and where the pair is therefore the row's
+ * own (`grownControlLabel`, `downloadedFigures`); `partial` and `downloading` are the same claim for
+ * a download that is not finished (`controlFigures`).
+ */
+export function downloadControlLabel(facts: DownloadControlFacts): string {
+  const { state } = facts;
+  if (state === 'none' || state === 'idle') {
+    return facts.songs.length === 0 ? 'Nothing to download' : `↓ ${facts.size}`;
+  }
+  switch (state) {
+    case 'estimating':
+      return '…';
+    case 'downloading':
+      return `${controlFigures(facts)} · ${facts.size}`;
+    case 'partial':
+      return `${controlFigures(facts)} · retry`;
+    case 'complete': {
+      // The playlist changed after it was downloaded: not complete any more, and it says so.
+      if (facts.missing > 0) return grownControlLabel(facts.songs, facts.missing);
+      // All the music is here, a cover is not: one tap fetches the covers and nothing else.
+      if (facts.missingCovers > 0) return `✓ ${facts.size} · ↓ covers`;
+      return `✓ ${facts.size}`;
+    }
+    case 'failed':
+      return 'Retry';
+  }
 }
 
 /**
@@ -2526,28 +2607,21 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
    * calls the same `download()`, which re-enqueues only what is absent.
    */
   const missingCovers = (): number => offline?.missingCovers(songs) ?? 0;
+  /**
+   * The button's own sentence — the state machine lives in `downloadControlLabel`, which is a
+   * function of these facts alone so the same sentence can be read in a test.
+   */
   const label = (): string => {
     const record = offline?.record(playlistId);
-    if (!record || record.state === 'idle') {
-      return songs.length === 0 ? 'Nothing to download' : `↓ ${sizeLabel()}`;
-    }
-    switch (record.state) {
-      case 'estimating':
-        return '…';
-      case 'downloading':
-        return `${record.done} of ${record.total} · ${sizeLabel()}`;
-      case 'partial':
-        return `${record.done} of ${record.total} · retry`;
-      case 'complete': {
-        // The playlist changed after it was downloaded: not complete any more, and it says so.
-        if (missing() > 0) return grownControlLabel(songs, missing());
-        // All the music is here, a cover is not: one tap fetches the covers and nothing else.
-        if (missingCovers() > 0) return `✓ ${sizeLabel()} · ↓ covers`;
-        return `✓ ${sizeLabel()}`;
-      }
-      case 'failed':
-        return 'Retry';
-    }
+    return downloadControlLabel({
+      state: record?.state ?? 'none',
+      done: record?.done ?? 0,
+      total: record?.total ?? 0,
+      songs,
+      size: sizeLabel(),
+      missing: missing(),
+      missingCovers: missingCovers(),
+    });
   };
   const paint = (): void => {
     const text = label();
