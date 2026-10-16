@@ -161,6 +161,80 @@ export interface TrackRequest extends NativeTrackInfo {
   crossOrigin: boolean;
 }
 
+/**
+ * The word the chip wears: **the mode the visualiser is in for the item in hand**, and never a
+ * statement about the transport wearing the clothes of one (v1.9.26).
+ *
+ * The owner, on the v1.9.24 build he had just installed, looking at the playlist page for `Jap`
+ * with a track loaded and *paused* at 1:28 / 4:55 — the screenshot reads `NATIVE AUDIO` on the
+ * mini-player while the line under it reads `paused · native · spectrum off · player: paused`:
+ *
+ * > *"the spectrum always works but on the playlist pages, the bottom bar seems to keep flashing to
+ * > native audio spectrum off even though the spectrum is working fine"*
+ *
+ * The word was built in the UI out of three fields (`spectrum`, `spectrumArming`, `backend`), and
+ * its third branch — *native audio* — is a **capability claim reached by elimination**:
+ * `spectrumArming` is only ever reported while a native track is *playing*, so every state that is
+ * not playing (paused, ended, interrupted, between two tracks, nothing loaded) fell through to it.
+ * On a playlist page that flips at every pause and every change, which is the flashing he describes.
+ *
+ * So the word is one fact about the item in hand, computed here, once:
+ *
+ *   - `spectrum` — the bars are being fed by that item, now.
+ *   - `spectrum…` — a native item is playing and its tap has not answered for the item yet. This is
+ *     the same word a tap refused for a whole track keeps (§515.4, the owner's call of 2026-10-16:
+ *     the engine cannot tell *"will never attach"* from *"still attaching"* without a clock).
+ *   - the transport's own words — `idle`, `loading`, `paused`, `ended`, `interrupted`, `error` —
+ *     worn when **the only reason nothing is being measured is that nothing is playing**. This is
+ *     the state he was reading a capability claim in, and it is stated as what it is.
+ *   - `native audio` — this build has no spectrum tap on its native player (Android today), or the
+ *     tap's own verdict *while it plays* has ruled this item out (a tap reading silence for
+ *     `ZERO_POLLS_BEFORE_THEME`, or returning the same frozen frame). **The one thing it may ever
+ *     mean is that the spectrum cannot run on the item in hand.** A build without a tap wears it in
+ *     every transport state, because that is a fact about the build and not about a moment.
+ *   - `theme` — the same statement on the web path: this browser has no Web Audio, or this stream's
+ *     own verdict says the samples are not real.
+ *
+ * What a *stopped* transport must never do is reach the capability words, and that is the whole of
+ * this type: the same rule for `native audio` and for `theme`, because they are the same claim.
+ */
+export type VisualiserWord =
+  | 'spectrum'
+  | 'spectrum…'
+  | 'idle'
+  | 'loading'
+  | 'paused'
+  | 'ended'
+  | 'interrupted'
+  | 'error'
+  | 'native audio'
+  | 'theme';
+
+/**
+ * Every state the machine can be in that is not `playing`, and the chip's word for it — **the
+ * transport's own word** (v1.9.26).
+ *
+ * A total `Record` rather than a chain of comparisons on purpose: a state added to {@link EngineState}
+ * does not compile until its word is written here, so "every transport state has a defined word" is
+ * a property of the compiler rather than of this comment.
+ */
+const STOPPED_WORD: Record<Exclude<EngineState, 'playing'>, VisualiserWord> = {
+  idle: 'idle',
+  loading: 'loading',
+  paused: 'paused',
+  ended: 'ended',
+  interrupted: 'interrupted',
+  error: 'error',
+};
+
+/**
+ * The colour the word wears, which is the chip's class: `live` (green — measuring now), `arming`
+ * (between the two, v1.9.6 — the spectrum is coming), `stopped` (neither a measurement nor a
+ * fallback: the transport is not playing, v1.9.26) and `fallback` (amber — there is no measurement
+ * and none is coming).
+ */
+export type VisualiserTone = 'live' | 'arming' | 'stopped' | 'fallback';
+
 export interface EngineStatus {
   state: EngineState;
   backend: PlaybackBackend;
@@ -185,6 +259,18 @@ export interface EngineStatus {
    * capability claim the owner was reading at every track change.
    */
   spectrumArming: boolean;
+  /**
+   * **The chip's word and tone, computed here, once (v1.9.26)** — one source, so every surface that
+   * shows the mode reads one fact and no two of them can disagree (see {@link VisualiserWord} for
+   * what each word means and the report that made this its own field).
+   *
+   * It is on the status because every input it has is the engine's: the state, the backend, whether
+   * the bars are being fed, whether the tap is being asked, and — the fact the UI could not read at
+   * all, and the one the defect turned on — **whether this build has a way to measure the item in
+   * hand**. Without it a surface can only *infer* a capability from the absence of a measurement,
+   * which is exactly how the wrong word was reached.
+   */
+  visualiser: { word: VisualiserWord; tone: VisualiserTone };
   modeReason: string;
   positionMs: number;
   durationMs: number;
@@ -1264,16 +1350,24 @@ export class AudioEngine {
     const plugin = this.lastPluginState;
     const evidence = this.native?.spectrumEvidence?.() ?? null;
     const frame = this.lastNativeFrame;
+    /*
+     * The chip's third word (v1.9.6), and it is a fact about the *whole* state, not just the tap:
+     * only a track that is playing can be waiting for its bars. A paused, ended or loading item has
+     * no frames coming — and what it says about that is the transport's own word, never
+     * *native audio* (v1.9.26; see {@link VisualiserWord}). Computed once, here, and handed to both
+     * the field and the word below so the two cannot disagree.
+     */
+    const arming = this.spectrumArming && this.backend === 'native' && this.state === 'playing';
     return {
       state: this.state,
       backend: this.backend,
       spectrum: this.spectrumLive,
+      spectrumArming: arming,
       /*
-       * The chip's third word (v1.9.6), and it is a fact about the *whole* state, not just the tap:
-       * only a track that is playing can be waiting for its bars. A paused, ended or loading item has
-       * no frames coming and says "native audio" or "loading…" exactly as it always did.
+       * The chip's word, from the facts and nothing else (v1.9.26) — one place, so the mini-player
+       * and anything else that shows the mode read the same one.
        */
-      spectrumArming: this.spectrumArming && this.backend === 'native' && this.state === 'playing',
+      visualiser: this.visualiser(arming),
       modeReason: this.modeReason,
       /*
        * The phone's own account, as a line (v1.9.5): what it said, why it said it, and where the
@@ -1322,6 +1416,111 @@ export class AudioEngine {
         frameAgeMs: frame?.itemFrameAgeMs ?? null,
       },
     };
+  }
+
+  /**
+   * **The chip's word, and the tone it wears** (v1.9.26) — the answer to *"what is the visualiser
+   * doing for the item in hand, and why"*, in one place, from the engine's own facts.
+   *
+   * Two reasons produce "nothing is being measured", and before this they were one word:
+   *
+   *   - **the item cannot be measured** — this build has no tap on its native player, or (on the web)
+   *     no Web Audio, or a verdict about *this* item's samples while it plays. The capability words
+   *     (`native audio`, `theme`) are licensed *only* here.
+   *   - **the transport is not playing** — nothing is heard, so the bars are a picture of nothing
+   *     (`disarmConsumers`). The word is the transport's own state.
+   *
+   * Reaching the first by *elimination* — the expression this replaces — is the defect: on the
+   * owner's phone every paused track on a playlist page read `NATIVE AUDIO`. What the words may not
+   * do is claim a capability the app has not lost, and a stopped transport is not evidence about a
+   * capability at all.
+   *
+   * @param arming the engine's own third-word fact, computed once in `status()` so this and the
+   * field it is derived from cannot disagree.
+   */
+  private visualiser(arming: boolean): { word: VisualiserWord; tone: VisualiserTone } {
+    const word = this.visualiserWord(arming);
+    const tone: VisualiserTone =
+      word === 'spectrum'
+        ? 'live'
+        : word === 'spectrum…'
+          ? 'arming'
+          : word === 'native audio' || word === 'theme'
+            ? 'fallback'
+            : // Neither a measurement nor a fallback: the transport, doing what it is doing. It is
+              // not a failure state and must not wear the amber of one (v1.9.6 made the same
+              // argument for `arming`, and the same reasoning applies to a pause).
+              'stopped';
+    return { word, tone };
+  }
+
+  /** The word alone — see {@link VisualiserWord} for what each one claims. */
+  private visualiserWord(arming: boolean): VisualiserWord {
+    if (this.spectrumLive) return 'spectrum';
+    if (arming) return 'spectrum…';
+    /*
+     * Nothing is being measured, and there are two different reasons — the whole of this fix. First
+     * the question the UI could not ask: **can this build measure this item at all?** An evidenced
+     * `none` is the only thing the capability words are allowed to mean, and a build with no tap
+     * wears `native audio` in every transport state, because that is true in every one.
+     */
+    if (this.measuringPathForTheItem() === 'none') return this.backend === 'native' ? 'native audio' : 'theme';
+    /*
+     * There is a path (or the load has not answered for one yet), and it is not feeding the bars:
+     *   - the transport is not playing — nothing is heard, so there is nothing to be a picture of.
+     *     The word is the transport's own, whatever the last verdict was: a pause is not evidence
+     *     about the samples, and this is the state the owner was reading a capability claim in;
+     *   - the transport *is* playing, so the words are the ones §515 and §516 settled, unchanged:
+     *     this item's tap reading silence, the same frozen frame over and over, or samples the
+     *     browser will not hand over. (A path that is still `unknown` while the transport plays is
+     *     not reachable — both starts build their path before the player is asked to play — and if
+     *     it ever were, this line is the honest word.)
+     */
+    if (this.state === 'playing') return this.backend === 'native' ? 'native audio' : 'theme';
+    return STOPPED_WORD[this.state];
+  }
+
+  /**
+   * **Can this build measure the item in hand at all?** (v1.9.26) — the fact the UI could not read,
+   * and the one that separates *"nothing is being measured because nothing is playing"* from *"the
+   * spectrum cannot run here"*.
+   *
+   *   - `tap` / `analyser` — the path exists: the bridge's native tap (`hasNativeSpectrum`, the iOS
+   *     plugin), or the web path's own samples (`createMediaElementSource → AnalyserNode`, v1.7's one
+   *     copy of the stream).
+   *   - `none` — the absence is **evidenced**: a bridge that is built and says it has no tap
+   *     (Android today), a browser whose Web Audio graph could not be built.
+   *   - `unknown` — nothing has answered yet. A bridge still being built is a *load in progress*
+   *     (`startNative` builds it inside the start, and a build that fails reports `error`), and a
+   *     graph that has not been reached yet is the same; neither is a fact about what this build can
+   *     do, so neither may spend a capability word — the transport's own word is what is happening.
+   *
+   * Two things are deliberately *not* read as `none`: a suspended audio context (a lifecycle fact —
+   * the browser suspends Web Audio when the page is hidden, and the visualiser re-arms on the way
+   * back in) and a cross-origin stream the library will not hand over (a verdict about *this* item's
+   * samples, which is spoken while it plays).
+   */
+  private measuringPathForTheItem(): 'tap' | 'analyser' | 'unknown' | 'none' {
+    // No item in hand: there is nothing to make a capability claim *about*, and the transport's own
+    // word ("idle") is what is happening. The bar is hidden in this state — this is the engine's own
+    // fact being right rather than a screen being read.
+    if (this.track === null) return 'unknown';
+    if (this.backend !== 'native') {
+      if (this.graphFailedReason !== null) return 'none';
+      return this.analyser === null ? 'unknown' : 'analyser';
+    }
+    const bridge = this.native;
+    if (bridge === null) return 'unknown';
+    return this.hasSpectrumTap() ? 'tap' : 'none';
+  }
+
+  /**
+   * Whether this build's native bridge has the spectrum tap at all — the one question, asked in one
+   * place, by both the consumers' arming and the chip's word.
+   */
+  private hasSpectrumTap(): boolean {
+    const bridge = this.native;
+    return bridge?.hasNativeSpectrum === true && typeof bridge.startSpectrum === 'function';
   }
 
   /**
@@ -2626,9 +2825,9 @@ export class AudioEngine {
       return;
     }
     const track = this.track;
-    const bridge = this.native;
     if (!track) return;
-    if (!bridge?.hasNativeSpectrum || !bridge.startSpectrum) {
+    // v1.9.26 — the same question the chip's word asks (`hasSpectrumTap`), asked once, in one place.
+    if (!this.hasSpectrumTap()) {
       /*
        * No tap in this build (Android today, and the browser). v1.7 played a second, silent copy
        * of the stream in the page to get samples here — a second engine, a second clock, and the

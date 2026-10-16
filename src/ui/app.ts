@@ -3344,27 +3344,46 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
   shell.nowDuration.textContent = formatTime((durationMs || 0) / 1000);
 
   /*
-   * v1.9.6 — **the chip's third word.**
+   * v1.9.6 — **the chip's third word.** v1.9.26 — **and it is the engine's word now, not this
+   * file's.**
    *
-   * `status.spectrum` is false for a fraction of a second at every track change: the track that is
-   * handed over to has its own tap installed, and until that tap produces its first live frame there
-   * are no bars. Two words for three states meant that window printed *native audio* — the owner's
-   * report word for a whole track's worth of no bars, coming back at every boundary. `arming` is the
-   * engine's own statement that the tap is installed, the player is playing, and no frame has come
-   * back yet: the spectrum is coming, so the chip says so and the colour sits between the two.
+   * This used to be built here, out of three fields:
+   *
+   *     status.spectrum ? 'spectrum' : status.spectrumArming ? 'spectrum…' : status.backend === 'native' ? 'native audio' : 'theme'
+   *
+   * — and that third branch is a capability claim reached **by elimination**. `spectrumArming` is
+   * only reported while a native track is *playing*, so every state that is not playing fell through
+   * to *native audio*, which is the word for *"the spectrum cannot run on the item playing now"*:
+   * `paused`, `ended`, `interrupted` and "between two tracks" all read it. The owner's screenshot on
+   * a playlist page (a track paused at 1:28 / 4:55, chip `NATIVE AUDIO`, line `paused · native ·
+   * spectrum off`) is that branch, and *"it keeps flashing to native audio"* is what it does at every
+   * pause and every change on those screens.
+   *
+   * So the word is one fact about the item in hand, computed once in the engine
+   * (`EngineStatus.visualiser`, `src/player/engine.ts`) from facts only the engine has — the state,
+   * the backend, whether the bars are being fed, whether the tap is being asked, and whether this
+   * build can measure this item at all. **This file prints it and nothing else**, so the bar and
+   * anything else that shows the mode read one source and cannot disagree. What each word means is
+   * documented where it is decided (`VisualiserWord`).
    */
-  const chipWord = status.spectrum ? 'spectrum' : status.spectrumArming ? 'spectrum…' : status.backend === 'native' ? 'native audio' : 'theme';
-  shell.barChip.textContent = loading ? 'loading…' : `${chipWord}${cap === null ? '' : ` · ${cap} kbps`}`;
-  shell.barChip.className = `mode-chip ${status.spectrum ? 'live' : status.spectrumArming ? 'arming' : 'fallback'}${cap === null ? '' : ' capped'}`;
+  const chip = status.visualiser;
+  shell.barChip.textContent = loading ? 'loading…' : `${chip.word}${cap === null ? '' : ` · ${cap} kbps`}`;
+  /*
+   * The tone is the engine's too, and the loading word — the tap's own, and the one this file owns
+   * because its input (`queue.isLoading`, the synchronous paint of v1.9.0) is the queue's — wears the
+   * neutral `stopped` colour: a load is neither a measurement nor a fallback, and it has never been
+   * a failure.
+   */
+  shell.barChip.className = `mode-chip ${loading ? 'stopped' : chip.tone}${cap === null ? '' : ' capped'}`;
 
   /*
    * v1.9.5 — **the app says its own reason, on the screen.**
    *
    * The boundary failure this release exists for reproduces only on the owner's phone, and three
    * rounds of diagnosis were made from source alone — which is why the chip's own evidence was
-   * never available: `native audio` is what this chip says for *every* state that is not playing,
-   * so `paused`, `ended`, `interrupted`, "no tap" and "the adoption failed" are the same word on
-   * screen. `modeReason` has been written in seventeen places and read by no screen at all.
+   * never available: `native audio` was what this chip said for *every* state that is not playing
+   * (v1.9.26 moved the word into the engine, so it no longer says that), and `modeReason` has been
+   * written in seventeen places and read by no screen at all.
    *
    * So the line carries the whole account at once: the machine's state, the engine that is behind
    * it, whether the spectrum is actually fed, what the *player* last said (its own state, its own

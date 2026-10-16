@@ -25,7 +25,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { AudioEngine, reduce, type EngineOptions, type EngineState, type PlayerEvent } from '../src/player/engine.ts';
+import { AudioEngine, reduce, type EngineOptions, type EngineState, type EngineStatus, type PlayerEvent } from '../src/player/engine.ts';
 import type { NativeBridge, NativeBridgeEvents, NativeTrackInfo, NativeTruth } from '../src/player/native.ts';
 import type { TrackRequest } from '../src/player/engine.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
@@ -62,6 +62,13 @@ const LOCAL_TRACK: TrackRequest = {
 
 interface Recording {
   calls: string[];
+  /**
+   * v1.9.26 — **a build whose native player has no spectrum tap at all**, which is Android on this
+   * project (`hasNativeSpectrum: false`; the engine asks that before it decides anything). It is the
+   * one case `native audio` is licensed to mean, so it is a case the harness has to be able to
+   * state: every other test in this file is the iOS build, which has a tap.
+   */
+  hasSpectrum: boolean;
   /** Every URL the bridge was asked to load, in order — which track the one asset holds. */
   loads: string[];
   /**
@@ -365,7 +372,7 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
       listenRemoteCommands() {
         return () => undefined;
       },
-      hasNativeSpectrum: true,
+      hasNativeSpectrum: record.hasSpectrum,
       async startSpectrum(url: string, positionMs: number) {
         record.calls.push(`startSpectrum@${Math.round(positionMs)}`);
         record.spectrum.startCalls += 1;
@@ -682,6 +689,7 @@ function recording(overrides: Partial<Recording> = {}): Recording {
     loads: [],
     prepares: [],
     tapProducing: true,
+    hasSpectrum: true,
     adopts: 0,
     preparedUrl: null,
     seekNeverSettles: false,
@@ -2556,3 +2564,148 @@ test('the same advance happens in a browser, where the element’s own `ended` i
     await stopAll(engines);
   }
 });
+
+/**
+ * The chip's word for a status, read where it lives (v1.9.26).
+ *
+ * Since this card the word is **one field** — `EngineStatus.visualiser.word` — computed in the
+ * engine, so every surface that shows the mode reads one fact and no two of them can disagree.
+ * A tree that predates that field is read here with **the chip's own expression as it stood at
+ * `8689a2e`** (`src/ui/app.ts:3356`), which is what makes the fail-before below reproducible rather
+ * than asserted: run this file against the engine before the change and the paused reading is
+ * *native audio* — the word in the owner's screenshot; run it after, and it is *paused*.
+ */
+function chipWord(status: EngineStatus): string {
+  return (
+    status.visualiser?.word ??
+    (status.spectrum ? 'spectrum' : status.spectrumArming ? 'spectrum…' : status.backend === 'native' ? 'native audio' : 'theme')
+  );
+}
+
+/**
+ * v1.9.26 — **the chip's word when the transport is not playing is the transport's, not a
+ * capability the app still has.**
+ *
+ * The owner, on the v1.9.24 build he installed, with a track paused on a playlist page:
+ *
+ * > *"the spectrum always works but on the playlist pages, the bottom bar seems to keep flashing to
+ * > native audio spectrum off even though the spectrum is working fine"*
+ *
+ * — his screenshot reading `NATIVE AUDIO` over `paused · native · spectrum off`. The word was built
+ * in the UI from three fields, and its third branch is a capability claim reached **by
+ * elimination**: `spectrumArming` is only ever reported while a native track is *playing*, so every
+ * state that is not playing — paused, ended, interrupted, between two tracks — fell through to
+ * *native audio*, which is the word for *"the spectrum cannot run on the item playing now"*. On a
+ * playlist page that flips at every pause and every change, which is the flashing he describes.
+ *
+ * The invariant this test holds, per state, on the iOS build (a tap, and the analyser's web
+ * equivalent), and on the build that genuinely has no tap:
+ *
+ *   1. loading → `loading`, playing → `spectrum`;
+ *   2. **paused → `paused`** — the state his screenshot is in;
+ *   3. a change onto an item whose tap has produced nothing → `spectrum…` (§515.4, unchanged);
+ *   4. the end of a track → `ended`;
+ *   5. and a build with **no tap at all** (Android today) → `native audio`, playing *and* paused:
+ *      that build cannot measure any item, so the word is the truth about it whatever the transport
+ *      is doing. It is reachable, and this is the only thing it may ever mean.
+ */
+test('the chip’s word is the transport’s when the transport is the reason — never a capability it still has (v1.9.26)', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const engine = nativeEngine(record);
+    engines.push(engine);
+
+    // 1. A cold start: the stream is being fetched, and that is what the chip says. Asserted at the
+    //    end of this test, on purpose: the app has always printed its own "loading…" for this state,
+    //    so it is not where the owner ever read the wrong word — his screenshot is the paused read
+    //    below, and that is where the fail-before has to land.
+    const starting = engine.play(TRACK);
+    const loading = engine.status();
+    say(`1. a cold start: state ${loading.state} — the chip reads "${chipWord(loading)}"`);
+    await starting;
+    await settle(250);
+
+    const playing = engine.status();
+    say(`2. playing: spectrum ${playing.spectrum} — the chip reads "${chipWord(playing)}"`);
+    assert.equal(chipWord(playing), 'spectrum', 'the bars are being fed by the item in hand');
+
+    /*
+     * 2. **PAUSED — the owner's screenshot.** On the installed build this read `NATIVE AUDIO` with
+     *    `spectrum off` under it while the track sat at 1:28 / 4:55 on a playlist page. Nothing is
+     *    wrong with the spectrum; nothing is playing, which is the whole of what has happened.
+     */
+    await engine.pause();
+    await settle(150);
+    const paused = engine.status();
+    say(`3. paused: state ${paused.state}, spectrum ${paused.spectrum}, arming ${paused.spectrumArming} — the chip reads "${chipWord(paused)}" (${paused.modeReason})`);
+    assert.equal(paused.state, 'paused', 'the machine is paused');
+    assert.equal(paused.spectrum, false, 'and nothing is being measured, which is true');
+    assert.equal(
+      chipWord(paused),
+      'paused',
+      'the chip says what the transport is doing — not his "native audio", which is a claim about a capability this build still has',
+    );
+
+    // 3. And the mode is not lost: it comes back with the transport.
+    await engine.resume();
+    await settle(250);
+    assert.equal(chipWord(engine.status()), 'spectrum', 'the bars come back with the transport, not with a re-attach');
+
+    // 4. A change onto an item whose own tap has produced nothing: §515.4's word, unchanged.
+    record.tapProducing = false;
+    const changing = engine.play(OTHER_TRACK);
+    assert.equal(chipWord(engine.status()), 'loading', 'a track change is a load, and says so');
+    await changing;
+    await settle(150);
+    const arming = engine.status();
+    say(`4. the new item’s tap has produced nothing: arming ${arming.spectrumArming} — the chip reads "${chipWord(arming)}"`);
+    assert.equal(chipWord(arming), 'spectrum…', 'the spectrum is coming: §515.4’s word, not a capability claim');
+
+    /*
+     * 5. The end of a track. There is no queue on this harness, so the machine rests on `ended` —
+     *    which is the state a playlist page's own change passes through, and one of the states the
+     *    old expression printed the capability word for. The wait is the app's own rule and not the
+     *    test's convenience: a completion that arrives within `TRANSPORT_MUTE_MS` (1500 ms) of a
+     *    transport we sent is describing the request, and the bridge drops it (`inTransition`).
+     */
+    record.tapProducing = true;
+    await settle(1600);
+    record.events?.onComplete();
+    await settle(150);
+    const ended = engine.status();
+    say(`5. the track ended: state ${ended.state} — the chip reads "${chipWord(ended)}"`);
+    assert.equal(ended.state, 'ended', 'the machine is on the end of the track');
+    assert.equal(chipWord(ended), 'ended', 'between two tracks, the transport is what is happening');
+
+    /*
+     * 6. **A build with no tap at all** — Android today, and the one case the capability word is
+     *    licensed for. It reads that word playing *and* paused, because it is not a statement about
+     *    a moment: that build cannot measure any item. Removed, the word would be gone from the app.
+     */
+    const noTap = nativeEngine(recording({ hasSpectrum: false }));
+    engines.push(noTap);
+    await noTap.play(TRACK);
+    await settle(200);
+    const withoutTap = noTap.status();
+    say(`6. a build with no tap: spectrum ${withoutTap.spectrum}, spectrumArming ${withoutTap.spectrumArming} — playing, the chip reads "${chipWord(withoutTap)}"`);
+    assert.equal(chipWord(withoutTap), 'native audio', 'this build cannot measure this item, and that is the word for it');
+    await noTap.pause();
+    await settle(120);
+    const withoutTapPaused = noTap.status();
+    say(`7. the same build, paused: the chip reads "${chipWord(withoutTapPaused)}" — the truth about the build, not about the transport`);
+    assert.equal(chipWord(withoutTapPaused), 'native audio', 'a build with no tap cannot measure anything, playing or not');
+
+    /*
+     * And the state this test opened on, asserted here rather than there: every transport state has
+     * a word, and a load's is its own — which is what the app renders as "loading…" (its own word for
+     * the tap's synchronous paint, v1.9.0), so nothing on the screen moves for a load.
+     */
+    assert.equal(chipWord(loading), 'loading', 'a track that is being fetched is loading — not a build that cannot measure it');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+

@@ -879,6 +879,18 @@ img {
   border-color: color-mix(in srgb, var(--ok) 25%, var(--line));
 }
 
+/*
+ * v1.9.26 — the fourth: **the transport is doing something and none of the three above is what is
+ * happening.** A paused track on a playlist page, the end of a song before the next one loads, a
+ * load: the spectrum is neither measuring nor lost, and the word is the transport's own. Neither a
+ * measurement nor a failure, so it wears neither colour — it reads as information, dim, which is
+ * what it is. (v1.9.6 made the same argument for `arming` between the green and the amber.)
+ */
+.mode-chip.stopped {
+  color: var(--text-dim);
+  border-color: var(--line);
+}
+
 .mode-chip.fallback {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 45%, var(--line));

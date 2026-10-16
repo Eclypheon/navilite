@@ -631,3 +631,63 @@ one half of it only his phone runs.
    `prepare` on his phone, and that this item's analysis now survives it, is **unverified on device** until he
    skips out of a loud passage on the build that carries it.
 
+## The chip's word is a fact about the item in hand, never a capability reached by elimination, 2026-10-16 (card `t_9329e3b0` — unreleased)
+
+The owner, on the v1.9.24 build he had just installed, with a track loaded and **paused** on the playlist page for
+`Jap` (1:28 / 4:55). His screenshot: the mini-player's chip reads `NATIVE AUDIO`, and the debug line under it reads
+`paused · native · spectrum off · player: paused · pause`:
+
+> *"the spectrum always works but on the playlist pages, the bottom bar seems to keep flashing to native audio
+> spectrum off even though the spectrum is working fine"*
+
+1. **The word is one fact, on the status, computed in the engine** (`EngineStatus.visualiser: { word, tone }`),
+   because every input it has is the engine's and one of them — *can this build measure this item at all?* — the UI
+   could not read. It replaces the expression that was at `src/ui/app.ts:3356`
+   (`status.spectrum ? 'spectrum' : status.spectrumArming ? 'spectrum…' : status.backend === 'native' ? 'native
+   audio' : 'theme'`), whose third branch was a **capability claim reached by elimination**: `spectrumArming` is only
+   ever reported while a native track is *playing*, so `paused`, `ended`, `interrupted`, `loading` and "nothing
+   loaded" all fell through to the word that means *"the spectrum cannot run on the item playing now"*. The app now
+   prints the field and computes nothing (`VisualiserWord` is the definition of every word).
+2. **The words, and what each one claims.** `spectrum` (the bars are being fed by the item in hand now);
+   `spectrum…` (a native item is playing and its tap has not answered for it — §515.4's word, and the word a tap
+   refused for a whole track keeps: that call of 2026-10-16 stands, re-litigated nowhere); the transport's own
+   words — `idle`, `loading`, `paused`, `ended`, `interrupted`, `error` — worn when **the only reason nothing is
+   being measured is that nothing is playing**; `native audio` (a build with no tap on its native player — Android
+   today — or this item's tap ruled out *while it plays* by its own verdict: silence for
+   `ZERO_POLLS_BEFORE_THEME`, or one frozen frame over and over); `theme` (the same statement on the web path).
+   Every transport state's word is a total `Record` (`STOPPED_WORD`), so a state added to `EngineState` does not
+   compile until its word exists.
+3. **What licenses a capability word is an *evidenced* absence**, which is now a three-valued fact
+   (`measuringPathForTheItem`): `tap`/`analyser` (the path exists), `none` (a bridge that is built and says it has
+   no tap; a browser whose Web Audio graph could not be built) and `unknown` (nothing has answered yet — a bridge
+   still being built is a load in progress, and `startNative` reports `error` if it cannot be built). Only `none`
+   spends `native audio`/`theme`; `unknown` falls to the transport's word, because "the bridge is not built yet" is
+   not a fact about what the build can do. Two things are deliberately not read as `none`: a **suspended audio
+   context** (a lifecycle fact — WebKit suspends Web Audio when the page is hidden and the visualiser re-arms on
+   the way back in) and a **cross-origin stream the library will not hand over** (this item's own verdict, spoken
+   while it plays).
+4. **No masking, and no removal.** The word is recomputed from current facts on every status event (the player
+   emits a dozen a second) — nothing is frozen, and nothing is hidden. The legitimate case is *more* reachable, not
+   less: a build with no tap wears `native audio` in every transport state, playing or paused, which the harness
+   states on a bridge whose `hasNativeSpectrum` is false. The native half is untouched: what may still end the
+   chip's third word while a native track *plays* is unchanged (§515, §516 — this item's frames, the silence
+   verdict, the frozen verdict, a build with no tap), and no `spectrumArming` / `spectrumLive` / verdict
+   semantics moved.
+5. **The UI change, and two documentation truths.** The chip prints `visualiser.word` and wears
+   `visualiser.tone`, with the app's own `loading…` kept for the tap's synchronous paint (v1.9.0) — and the new
+   `stopped` tone, which is neither a measurement (green/`live`) nor a fallback (amber/`fallback`), so a pause
+   reads as information rather than as a failure. The chip's own comment that said *"`native audio` is what this
+   chip says for every state that is not playing"* is corrected, and the README's sentence about *"the mode chip
+   on the player bar and the now-playing screen"* is corrected with it: **the bar's chip is the app's only one**
+   (the now-playing screen lost its own in v1.1, `2ed9ed7`), which is why "the two surfaces cannot disagree" is
+   satisfied by there being one field and one node.
+6. **What this does not change, stated because it looks like the same defect and is not.** On the *web* path, a
+   **playing** item whose analyser has not yet produced its first frame wears `theme` for ~90 ms (the meter
+   samples every 100 ms); that window is the pre-existing verdict timing of the web path — no transport state is
+   involved, the owner's build is native, and the native equivalent is covered by `arming` (v1.9.6). The probe
+   filters on the transport state for exactly this reason, and §28.5 says so rather than implying the run is
+   clean of the word.
+7. **No version bump, no artifact, no tag.** The release is its own card, gated on review; this is the fix, its
+   two harnesses, and a commit. `CHANGELOG.md`'s release heading is untouched (the words he reads are written at
+   release time).
+

@@ -2891,3 +2891,160 @@ IPA was built from; this section is the one commit after it, written from that b
 
 Raw runs (agent scratch, attached to the release card `t_90ebc65f`): `typecheck-1925.txt`, `npm-test-1925.txt`,
 `offline-check-1925.txt`, `spectrum-proof-1925.txt`.
+
+## 28. the chip said *native audio* for a paused track on a playlist page — the word was a capability claim reached by elimination (2026-10-16, unreleased)
+
+Card `t_9329e3b0`. The owner, on the v1.9.24 build he had just installed, with a track loaded and **paused** at
+1:28 / 4:55 on the playlist page for `Jap` — his screenshot reading `NATIVE AUDIO` on the mini-player over
+`paused · native · spectrum off · player: paused · pause`:
+
+> *"the spectrum always works but on the playlist pages, the bottom bar seems to keep flashing to native audio
+> spectrum off even though the spectrum is working fine"*
+
+**No version is bumped, no IPA/APK is built, the `CHANGELOG.md` release heading is untouched** — this is the fix,
+its two harnesses and a commit; the release is its own card, after review.
+
+### 28.1 The defect, in one paragraph
+
+The chip's word was built in the UI out of three fields — `src/ui/app.ts:3356`:
+
+```
+status.spectrum ? 'spectrum' : status.spectrumArming ? 'spectrum…' : status.backend === 'native' ? 'native audio' : 'theme'
+```
+
+`spectrumArming` is only ever reported while a native track is *playing* (`spectrumArming: this.spectrumArming &&
+this.backend === 'native' && this.state === 'playing'`), so the expression's third branch was reached **by
+elimination** by every state that is not playing: `paused`, `ended`, `interrupted`, `loading`, and "a track is
+loaded but nothing has been played". `native audio` is the word for *"the spectrum cannot run on the item playing
+now"*, so a stopped transport was announcing a capability the app has not lost — and on a playlist page, which is
+where his rows are, that word came and went at every pause and every change (`ended` while the next track loads,
+`paused` with the transport sitting still). It is the same class as v1.9.24's defect, one layer up: a word about a
+capability, decided by something that is not evidence about it.
+
+### 28.2 What changed
+
+| file | why |
+| --- | --- |
+| `src/player/engine.ts` | **the word is one fact, on the status** (`EngineStatus.visualiser: { word, tone }`, `VisualiserWord`, `VisualiserTone`), computed in one place (`visualiser` / `visualiserWord`) from facts only the engine has: the state, the backend, whether the bars are being fed, whether the tap is being asked, and — the fact the UI could not read at all — **whether this build can measure the item in hand**. `measuringPathForTheItem()` is that fact and it is deliberately **three-valued**: `tap`/`analyser` (the path exists), `none` (an *evidenced* absence: a bridge that is built and reports `hasNativeSpectrum: false`, a browser whose Web Audio graph could not be built) and `unknown` (nothing has answered yet — a bridge still being built is a load in progress, and a build that fails reports `error`). Only `none` spends a capability word. Every transport state's word is a total `Record` (`STOPPED_WORD`), so a state added to `EngineState` does not compile until its word is written. `hasSpectrumTap()` is now the one place both `startConsumers` and the word ask the tap question |
+| `src/ui/app.ts` | the chip **prints** `status.visualiser.word` and wears `status.visualiser.tone` — the three-field expression is deleted, with the reason it was wrong written where it stood; the app's own `loading…` (the tap's synchronous paint, v1.9.0, whose input `queue.isLoading` is the queue's) is kept, and the comment that said *"`native audio` is what this chip says for every state that is not playing"* is corrected |
+| `src/styles.css` | `.mode-chip.stopped` — the fourth tone, dim: a pause is neither a measurement (green) nor a fallback (amber). v1.9.6 made the same argument for `arming` |
+| `README.md` | the sentence claiming *"the mode chip on the player bar and the now-playing screen"* is corrected: the bar's chip is the app's **only** one (the now-playing screen lost its own in v1.1, `2ed9ed7`), which is why "two surfaces cannot disagree" reduces to one field and one node |
+| `test/engine-native.test.ts` | the v1.9.26 case: `chipWord()` reads `EngineStatus.visualiser.word` and, on a tree that predates the field, **the chip's own pre-fix expression** — so the fail-before is the *word* and not a missing property; the fake can now state a build with no tap at all (`hasSpectrum: false`) |
+| `test/chip-word-browser.test.ts` | **new**: the real app in Chrome at 393 x 852 over the mock library, reading `.mode-chip`'s own text at each state on a playlist page — plus every distinct word the chip wears during the run, with the millisecond it changed at |
+
+### 28.3 The fail-before, and the same check after
+
+Both harnesses first ran against the tree as it stood at `8689a2e` (the fix not applied). **The native word** — the
+one in his screenshot — needs the native backend, so it is the engine harness:
+
+```
+$ node --test --test-name-pattern 'never a capability it still has' test/engine-native.test.ts   # before
+    1. a cold start: state loading — the chip reads "native audio"
+    2. playing: spectrum true — the chip reads "spectrum"
+    3. paused: state paused, spectrum false, arming false — the chip reads "native audio" (paused — the spectrum is a picture of what is being heard)
+✖ the chip’s word is the transport’s when the transport is the reason — never a capability it still has (v1.9.26)
+  AssertionError: the chip says what the transport is doing — not his "native audio", which is a claim about a capability this build still has
+  + 'native audio'
+  - 'paused'
+ℹ tests 1 · pass 0 · fail 1 · duration_ms 754.2
+```
+
+The word the whole card is about, on a paused track, from the shipped expression. The same over the whole suite —
+the browser harness, whose backend is `web` and therefore reaches the *other* branch of the same expression
+(`theme`), on the screen he photographed:
+
+```
+$ node --test --test-name-pattern 'the chip’s word on the screen he photographed' test/chip-word-browser.test.ts   # before
+      4. PAUSED (his screenshot): chip "theme" · state paused · spectrum false
+      5. still paused, on the playlists screen: chip "theme" · state paused
+      6. still paused, back on a playlist page: chip "theme" · state paused
+      7. the now-playing screen: chip "theme" · state paused
+           429 ms  "theme"   (the chip changed, state playing)
+          1402 ms  "theme"   (the chip changed, state paused)
+          2104 ms  "theme"   (paused, on the playlist page (his screenshot), state paused)
+          2476 ms  "theme"   (still paused, on the playlists screen, state paused)
+          2848 ms  "theme"   (still paused, back on a playlist page, state paused)
+          3267 ms  "theme"   (the now-playing screen, state paused)
+✖ AssertionError: paused on a playlist page reads the transport's own word, not a capability (was "theme")
+  'theme' !== 'paused'
+```
+
+Each paused reading, and the run of changes with the transport standing still, all wearing the capability word.
+After the change, both harnesses, one command:
+
+```
+$ node --test --test-name-pattern 'chip’s word' test/engine-native.test.ts test/chip-word-browser.test.ts   # after
+      1. the tap: chip "loading…" ... engine word "loading" · tone "stopped"
+      2. playing: chip "spectrum" ... engine word "spectrum" · tone "live"
+      3. playing, browsing the playlist page: chip "spectrum" · state playing
+      4. PAUSED (his screenshot): chip "paused" · state paused · spectrum false · engine word "paused" · tone "stopped"
+      5. still paused, on the playlists screen: chip "paused" · state paused
+      6. still paused, back on a playlist page: chip "paused" · state paused
+      7. the now-playing screen: chip "paused" · state paused · 1 chip node ["paused"]
+      8. resumed: chip "spectrum" · state playing · spectrum true
+      9. mid track change: chip "spectrum" · state playing
+     10. the new track playing: chip "spectrum" · state playing
+      every distinct word the chip wore (18): loading… (310 ms) · theme (330 ms) · spectrum (428 ms) · paused (1279 ms) · … · spectrum (4485 ms)
+      of those, worn while the transport was not playing: ["loading…","paused"] (8 changes)
+✔ the chip’s word on the screen he photographed: a paused track on a playlist page is not a capability claim (5197.4ms)
+    1. a cold start: state loading — the chip reads "loading"
+    2. playing: spectrum true — the chip reads "spectrum"
+    3. paused: state paused, spectrum false, arming false — the chip reads "paused" (paused — the spectrum is a picture of what is being heard)
+    4. the new item’s tap has produced nothing: arming true — the chip reads "spectrum…"
+    5. the track ended: state ended — the chip reads "ended"
+    6. a build with no tap: spectrum false, spectrumArming false — playing, the chip reads "native audio"
+    7. the same build, paused: the chip reads "native audio" — the truth about the build, not about the transport
+✔ the chip’s word is the transport’s when the transport is the reason — never a capability it still has (v1.9.26) (3334.3ms)
+ℹ tests 2 · pass 2 · fail 0 · duration_ms 5283.4
+```
+
+Read as the card reads it: **every transport state has its own word** (a load → `loading`, playing → `spectrum`,
+an item whose tap has not answered → `spectrum…` (unchanged, §515.4), the end of a track → `ended`, paused →
+`paused`), the capability word is reachable **only** where the capability is genuinely absent — a build with no tap
+wears `native audio` playing *and* paused, because that is a fact about the build — and the engine's field is what
+the DOM prints (asserted on `playing`, `paused` and `resumed`: `onScreen === status.visualiser.word`), with the one
+chip node on the now-playing screen reading the same word.
+
+### 28.4 The suite, the invariant in the code, and what the change is not
+
+| check | reading |
+| --- | --- |
+| `npm run typecheck` | `tsc --noEmit` clean |
+| `npm run build` | `tsc --noEmit` + `vite build` clean → `dist/assets/index-C41QBNo6.js` (201.79 kB, gzip 63.66 kB) |
+| `node --test "test/*.test.ts"` | **260 tests, 260 pass, 0 fail, 0 skipped** in 37.1 s (258 before this card, +2: the engine case and the new browser probe) |
+
+The invariant is stated where it is enforced, in the engine:
+
+> *Nothing is being measured, and there are two different reasons … First the question the UI could not ask: **can
+> this build measure this item at all?** An evidenced `none` is the only thing the capability words are allowed to
+> mean.* (`visualiserWord`, `src/player/engine.ts`)
+
+An audit of the final file holds it: the only two writers of `native audio` / `theme` in the word are the evidenced
+`none` and the *playing* line whose words §515/§516 settled; every other state returns `STOPPED_WORD[state]`. No
+transport state can reach a capability word, a state added to `EngineState` cannot compile without a word, and the
+one field is what the UI prints — no second expression exists in the app. Nothing is masked: the word is recomputed
+on every status event from current facts, the branch is replaced rather than frozen or deleted, the legitimate case
+is *more* reachable (a no-tap build, in every transport state), `spectrumArming`/`spectrumLive` and every verdict
+keep their meaning, and no file under `ios/`, `android/` or `tools/` changed.
+
+### 28.5 Not verified here, and not claimed
+
+1. **No phone and no simulator.** The native readings are the real `AudioEngine` through the fake bridge; the
+   browser readings are the real app in Chrome, whose backend is `web` — so his screenshot's exact word
+   (`NATIVE AUDIO`) is reproduced on the harness and the *same* defect on the screen is reproduced as `theme`, the
+   other branch of the same expression. That the chip on his IPA now reads `paused` is a claim about the same code
+   path, not a reading off his device.
+2. **The ~90 ms web window is unchanged and is *not* claimed to be gone.** On the web path a *playing* item whose
+   analyser has not yet produced its first frame wears `theme` (the meter samples every 100 ms), and a
+   cross-origin stream with no ACAO wears it from the verdict on. That is the pre-existing web verdict timing — no
+   transport state is involved, the native equivalent has been covered by `arming` since v1.9.6 — and the probe's
+   sequence assertion is therefore filtered on the transport state rather than on the whole run. It is named here
+   because it looks like the same defect and is not.
+3. **The transport word for `ended` / `interrupted` is defined and only partly exercised.** `ended` is read on the
+   harness (after `TRANSPORT_MUTE_MS`, which is the app's own rule about a completion arriving on the back of a
+   transport); `interrupted` and `error` are exercised nowhere in this card — their words are in the total `Record`
+   the compiler enforces, and no probe has read them off the screen.
+4. **What the harness cannot see** is the phone's own transport: the fake decides `hasNativeSpectrum` and the
+   bridge's build timing, and a real device decides them from the plugin. The falsification to run is §28.3's first
+   command against a tree without the fix (it reads *native audio* while paused), and then on his build: pause a
+   track on a playlist page and read the chip — `paused`, not `native audio`.

@@ -126,9 +126,14 @@ that and never pretends:
 | Native playback on a build with no tap (Android today) | Album-art theme, and the app says exactly that. There is no second copy of the stream in the page to measure instead: v1.7 deleted the second audio engine. |
 | Audio context suspended (iOS background) | Album-art theme while the app is out of sight; the music is native and keeps playing; the visualiser re-arms on the way back in. |
 
-The mode chip on the player bar and the now-playing screen always names the live mode
-(`spectrum` / `theme` / `native audio`) and the reason underneath it. Two specific traps are
-handled explicitly, because both were observed while building this:
+The mode chip on the player bar names what the visualiser is doing for the track in hand — the live
+`spectrum`, `spectrum…` while a native tap is still answering for it, `native audio` / the album-art
+theme **only** where the bars genuinely cannot run on that track, and the transport's own word
+(`paused`, `ended`, `loading…`) when nothing is playing — with the reason underneath it. The word is
+computed once, in the engine (`EngineStatus.visualiser`), and the bar prints it: one source, so no
+two surfaces can disagree about the mode. (The bar's chip is the app's only one — the now-playing
+screen lost its own in v1.1 and shows the same bar.) Two specific traps are handled explicitly,
+because both were observed while building this:
 
 - the analyser's destination buffer is **cleared before every read** — a tainted analyser can
   leave the previous track's frame in place, which would display a stale spectrum as if it were
