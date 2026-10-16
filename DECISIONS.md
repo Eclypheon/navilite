@@ -968,7 +968,7 @@ that card).
    fix, with its fail-before proof, is card `t_4253898e`; the release that may carry it is a later card, per the
    owner's rule of 2026-10-16).
 
-## The pill never reads "spectrum…" again, and the bottom container learns its regions, 2026-10-17 (owner's call, design for v2.0-beta — card `t_66cf0e1f`, unreleased)
+## The pill never reads "spectrum…" again, and the bottom container learns its regions, 2026-10-17 (owner's call, design for v2.0-beta — card `t_66cf0e1f`, implemented by `t_88ee09ab`, released as v2.0-beta)
 
 The design is `docs/design-v2.0-beta.md`. This entry records the owner's decisions in it and the one that
 **supersedes an earlier entry of his**: §515.4's word, spent on one more transition by §833.3.
@@ -1037,7 +1037,6 @@ The design is `docs/design-v2.0-beta.md`. This entry records the owner's decisio
    untouched: this entry is about the *word*, not about what ends a verdict. (b) `t_9c379c56`'s second finding (a
    suspended `AudioContext` reaching the capability word) stays unrepaired. (c) Whether the arming window should be
    visible in the **word** rather than only in the colour is a new call of his, and it is not made here.
-10. **Nothing shipped.** `DECISIONS.md` and `docs/design-v2.0-beta.md` only: no version bump, no tag, no artifact,
-    `CHANGELOG.md`'s release headings untouched, `src/` and `test/` untouched. The implementation is card
-    `t_88ee09ab`; the release that carries it is a later card, per his rule of 2026-10-16.
+10. **Released as v2.0-beta.** The word set and the regions above are what ships: item 2 is `279cfce` and items 3-4 are `6305608`, landed on `main` unreleased on 2026-10-17 with the refactor slices around them (`9e74ca7`, `3c054d4`, `30ead77`, `deafea9`, `f10ec06`, `3ba040c`, and the P3/P4 probe `5efc3ac`). The cut is card `t_b97b252b` — the version bump, the "What's new" entry, the tag `v2.0-beta` and the artifact in one commit. What the cut does **not** touch: `CHANGELOG.md`'s earlier headings, `docs/verification.md` §30-§32 (history), and §515.4 / §833.3, which stay as written and are superseded by this entry rather than edited.
+11. **One correction the cut made to this design's own drafted words.** §6's optional housekeeping bullet claimed *"the two giant files everything else had to be read through are now a handful of small ones"* — **false, and it does not ship as written**: after the mandatory slices `src/ui/app.ts` is **2,250 lines** and `src/player/engine.ts` is **3,448**, both still the two largest files in `src/`, and the split only claims what happened — seven modules came out of them (`player-bar.ts` 351, `context.ts` 112, `now-screen.ts` 429, `shell.ts` 522, `engine-contract.ts` 358, `engine-helpers.ts` 55, `warm-pool.ts` 110). The bullet that ships says the code was split into more, smaller files and promises nothing about the two big ones being gone. Nothing else about §3.3 changes: from this release the arming window is still invisible **in the word** (colour `arming` + the chip's `spectrumArming` tooltip only), which is the narrowing §3.3 itself states.
 

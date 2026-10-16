@@ -310,3 +310,10 @@ Plain language, user-visible changes only. The app shows this same list under
 ## 1.9.28 — 2026-10-16
 
 - The player bar at the bottom keeps one size: it no longer grows or shrinks when the spectrum picks up the song or loses it.
+
+## 2.0-beta — 2026-10-17
+
+- The bottom bar no longer sends you somewhere you did not ask to go. Pausing, playing, skipping on or back, and dragging the time bar all leave the screen you are on exactly where it is.
+- Tap the song in the bottom bar while you are in a playlist and the list scrolls to it, putting it in the middle of the screen. Tap it again and you get the spectrum for that song. If the song is already on the screen, one tap takes you straight there.
+- The label on the bottom bar only ever says "spectrum" when a song is playing. The "spectrum…" that appeared for a moment at every song change — and after a pause, and when you came back to the app — is gone, and the bar shows it with a different colour while the new song's reading is still being set up.
+- The app is tidier behind the scenes: the code it is built from was split into more, smaller files, so changes to it are quicker and cheaper to make. Nothing you see or hear changed.
