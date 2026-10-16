@@ -512,3 +512,37 @@ turned out to be that collision. What the fix establishes, and what it changes a
    `DevToolsActivePort` instead of a guessed one, and the browser's whole process group killed instead of its
    launcher. The suite command itself is still exactly `node --test "test/*.test.ts"`.
 
+## 1.9.24, 2026-10-16 — the chip's third word is a fact about the item playing now, never a clock (the spectrum fix of `t_bec7b1bd`, released)
+
+`b760253` (on `main`, unreleased until this cut) replaced the engine's timed verdict with a per-item fact. What it
+establishes, and the one state it deliberately leaves open.
+
+1. **While a native track is playing, the chip's third word ("spectrum…") may only be ended by a fact about the tap
+   on the item playing now**: this item's own frames answering *live* (`src/player/engine.ts:2751`), this item's
+   frames reading *silent* after 12 polls with the counter growing for this item (`2780-2789`), this item's frames
+   *frozen* (the same frame repeated 10 polls, `2805`), or a build with no tap at all (`2542`). **No poll count,
+   elapsed millisecond, timer or retry budget is a term** — `MAX_SPECTRUM_RECHECKS`, `SPECTRUM_SLOW_POLL_MS`,
+   `slowSpectrumPoll` and `retrySpectrumOnce` (the 5 s retry) are deleted, not tuned.
+2. **The counter that decides "this item's tap has answered" is per item, not per process.** `tapFramesForItem`
+   (`2847`) counts only growth observed while the plugin says the tap is on the item the player is playing, and
+   `forgetTapFrames` rewinds it whenever the tap leaves that item (`startNative` `2300`, `adoptNativeAdvance`
+   `1831`, the orphan branch `2653`). It can only *under*-count, and it can never state another item's frames as
+   this item's — which is what the old reading (`frame.frames`, the tap's process-lifetime counter,
+   `NaviliteSpectrum.swift:605`) did on every change of track after the first that ever produced a frame, and why
+   the chip said *native audio* about a tap that had produced nothing for the item playing.
+3. **"This build has no tap" and "the tap is on an item the player has moved off" are two sentences, not one.** The
+   plugin has always sent `attached` (`NaviliteSpectrum.swift:422`) and the engine discarded it;
+   `NativeSpectrumFrame.attached` is declared (`src/player/native.ts`) and the orphan branch re-asks the plugin on
+   the plugin's own evidence rather than on elapsed time.
+4. **The state this leaves open, and why that is the deliberate answer.** A tap that is attached to this item and
+   producing nothing — standing still, or a request that never lands — generates no growth, so it never ends the
+   third word: the chip keeps saying "spectrum…" for the whole track where v1.9.23 eventually said *native audio*
+   from a clock. The engine cannot tell "will never attach" from "still attaching" without one, and the clock is
+   the false capability claim this fix exists to remove; the state is *named* on the reason line instead
+   (`spectrumArming`). Ending it needs a new input — the plugin's own refusal reason for this item — and that is
+   its own card (`t_aedab91d`), never a timer. This is a departure from §24.7 of the verification record, agreed
+   by review (`t_d7dd3e62`, SHIP).
+5. **What the fix does not touch.** The chip's three words, the one-engine rule, and the native half: no file under
+   `ios/` or `tools/` changed, the v1.9.22 guards on the three detach sites hold, nothing detaches or re-attaches
+   a tap on a playing item, and no envelope or idle spectrum is synthesised.
+

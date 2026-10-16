@@ -428,4 +428,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'A song that had been stored without its length now shows the right total while it plays, instead of `0:00` — including the one that was already playing when its name came back.',
       ],
     },
+    {
+      version: '1.9.24',
+      date: '2026-10-16',
+      items: [
+        'Changing from one song to another no longer switches the spectrum off. On the song you land on, the bar could read "native audio" and the bars stayed flat for the rest of the track, because the app was deciding that a song could not be read from a stopwatch instead of from the song that is playing. It waits for the phone\'s own answer about the track that is playing now, and a song whose reading is still being set up says "spectrum…" until the phone says otherwise.',
+        'A song\'s row now has a name for the screen reader. The row\'s spoken name was written before the title it carries had been filled in, so with VoiceOver a row announced itself as "Play, downloaded" — no song name — while the title was right there on the screen. The name is written after the title now, every time the row is drawn.',
+      ],
+    },
   ];
