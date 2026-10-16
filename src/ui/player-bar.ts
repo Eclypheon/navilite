@@ -250,3 +250,102 @@ function contextLine(queue: PlaybackQueue | null): string {
   if (total === 0 || at < 0) return `Playing from ${name}`;
   return `Playing from ${name} (${at + 1}/${total})`;
 }
+
+/* ------------------------------------------------------ what a tap here means */
+
+/**
+ * **Which region of the bottom container a tap landed in** (v2.0-beta, item 3).
+ *
+ * The guard this replaces was a **tag list** — `closest('button, input')` — so every part of the
+ * container that is not a button or the seek input navigated to the now screen: the elapsed and
+ * duration labels beside the seek bar, the 12 px gap inside `.pb-main`, the gaps the grid puts
+ * around `.pb-controls`, the chip, the reason line and the footer's own padding. *A tap anywhere in
+ * the transport area counts as a container tap* is the owner's report, and it is what that guard
+ * does.
+ *
+ * The regions are the two elements that mean something, and nothing else:
+ *
+ *   - `.pb-cover` and `.pb-meta` — **the song block, and the only container tap** (`containerTap`);
+ *   - `.pb-controls` — the three transport buttons, each with its own `onclick` (pause/play, next,
+ *     previous). They never navigate and never count as a container tap in any view, and neither do
+ *     the gaps *inside* that row: a tap between two of them does nothing. They no longer depend on a
+ *     container handler's guard at all, so a future change to one cannot silently re-enable
+ *     navigation from the other;
+ *   - `.pb-progress` — the range input seeks, and its two `time` labels do nothing (they navigate
+ *     today, which is the proven defect);
+ *   - everything else — the chip, the reason line, the padding, the grid gaps — is inert.
+ */
+export function isContainerTap(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('.pb-cover, .pb-meta') !== null;
+}
+
+/**
+ * The playing song's own row on *this* view, in document order, or null.
+ *
+ * `ctx.rows` is the registry of the rows the current render drew and it is cleared at the top of
+ * every route render, so a row registered by a view the owner has left can never answer this. The
+ * first row in document order answers for a song listed twice.
+ */
+function playingRowForThisView(ctx: AppContext): HTMLElement | null {
+  const id = ctx.queue?.currentSong?.id ?? null;
+  if (id === null) return null;
+  return [...(ctx.rows.get(id) ?? [])][0] ?? null;
+}
+
+/**
+ * Is that row **fully inside the scroll box**? v2.0-beta item 4's definition of visible.
+ *
+ * Highlighted is not a second condition: the highlighted row *is* the playing song's row
+ * (`updateRowHighlight` toggles `.playing` on exactly these rows), so "already visible/highlighted"
+ * reduces to "the playing row is on screen in full". A row half under the fixed bar or half under
+ * the header is not visible.
+ */
+export function rowInFull(row: HTMLElement, scrollBox: HTMLElement): boolean {
+  const r = row.getBoundingClientRect();
+  const box = scrollBox.getBoundingClientRect();
+  return r.top >= box.top && r.bottom <= box.bottom;
+}
+
+/**
+ * Put that row's centre at the centre of the scroll box, as far as the list allows.
+ *
+ * Both rectangles are read **before** anything is written (one `getBoundingClientRect()` pair, then
+ * one `scrollTop` assignment), so the tap cannot force a second layout — and `scrollTop` clamps to
+ * the scrollable range itself, which is what makes a first or last row centre as far as it can.
+ */
+export function centreRow(row: HTMLElement, scrollBox: HTMLElement): void {
+  const r = row.getBoundingClientRect();
+  const box = scrollBox.getBoundingClientRect();
+  scrollBox.scrollTop += r.top + r.height / 2 - (box.top + box.height / 2);
+}
+
+/**
+ * **A tap on the song block of the bottom container** (v2.0-beta item 4) — the two-tap rule.
+ *
+ * In the owner's words, and in this order:
+ *
+ *   1. the view on the screen now has no row for the song that is playing (the Library tab lists
+ *      artists; an album page that does not carry the track; a search that did not return it) →
+ *      open the now screen. There is nothing to centre, and the alternative — doing nothing —
+ *      leaves the bar dead on half his screens;
+ *   2. that row is not fully visible → **scroll it to the centre and do not navigate**. No route
+ *      change, no pager movement, no pane change: only `scrollTop` moves;
+ *   3. that row is already fully visible → open the now screen, exactly as a tap does today.
+ *
+ * So from a list whose playing row is off-screen the first tap centres and the second opens, and
+ * where it is already on screen the first tap opens. A list too short to scroll has the row fully
+ * visible by construction, so it opens on the first tap.
+ */
+export function containerTap(ctx: AppContext, shell: Shell, openNow: () => void, event: Event): void {
+  if (!isContainerTap(event.target)) return;
+  const row = playingRowForThisView(ctx);
+  if (row === null) {
+    openNow();
+    return;
+  }
+  if (rowInFull(row, shell.viewScroll)) {
+    openNow();
+    return;
+  }
+  centreRow(row, shell.viewScroll);
+}

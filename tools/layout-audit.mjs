@@ -212,6 +212,12 @@ export async function withChromePage(fn, options = {}) {
       '--disable-gpu',
       '--hide-scrollbars',
       '--autoplay-policy=no-user-gesture-required',
+      /*
+       * v2.0-beta: the caller's own flags, appended. `tools/container-tap-check.mjs` is the first to
+       * use it, and it exists for exactly one reason: that check drives real playback, and a harness
+       * that makes a noise on the owner's desk is a harness he will not run.
+       */
+      ...(options.args ?? []),
       'about:blank',
     ],
     /*

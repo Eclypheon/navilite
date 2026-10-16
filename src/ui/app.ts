@@ -33,7 +33,7 @@ import { CHANGELOG } from './changelog.ts';
 import { ICONS, cover, formatDuration, formatTime, h, icon, playIcon, replace, starIcon } from './dom.ts';
 import { createLyricsView, type LyricsView } from './lyrics.ts';
 import { createPager, type Pager } from './pager.ts';
-import { updatePlayerBar, updateRowHighlight } from './player-bar.ts';
+import { containerTap, updatePlayerBar, updateRowHighlight } from './player-bar.ts';
 
 const PASSWORD_KEY = 'subsonic-password';
 const BUILD_ID = '__BUILD_ID__';
@@ -220,6 +220,13 @@ export async function boot(root: HTMLElement): Promise<void> {
     render: () => renderRoute(ctx, shell),
     toast: (message, kind = 'info') => toast(shell, message, kind),
   };
+  /*
+   * **The bottom container's tap** (v2.0-beta items 3 and 4). Bound here rather than inside
+   * `buildShell` because the rule is about *this view* — it reads `ctx.rows` and the queue — and
+   * because the region test must be the bar's only route to navigation: the transport buttons keep
+   * their own handlers, and every other part of the container does nothing at all.
+   */
+  shell.playerBar.addEventListener('click', (event) => containerTap(ctx, shell, openNow, event));
   /*
    * Offline downloads (v1.9.12). The store is built once and its resolver handed to `Library` when
    * `connect` runs, so the audible path and the download store are the same object. Hydration is
@@ -676,10 +683,17 @@ function buildShell(root: HTMLElement): Shell {
 
   bindSeek(shell.barProgress, shell, () => queueRef);
   bindSeek(shell.nowProgress, shell, () => queueRef);
-  playerBar.addEventListener('click', (event) => {
-    if ((event.target as HTMLElement).closest('button, input')) return;
-    openNow();
-  });
+  /*
+   * v2.0-beta items 3 and 4 — **the bar's own tap handler is bound in `boot`**, where the app context
+   * exists, because the rules need `ctx.rows` and the queue (`containerTap`, `./player-bar.ts`).
+   *
+   * What is bound *here* is the gesture authority: the bar is a tap surface in its own right, so a
+   * swipe that starts on the song block is a drag and the click it leaves behind is refused. The
+   * pager claims a gesture that starts on the bar — its `OWN_GESTURE` list does not name `.pb-main`
+   * — so without this, the click a pane swipe leaves behind would run the container-tap rule and
+   * scroll his list mid-swipe (or open the spectrum view), on a gesture that was neither.
+   */
+  bindTapSurface(playerBar);
   /*
    * v1.6.1: the list is the tap surface. It owns both facts a tap needs — where the finger went down,
    * and whether the list moved under it — and refuses exactly one click after a drag, once.
