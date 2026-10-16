@@ -102,12 +102,13 @@ export async function boot(root: HTMLElement): Promise<void> {
     toast: (message, kind = 'info') => toast(shell, message, kind),
   };
   /*
-   * **The bottom container's tap** (v2.0-beta items 3 and 4). Bound here rather than inside
-   * `buildShell` because the rule is about *this view* — it reads `ctx.rows` and the queue — and
-   * because the region test must be the bar's only route to navigation: the transport buttons keep
-   * their own handlers, and every other part of the container does nothing at all.
+   * **The bottom container's tap** (v2.0-beta items 3 and 4, re-keyed in beta.3). Bound here rather
+   * than inside `buildShell` because the rule is about *this view* — it resolves the current row from
+   * the mark the drawn view carries and reads the scroll box — and because the region test must be
+   * the bar's only route to navigation: the transport buttons keep their own handlers, and every
+   * other part of the container does nothing at all.
    */
-  shell.playerBar.addEventListener('click', (event) => containerTap(ctx, shell, openNow, event));
+  shell.playerBar.addEventListener('click', (event) => containerTap(shell, openNow, event));
   /*
    * Offline downloads (v1.9.12). The store is built once and its resolver handed to `Library` when
    * `connect` runs, so the audible path and the download store are the same object. Hydration is

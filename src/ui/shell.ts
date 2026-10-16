@@ -285,7 +285,7 @@ export function buildShell(root: HTMLElement): Shell {
   bindSeek(shell.nowProgress, shell, () => queueRef);
   /*
    * v2.0-beta items 3 and 4 — **the bar's own tap handler is bound in `boot`**, where the app context
-   * exists, because the rules need `ctx.rows` and the queue (`containerTap`, `./player-bar.ts`).
+   * exists, because the rules need the shell and the drawn view (`containerTap`, `./player-bar.ts`).
    *
    * What is bound *here* is the gesture authority: the bar is a tap surface in its own right, so a
    * swipe that starts on the song block is a drag and the click it leaves behind is refused. The

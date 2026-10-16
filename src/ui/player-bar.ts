@@ -280,25 +280,36 @@ export function isContainerTap(target: EventTarget | null): boolean {
 }
 
 /**
- * The playing song's own row on *this* view, in document order, or null.
+ * **The row this view marks as current** — the only row a tap may scroll to, or null.
  *
- * `ctx.rows` is the registry of the rows the current render drew and it is cleared at the top of
- * every route render, so a row registered by a view the owner has left can never answer this. The
- * first row in document order answers for a song listed twice.
+ * `querySelector` is the whole point of the function: it cannot return a node that is not in the
+ * document, so the row the app scrolls to is always the row the list *drew*.
+ *
+ * beta.2 read the registry instead (`[...ctx.rows.get(id)][0]`) and a view that paints its list
+ * twice inside one route render — the playlist page draws the phone's own manifest and then the
+ * server's answer (`renderPlaylist`), and search repaints its results on every submit — leaves the
+ * first batch registered. That batch is detached, its `getBoundingClientRect()` is `(0,0,0,0)`, and
+ * a zero rect is *above* the scroll box: the first tap computed a negative offset and jumped the
+ * list to the top ("it scrolls upwards a random chunk"), and because the app's idea of the row was
+ * still the detached one, `rowInFull` was false for ever after, so the second tap re-ran the scroll
+ * branch and never opened the now screen.
+ *
+ * One source of truth for "current row": the mark is `updateRowHighlight`'s own `.playing` class —
+ * the same thing `styles.css` draws and the harnesses read — so the row the eye sees is the row this
+ * returns. Scoped to `shell.view`, the drawn view inside the scroller, so a row belonging to a screen
+ * the owner has left cannot answer. Document order is a property of `querySelector` rather than a
+ * claim about insertion order, so a song listed twice resolves to the first row on the screen.
  */
-function playingRowForThisView(ctx: AppContext): HTMLElement | null {
-  const id = ctx.queue?.currentSong?.id ?? null;
-  if (id === null) return null;
-  return [...(ctx.rows.get(id) ?? [])][0] ?? null;
+export function currentRowInView(shell: Shell): HTMLElement | null {
+  return shell.view.querySelector('.row.playing');
 }
 
 /**
- * Is that row **fully inside the scroll box**? v2.0-beta item 4's definition of visible.
+ * Is that row **fully inside the scroll box**? v2.0-beta item 4's box test.
  *
  * Highlighted is not a second condition: the highlighted row *is* the playing song's row
  * (`updateRowHighlight` toggles `.playing` on exactly these rows), so "already visible/highlighted"
- * reduces to "the playing row is on screen in full". A row half under the fixed bar or half under
- * the header is not visible.
+ * reduces to "the playing row is on screen in full".
  */
 export function rowInFull(row: HTMLElement, scrollBox: HTMLElement): boolean {
   const r = row.getBoundingClientRect();
@@ -307,45 +318,83 @@ export function rowInFull(row: HTMLElement, scrollBox: HTMLElement): boolean {
 }
 
 /**
- * Put that row's centre at the centre of the scroll box, as far as the list allows.
+ * **Is that row on screen** — inside the scroll box *and* clear of the player bar?
  *
- * Both rectangles are read **before** anything is written (one `getBoundingClientRect()` pair, then
- * one `scrollTop` assignment), so the tap cannot force a second layout — and `scrollTop` clamps to
- * the scrollable range itself, which is what makes a first or last row centre as far as it can.
+ * The bar is `position: fixed; inset: auto 0 0 0` (`styles.css`), so it covers the bottom of the
+ * scroller: the scroll box's own top edge is the visible top, but its bottom edge is not the visible
+ * bottom, and a row sitting under the bar is not a row on screen. A row half under the bar is not
+ * visible either, which is why the bar's top edge is a hard band, not a rounding.
+ *
+ * The bar can also be off screen: `.playerbar.hidden` is `display: none`, whose rect is all zeros, so
+ * a `min` against its `top` would collapse the band to nothing and the second tap would re-scroll
+ * for ever. Zero height means *no bar*, and the scroll box's own bottom is the band's.
  */
-export function centreRow(row: HTMLElement, scrollBox: HTMLElement): void {
-  const r = row.getBoundingClientRect();
-  const box = scrollBox.getBoundingClientRect();
-  scrollBox.scrollTop += r.top + r.height / 2 - (box.top + box.height / 2);
+export function visibleInBand(row: HTMLElement, shell: Shell): boolean {
+  if (!rowInFull(row, shell.viewScroll)) return false;
+  const bar = shell.playerBar.getBoundingClientRect();
+  if (bar.height === 0) return true;
+  return row.getBoundingClientRect().bottom <= bar.top;
 }
 
 /**
- * **A tap on the song block of the bottom container** (v2.0-beta item 4) — the two-tap rule.
+ * The `scrollTop` that puts that row's centre at the centre of the box, **clamped to the list's own
+ * range** — the one number a tap is allowed to move the list to.
+ *
+ * Both rectangles are read before the single write (v2.0-beta's own rule: no second layout forced by
+ * a tap). The clamp is not a special case for the ends: a first or last row simply *asks* for an
+ * offset outside the range and gets the range's end, so it lands fully visible and never past the
+ * list's own limit. `scrollTop`'s own clamping is kept as a belt-and-braces assignment in
+ * `containerTap`, but the *decision* needs this number, so it is computed here.
+ *
+ * Never a smooth scroll: that is a move over time, and a second tap can overtake it.
+ */
+export function centreOffset(row: HTMLElement, scrollBox: HTMLElement): number {
+  const r = row.getBoundingClientRect();
+  const box = scrollBox.getBoundingClientRect();
+  const wanted = scrollBox.scrollTop + (r.top + r.height / 2) - (box.top + box.height / 2);
+  const max = Math.max(scrollBox.scrollHeight - scrollBox.clientHeight, 0);
+  return Math.min(Math.max(wanted, 0), max);
+}
+
+/**
+ * **A tap on the song block of the bottom container** (v2.0-beta item 4) — the two-tap rule, keyed
+ * on the row the view marks and on the list's own limits (beta.3).
  *
  * In the owner's words, and in this order:
  *
- *   1. the view on the screen now has no row for the song that is playing (the Library tab lists
- *      artists; an album page that does not carry the track; a search that did not return it) →
- *      open the now screen. There is nothing to centre, and the alternative — doing nothing —
- *      leaves the bar dead on half his screens;
- *   2. that row is not fully visible → **scroll it to the centre and do not navigate**. No route
- *      change, no pager movement, no pane change: only `scrollTop` moves;
- *   3. that row is already fully visible → open the now screen, exactly as a tap does today.
+ *   1. the view on the screen now has no row marked for the song that is playing (the Library tab
+ *      lists artists; an album page that does not carry the track; a search that did not return it;
+ *      a list whose rows are still loading) → open the now screen. There is nothing to centre, and
+ *      the alternative — doing nothing — leaves the bar dead on half his screens;
+ *   2. that row is not on screen → **scroll it to the centre and do not navigate**. No route change,
+ *      no pager movement, no pane change: only `scrollTop` moves, **once**, to a number computed
+ *      before the write. At the top and the bottom of a list that number is the list's own limit, so
+ *      the row lands clamped and fully visible rather than short of it — and there is no second move
+ *      to walk in chunks with;
+ *   3. that row is already on screen — or it is as on screen as this list can put it, which is the
+ *      same thing at the ends of a list or in a list too short to scroll (`centreOffset` returns the
+ *      offset it is already at) → open the now screen, exactly as a tap does today.
  *
- * So from a list whose playing row is off-screen the first tap centres and the second opens, and
- * where it is already on screen the first tap opens. A list too short to scroll has the row fully
- * visible by construction, so it opens on the first tap.
+ * So from a list whose playing row is off-screen the first tap centres it and the second opens, and
+ * where it is already on screen the first tap opens.
  */
-export function containerTap(ctx: AppContext, shell: Shell, openNow: () => void, event: Event): void {
+export function containerTap(shell: Shell, openNow: () => void, event: Event): void {
   if (!isContainerTap(event.target)) return;
-  const row = playingRowForThisView(ctx);
+  const row = currentRowInView(shell);
   if (row === null) {
     openNow();
     return;
   }
-  if (rowInFull(row, shell.viewScroll)) {
+  if (visibleInBand(row, shell)) {
     openNow();
     return;
   }
-  centreRow(row, shell.viewScroll);
+  const wanted = centreOffset(row, shell.viewScroll);
+  // The list cannot move this row any closer to the middle than it already is: the tap opens rather
+  // than writing an offset the list would refuse, which is what a first/last row at its limit means.
+  if (wanted === shell.viewScroll.scrollTop) {
+    openNow();
+    return;
+  }
+  shell.viewScroll.scrollTop = wanted;
 }

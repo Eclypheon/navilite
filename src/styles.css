@@ -225,7 +225,20 @@ button {
 }
 
 .view {
-  padding: 16px max(14px, env(safe-area-inset-right)) calc(var(--bar-height) + 28px) max(14px, env(safe-area-inset-left));
+  /*
+   * v2.0-beta.3 — **the end padding covers the bar on a phone, not just its `--bar-height` part.**
+   *
+   * The bar is fixed over the bottom of this scroller and its own height grows with the safe area
+   * (`min-height: var(--bar-height)` against `padding-bottom: 8px + env(safe-area-inset-bottom)`, so
+   * on a screen with a home indicator it is taller than 72 px). Reserving only `var(--bar-height) +
+   * 28px` therefore left the last row of a list partly *under* the bar at the list's own maximum:
+   * measured by `tools/container-tap-check.mjs` on a phone-shaped 393 x 852 page, the bar came to
+   * 116.4 px against 100 px reserved, so the last row's bottom sat 16 px below the bar's top edge —
+   * a row a tap cannot bring fully on screen, which is the one thing the tap is allowed to promise.
+   * The insert is the same quantity the bar itself wears, so the clearance no longer depends on which
+   * insets the device reports.
+   */
+  padding: 16px max(14px, env(safe-area-inset-right)) calc(var(--bar-height) + 28px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
   max-width: 1100px;
   width: 100%;
   margin: 0 auto;
