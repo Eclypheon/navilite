@@ -107,6 +107,11 @@ interface Recording {
   silentSync: boolean;
   /** Filled frame handed to the analyser on every `getByteFrequencyData`. */
   frameValue: number;
+  /**
+   * v1.9.22 — the stream the plugin's player is holding right now: set by `load` and by `adopt`,
+   * which is the fake's stand-in for `player.currentItem`.
+   */
+  playingUrl: string | null;
   /** What the native spectrum tap is doing. */
   spectrum: SpectrumState;
 }
@@ -118,6 +123,37 @@ interface SpectrumState {
   startedAtMs: number;
   startCalls: number;
   stopCalls: number;
+  /**
+   * v1.9.22 — **how many of those calls were an install**, i.e. a request for a stream the tap was
+   * not already on. That is the plugin's own rule (`carriesOurTap` → verify, anything else →
+   * install), and it is the count a "no double install" assertion has to be made on: the engine is
+   * entitled to *verify* as often as it likes, and a verify writes no mix.
+   */
+  installs: number;
+  /**
+   * v1.9.22 — **model the plugin's own install.** When set, a `start` request:
+   *
+   *   - takes `installMs` to land (`AudibleSpectrumTap.trackWaitSeconds` is five seconds of 100 ms
+   *     steps: the plugin waits for the item's audio track, and for a stream being replaced that
+   *     wait can outlast the track change);
+   *   - attaches the tap to the item it **read when the request arrived**, even when the player has
+   *     moved on by the time the wait is over — the shape `NaviliteSpectrum.install` has, which
+   *     reads `player.currentItem` before its `await` and attaches to that item after it, taking
+   *     the mix off the item that is playing;
+   *   - answers `false` when a newer request overtook it while it was waiting;
+   *   - and, having attached, decides `itemIsCurrent` from that binding rather than from the test.
+   *
+   * It is the mechanism behind the owner's report: the request the *previous* track issued lands
+   * last and leaves the tap on the item the player has left, so the engine is handed a tap that is
+   * on a dead item while the new track plays.
+   */
+  plugin?: boolean;
+  /** How long a request waits before it lands (`plugin` only). */
+  installMs?: number;
+  /** The stream the tap is installed on, once a request has landed (`plugin` only). */
+  tappedUrl?: string | null;
+  /** The item the plugin is holding for the *outgoing* track, when a test wants a slow landing. */
+  slowLandUrls?: string[];
   /** What the plugin answers to "is the tap on the item the player is on now?" (see v1.8.0). */
   itemIsCurrent?: boolean;
   /** Frames produced so far — what "silence reads as silence" is judged against. */
@@ -146,6 +182,9 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         record.calls.push('load');
         record.loads.push(info.url);
         await wait(ROUND_TRIP_MS);
+        // v1.9.22 — the item the plugin's player is holding from now on: what a tap request issued
+        // after this reads, and what `itemIsCurrent` is decided against in `plugin` mode.
+        record.playingUrl = info.url;
       },
       async play(seconds: number) {
         record.calls.push(`play@${Math.round(seconds)}`);
@@ -201,6 +240,8 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         record.calls.push('play@0');
         record.adopts += 1;
         record.truth = { ...record.truth, playing: true, positionMs: 0 };
+        // v1.9.22 — the adopted item is the one the player is holding (see `load`).
+        record.playingUrl = url;
         await wait(5);
         // The adopted item is playing now, and it says so: the same report a load's play produces.
         record.events?.onPosition(0);
@@ -228,11 +269,38 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
       hasNativeSpectrum: true,
       async startSpectrum(url: string, positionMs: number) {
         record.calls.push(`startSpectrum@${Math.round(positionMs)}`);
+        record.spectrum.startCalls += 1;
+        if (!record.spectrum.plugin) {
+          if (record.spectrum.startedUrl !== url) record.spectrum.installs += 1;
+          record.spectrum.started = true;
+          record.spectrum.startedUrl = url;
+          record.spectrum.startedAtMs = positionMs;
+          record.spectrum.playing = true;
+          return true;
+        }
+        /*
+         * The plugin's own install (v1.9.22), in the three steps `NaviliteSpectrum.install` takes:
+         * the item is read *now*, the wait for that item's audio track happens, and the attach lands
+         * on the item that was read — **even when the player is on another one by then.**
+         *
+         * The generation guard the plugin does have is checked at the top of each retry step, before
+         * the read; nothing re-checks it after the `await`, so a request whose wait outlasts the
+         * track change attaches anyway and its `detach()` takes the mix off the item that is
+         * playing. That window is `slowLandUrls`: a request for a stream being replaced, waiting
+         * long enough for the next track's install to have landed first.
+         */
+        const read = record.playingUrl;
+        const slow = read !== null && (record.spectrum.slowLandUrls ?? []).includes(read);
+        await wait(slow ? record.spectrum.installMs ?? 200 : 5);
         record.spectrum.started = true;
         record.spectrum.startedUrl = url;
         record.spectrum.startedAtMs = positionMs;
-        record.spectrum.startCalls += 1;
         record.spectrum.playing = true;
+        // The plugin's own rule: a request for the item the tap is already on is a *verify*, and
+        // anything else is an install (this is `carriesOurTap`, with the item standing in for the URL).
+        if (record.spectrum.tappedUrl !== read) record.spectrum.installs += 1;
+        record.spectrum.tappedUrl = read;
+        record.spectrum.itemIsCurrent = read !== null && read === record.playingUrl;
         return true;
       },
       async stopSpectrum() {
@@ -250,7 +318,12 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
          * that window ends ("the tap has answered for this item") is read off that same counter.
          */
         if (record.tapProducing) record.spectrum.frames += 1;
-        const silent = !record.tapProducing || record.spectrum.bands.every((value) => value === 0);
+        const bound = record.spectrum.plugin === true;
+        // The tap on an item the player has left measures nothing: no frames, and not current.
+        const itemIsCurrent = bound
+          ? record.spectrum.tappedUrl !== null && record.spectrum.tappedUrl === record.playingUrl
+          : record.spectrum.itemIsCurrent;
+        const silent = !record.tapProducing || (bound && !itemIsCurrent) || record.spectrum.bands.every((value) => value === 0);
         const bands = silent
           ? record.spectrum.bands.map(() => 0)
           : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
@@ -266,8 +339,8 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
           positionMs: record.truth.positionMs,
           playing: record.spectrum.playing && record.truth.playing,
           // The plugin's own answer to "is the tap on the item the player is on now?" — flipped to
-          // false by the orphan test, which is the case v1.7.7 could not see.
-          itemIsCurrent: record.spectrum.itemIsCurrent,
+          // false by the orphan test, and decided by the tap's own binding in `plugin` mode.
+          itemIsCurrent,
           readable: true,
           sampleRate: 44_100,
         };
@@ -419,12 +492,14 @@ function recording(overrides: Partial<Recording> = {}): Recording {
     refuseResume: false,
     silentSync: false,
     frameValue: 128,
+    playingUrl: null,
     spectrum: {
       started: false,
       startedUrl: null,
       startedAtMs: 0,
       startCalls: 0,
       stopCalls: 0,
+      installs: 0,
       frames: 0,
       silentFrames: 0,
       // A plausible loud frame: most bands carrying energy, none of them pinned.
@@ -1061,6 +1136,90 @@ test('two different tracks pressed in quick succession leave the second one play
   }
 });
 
+/*
+ * v1.9.22 — the owner, on the installed build: *"sometimes when I move through songs too quickly it
+ * seems like the spectrum doesn't attach correctly to the song and so while the song is playing the
+ * spectrum is just zero."* And, asked to settle it: *"the spectrum off is not intentional, i have
+ * never toggled spectrum to be off so it is a bug."*
+ *
+ * The mechanism, modelled here as the plugin really behaves (`record.spectrum.plugin`, built on
+ * `NaviliteSpectrum.install`): a tap request reads the item the player holds **when the request
+ * arrives**, then waits for that item's audio track — up to five seconds of 100 ms steps, and for a
+ * stream that is being replaced that wait outlasts the track change — and then attaches to the item
+ * it read. The attach calls `detach()` first, which takes the mix off the item that *is* playing,
+ * and nothing after the `await` re-checks either the request's generation or the player's current
+ * item. So on a skip, the request the previous track issued lands last and leaves the tap on the
+ * item the player has left: the canvas is handed no frames while audio plays, which is exactly
+ * `playing · native · spectrum off`.
+ *
+ * What the *engine* owes on top of that is the recovery the card names — a transition that lands
+ * while a previous attach is still in flight must not leave the analyser unattached. The assertion
+ * is the owner's acceptance, and it is deliberately made *after* the outgoing request has landed
+ * and eight times in a row: the bars for the track that is playing, at every read, not at the first
+ * one. (With the v1.9.21 engine the tap's own orphan re-check waits out
+ * {@link SPECTRUM_ORPHAN_RECHECK_MS} — `lastSpectrumRecheckAt` is stamped when the track starts
+ * playing — so the spectrum is off for about a second after every skip, and this test fails on it.)
+ */
+test('a rapid skip leaves the spectrum on the track that is playing, not on the item it left', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  const waitFor = async (predicate: () => boolean, budgetMs: number): Promise<number | null> => {
+    const started = Date.now();
+    for (;;) {
+      if (predicate()) return Date.now() - started;
+      if (Date.now() - started > budgetMs) return null;
+      await settle(5);
+    }
+  };
+  try {
+    const record = recording();
+    record.spectrum.plugin = true;
+    // The request the *first* track issued: it waits, and lands after the second track's tap.
+    record.spectrum.installMs = 200;
+    record.spectrum.slowLandUrls = [TRACK.url];
+    const engine = nativeEngine(record);
+    engines.push(engine);
+
+    await engine.play(TRACK);
+    const firstPlaying = await waitFor(() => engine.status().state === 'playing', 400);
+    assert.ok(firstPlaying !== null, 'the first track starts');
+    record.calls = [];
+
+    /*
+     * …and the listener moves on *while that request is still waiting* — which is the whole point:
+     * `play` has resolved, the tap request it issued is in flight, and the next press arrives before
+     * it lands.
+     */
+    await engine.play(OTHER_TRACK);
+    const secondPlaying = await waitFor(() => engine.status().state === 'playing', 2_000);
+    assert.ok(secondPlaying !== null, 'the second track starts');
+    assert.equal(engine.currentTrack?.id, OTHER_TRACK.id, 'and it is the one that was asked for');
+
+    // Past the outgoing request's landing, where the tap is on the item the player has left.
+    await settle(300);
+    const readings: boolean[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      const frame = engine.readSpectrum();
+      readings.push(engine.status().spectrum === true && frame !== null && frame.some((value) => value > 0));
+      await settle(25);
+    }
+    const misses = readings.filter((fed) => !fed).length;
+    say(
+      `v1.9.22 — after the skip: ${record.spectrum.startCalls} tap request(s), ${record.spectrum.installs} of them an install, ` +
+        `the tap on ${record.spectrum.startedUrl?.slice(-8)} while the player holds ${record.playingUrl?.slice(-8)}, ` +
+        `${misses}/8 reads unfed`,
+    );
+    assert.equal(
+      misses,
+      0,
+      `while audio is playing the bars are fed at every read (${misses} of 8 were not) — modeReason: ${engine.status().modeReason}`,
+    );
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
 test('a not-playing report while a seek is in flight is read as ours, not as an interruption', async () => {
   const fakes = installFakes();
   const engines: AudioEngine[] = [];
@@ -1217,7 +1376,7 @@ test('the spectrum holds through the last seconds of a track instead of emptying
     );
     assert.equal(engine.status().state, 'playing');
     assert.equal(engine.status().spectrum, true, 'the last seconds of a song are not a dead tap');
-    assert.equal(record.spectrum.startCalls, 1, 'so the tap is not torn down and rebuilt for it');
+    assert.equal(record.spectrum.installs, 1, 'so the tap is not torn down and rebuilt for it');
   } finally {
     fakes.restore();
     await stopAll(engines);
@@ -1259,7 +1418,12 @@ test('the tap is installed once and outlives a pause and a trip to the backgroun
     engines.push(engine);
     await engine.play(TRACK);
     await settle(150);
-    assert.equal(record.spectrum.startCalls, 1, 'the tap is installed once, when the track is loaded');
+    /*
+     * v1.9.22 — the count that has to be one is the **installs**: one mix per item, ever. The engine
+     * also makes one confirming request as the load's bracket closes, which the plugin answers as a
+     * read of the item that already carries the tap (`carriesOurTap`), and that is not an install.
+     */
+    assert.equal(record.spectrum.installs, 1, 'the tap is installed once, when the track is loaded');
     assert.equal(engine.status().spectrum, true, 'and it is live from the start');
 
     /* ---- 1. a pause ---- */
@@ -1283,7 +1447,7 @@ test('the tap is installed once and outlives a pause and a trip to the backgroun
     const backAfterPause = await until(() => engine.status().spectrum === true, 200);
     assert.equal(engine.status().state, 'playing');
     assert.equal(record.spectrum.stopCalls, 0, `the resume detaches nothing — calls: ${record.calls.join(', ')}`);
-    assert.equal(record.spectrum.startCalls, 2, 'the resume confirms the tap rather than building a second one');
+    assert.equal(record.spectrum.installs, 1, 'the resume confirms the tap rather than building a second one');
     assert.ok(
       record.calls.some((call) => call.startsWith('startSpectrum@')),
       `and the confirmation is what it sends — calls: ${record.calls.join(', ')}`,
@@ -1307,9 +1471,13 @@ test('the tap is installed once and outlives a pause and a trip to the backgroun
     const backAfterBackground = await until(() => engine.status().spectrum === true, 200);
     assert.equal(record.spectrum.stopCalls, 0, `returning detaches nothing — calls: ${record.calls.join(', ')}`);
     assert.equal(
-      record.spectrum.startCalls,
-      3,
-      `returning verifies the tap it already has, once — calls: ${record.calls.join(', ')}`,
+      record.spectrum.installs,
+      1,
+      `returning verifies the tap it already has, and never installs another — calls: ${record.calls.join(', ')}`,
+    );
+    assert.ok(
+      record.spectrum.startCalls > 1,
+      `and the verify is a request it does send — calls: ${record.calls.join(', ')}`,
     );
     assert.ok(backAfterBackground !== null, 'the spectrum is live again inside 200 ms of the return');
     const afterBackgroundFrame = engine.readSpectrum();
@@ -1366,7 +1534,7 @@ test('a change of track taps the new item, and the old item is never drawn', asy
     engines.push(engine);
     await engine.play(TRACK);
     await settle(150);
-    assert.equal(record.spectrum.startCalls, 1, 'the first track installs the tap once');
+    assert.equal(record.spectrum.installs, 1, 'the first track installs the tap once');
     assert.equal(engine.status().spectrum, true, 'and the bars are live');
 
     /* ---- the change of track ---- */

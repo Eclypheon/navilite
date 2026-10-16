@@ -525,6 +525,29 @@ export class AudioEngine {
   private modeReason = 'nothing playing yet';
   private nativeBands: Uint8Array | null = null;
   private spectrumPoll: ReturnType<typeof setInterval> | null = null;
+  /**
+   * True while one poll's read of the tap is still in flight (v1.9.22) — see {@link pollSpectrum}.
+   *
+   * The poll is a `setInterval`, so a bridge that answers more slowly than {@link SPECTRUM_POLL_MS}
+   * used to have several reads out at once and no order between their answers: a frame about the
+   * item the player had just left could be applied *after* one about the item it moved to, clear
+   * `spectrumLive`, rewind the zero-poll budget and hand the visualiser nothing — `spectrum off`
+   * with audio playing. One read at a time is the whole fix for that class.
+   */
+  private spectrumReadInFlight = false;
+  /**
+   * The track the tap has already been re-attached for after the plugin reported it was on an item
+   * the player had left (v1.9.22) — see the orphan branch of {@link pollSpectrum}.
+   *
+   * The first sighting of an orphan *for a track* is a transition that landed while the previous
+   * attach was still in flight, and it is answered immediately; the repeats are rate-limited, as
+   * they always were.
+   */
+  private orphanReattachedFor: string | null = null;
+  /** The serial of the newest install request, so a superseded one cannot answer for this track. */
+  private spectrumInstallSerial = 0;
+  /** What the newest install request has answered, and whether it has answered at all (v1.9.22). */
+  private spectrumInstall: { track: TrackRequest; serial: number; answered: boolean; ok: boolean } | null = null;
   private spectrumZeroPolls = 0;
   private spectrumPolls = 0;
   private lastSpectrumRecheckAt = 0;
@@ -1768,6 +1791,7 @@ export class AudioEngine {
     this.spectrumArming = true;
     this.spectrumZeroPolls = 0;
     this.spectrumRechecks = 0;
+    this.orphanReattachedFor = null;
     this.positionReported = false;
     this.setNativePosition(0, false);
     this.modeReason =
@@ -2230,6 +2254,9 @@ export class AudioEngine {
     // A new track is a fresh budget for a tap that will not answer. (v1.7.7: a *budget*, not a
     // rebuild — the tap on the previous item is left where it is and the new item gets its own.)
     this.spectrumRechecks = 0;
+    // v1.9.22 — and a fresh "has this track's tap been re-attached yet": the first orphan frame
+    // this track produces is answered on the spot (see `pollSpectrum`).
+    this.orphanReattachedFor = null;
     this.modeReason =
       'native playback (AVFoundation / ExoPlayer) — this is the engine that keeps going when you leave the app and the one the lock screen drives; the spectrum is an FFT of the same stream, read from the native audio tap';
     // A load is an unload + preload: the outgoing asset's stop must not be read as a track ending,
@@ -2385,19 +2412,21 @@ export class AudioEngine {
       // (v1.9.7 — see `audibleIsOutgoing`).
       if (this.audibleIsOutgoing === generation) this.audibleIsOutgoing = null;
       /*
-       * **An adopted item gets its own verify (v1.9.5).**
+       * **The tap is confirmed at the close of every load, not only an adopted one (v1.9.22).**
        *
-       * The adopted item is already playing by the time this bracket closes — the plugin's play
-       * inside `adopt` is what reports the sound, so the engine has entered `playing` and called
-       * `startConsumers` *while* `loadInFlight` was still true, which is exactly the case
-       * `startConsumers` refuses to verify in. The tap's only install for an adopted track was
-       * therefore one fire-and-forget promise, with no retry anywhere and a failure that went into
-       * `modeReason` and nowhere visible.
-       *
-       * The cold-load path does not need this: it is still `loading` when this bracket closes, so
-       * its `startConsumers` runs afterwards with the bracket open and verifies there.
+       * v1.9.5 gave the adopted item its verify here and left the cold path to `startConsumers`,
+       * which is right only while the cold load is still `loading` when this bracket closes. A
+       * player that reports sound *inside* the load — the thing `bridge.play` has just asked it for,
+       * and what the owner's phone does — makes that false: the `playing` transition runs
+       * `startConsumers` *while* this bracket is still open, `startConsumers` refuses to verify
+       * there (`loadInFlight`), and the only install the track ever gets is the single
+       * fire-and-forget request three lines above. An install the plugin superseded, or one that
+       * answered `false`, then leaves the engine at `spectrum off` with audio playing — the state
+       * the owner reported, and the one this release makes unreachable. One plugin call, and it is
+       * a read unless the item is genuinely a different one; the adopted item keeps exactly the
+       * verify it had.
        */
-      if (adopted) this.verifySpectrum();
+      if (this.track === track && this.state === 'playing') this.confirmSpectrum(track);
     }
     /*
      * A pause that arrived *while the asset was loading* wins.
@@ -2531,7 +2560,26 @@ export class AudioEngine {
   private async pollSpectrum(): Promise<void> {
     const bridge = this.native;
     if (!bridge?.spectrumFrame || this.backend !== 'native' || !this.track) return;
-    const frame = await bridge.spectrumFrame();
+    /*
+     * **One read at a time (v1.9.22).**
+     *
+     * The tick is {@link SPECTRUM_POLL_MS} and a read is a bridge round trip, so on a phone whose
+     * plugin answers slower than that there were several reads in the air at once with no order
+     * between their answers — and every one of them writes `spectrumLive`, `nativeBands` and the
+     * poll budgets. An answer that describes the item the player has just left could therefore be
+     * applied *after* one that describes the item it moved to: the engine went back to
+     * `spectrum off` while the new track was playing, which is the state the owner reported. A read
+     * that is already out is the newest information there is; the tick that arrives while it is
+     * still out is skipped, not queued.
+     */
+    if (this.spectrumReadInFlight) return;
+    this.spectrumReadInFlight = true;
+    let frame: NativeSpectrumFrame | null = null;
+    try {
+      frame = await bridge.spectrumFrame();
+    } finally {
+      this.spectrumReadInFlight = false;
+    }
     if (!frame || !this.track) return;
     this.spectrumPolls += 1;
     /*
@@ -2565,7 +2613,36 @@ export class AudioEngine {
        * already use: once this branch has spent it, the tap has been given its chance and the chip
        * may say *native audio*.
        */
-      if (this.clockNow() - this.lastSpectrumRecheckAt >= SPECTRUM_ORPHAN_RECHECK_MS) {
+      /*
+       * v1.9.22 — **the first orphan sighting for a track is answered at once.**
+       *
+       * The plugin has said the tap is on an item the player has left. There are two ways to be in
+       * that state, and they need opposite answers:
+       *
+       *   - **the ordinary transition** — the tap is still on the outgoing item and the install the
+       *     new track just issued has not landed yet. Nothing is wrong, and the fix is to wait for
+       *     the request; a re-check here would double every load's requests.
+       *   - **a transition that landed while an attach was in flight** — the request the *previous*
+       *     track issued read the item it was on, waited for that item's track list (up to five
+       *     seconds in `NaviliteSpectrum.install`), and attached when the wait was over, by which
+       *     time the player was on the new item. Its `detach()` took the mix off the item that is
+       *     playing, and nothing in the plugin re-checks the request's generation or the player's
+       *     current item after that `await`.
+       *
+       * `spectrumInstall` is what tells them apart: an install that has *answered* for this track
+       * while the tap is on another item is the second case, and it is answered on the spot. The
+       * rate limit below stays for every repeat, which is what keeps a tap that will not stay up
+       * from being asked thirty times a second — and the chip is told the same thing
+       * (`spectrumArming`): the tap is being re-attached, which is the third word v1.9.6 gave it,
+       * rather than *native audio*.
+       */
+      const trackId = this.track.id;
+      const probe = this.spectrumInstall;
+      const orphaned = probe !== null && probe.track === this.track && probe.answered;
+      const firstSighting = orphaned && this.orphanReattachedFor !== trackId;
+      if (firstSighting || this.clockNow() - this.lastSpectrumRecheckAt >= SPECTRUM_ORPHAN_RECHECK_MS) {
+        this.orphanReattachedFor = trackId;
+        if (firstSighting) this.spectrumArming = this.state === 'playing';
         this.spectrumRechecks += 1;
         if (this.spectrumRechecks >= MAX_SPECTRUM_RECHECKS) {
           this.spectrumRechecks = 0;
@@ -2764,8 +2841,16 @@ export class AudioEngine {
     /*
      * The poll is alive, so what needs confirming is the *tap*: exactly one call, which is a read
      * unless the item has been replaced under us.
+     *
+     * v1.9.22 — the request takes the install ownership like any other, so a `false` from it is not
+     * confused with a `false` from an install that a newer request has overtaken (see
+     * {@link claimSpectrumInstall}); a verify's own answer changes nothing else, as it never has.
      */
-    void bridge.startSpectrum(track.url, this.nativePositionMs).catch(() => undefined);
+    const serial = this.claimSpectrumInstall(track);
+    void bridge.startSpectrum(track.url, this.nativePositionMs).then(
+      (started) => void this.settleSpectrumInstall(serial, started === true),
+      () => void this.settleSpectrumInstall(serial, false),
+    );
   }
 
   /**
@@ -2776,13 +2861,25 @@ export class AudioEngine {
    * an item that already carries this tap and installs on any other — lands on the item that is
    * about to be heard. Called after a load and nowhere else; a resume reaches the same plugin method
    * through {@link verifySpectrum}, where it is a verify.
+   *
+   * v1.9.22 — **one install request, and only the newest one may answer for this track.** Every
+   * request that reaches the plugin is answered (`true`, `false`, or a rejection the bridge turns
+   * into `false`), and the plugin itself rejects a request a newer one has overtaken — so a track's
+   * install answer arrives out of order with respect to the requests. Writing `spectrum off` and
+   * *"the tap did not start"* from a superseded request's answer is a verdict about the wrong
+   * request, on the track the listener is hearing; the serial is what keeps the answer with the
+   * request that owns it. The newest request's own answer is kept on {@link spectrumInstall}, where
+   * {@link confirmSpectrum} reads it.
    */
   private attachSpectrum(track: TrackRequest): void {
     const bridge = this.native;
     if (this.backend !== 'native' || !bridge?.startSpectrum) return;
+    const serial = this.claimSpectrumInstall(track);
     void bridge
       .startSpectrum(track.url, this.nativePositionMs)
       .then((started) => {
+        // A request a newer one has overtaken is not a verdict about anything this engine holds.
+        if (!this.settleSpectrumInstall(serial, started === true)) return;
         if (this.track !== track || this.backend !== 'native') return;
         if (started) return;
         this.spectrumArming = false;
@@ -2791,6 +2888,7 @@ export class AudioEngine {
         this.retrySpectrumOnce(track, 'the install answered that it did not start');
       })
       .catch((error: unknown) => {
+        if (!this.settleSpectrumInstall(serial, false)) return;
         if (this.track !== track) return;
         this.spectrumLive = false;
         this.spectrumArming = false;
@@ -2798,6 +2896,41 @@ export class AudioEngine {
         this.emit();
         this.retrySpectrumOnce(track, 'the install rejected');
       });
+  }
+
+  /**
+   * Take ownership of the tap's next answer (v1.9.22).
+   *
+   * Every request the engine makes for the tap — an install after a load, the verify a resume or a
+   * re-check makes — is given a serial, and only the newest serial's answer is allowed to describe
+   * this engine's state. The plugin answers out of order by construction: it rejects a request a
+   * newer one has overtaken, so an *older* request's `false` and a *newer* request's `true` both
+   * exist at once, and one of them is a lie about the track that is playing.
+   */
+  private claimSpectrumInstall(track: TrackRequest): number {
+    const serial = (this.spectrumInstallSerial += 1);
+    this.spectrumInstall = { track, serial, answered: false, ok: false };
+    return serial;
+  }
+
+  /** Record what a request answered. False when a newer request has taken the ownership. */
+  private settleSpectrumInstall(serial: number, ok: boolean): boolean {
+    const install = this.spectrumInstall;
+    if (install === null || install.serial !== serial) return false;
+    install.answered = true;
+    install.ok = ok;
+    return true;
+  }
+
+  /**
+   * Confirm the tap for the track a load has just put in place (v1.9.22) — one plugin call, made
+   * unless the install that request made for this track has already answered that it landed.
+   */
+  private confirmSpectrum(track: TrackRequest): void {
+    if (this.backend !== 'native' || this.state !== 'playing') return;
+    const install = this.spectrumInstall;
+    if (install !== null && install.track === track && install.answered && install.ok) return;
+    this.verifySpectrum();
   }
 
   /**

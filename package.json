@@ -1,6 +1,6 @@
 {
   "name": "navilite",
-  "version": "1.9.21",
+  "version": "1.9.22",
   "private": true,
   "type": "module",
   "description": "A deliberately lightweight Navidrome (Subsonic) music player with a real audio spectrum, shipped as a PWA, an Android APK and an iOS IPA from one TypeScript codebase.",

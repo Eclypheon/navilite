@@ -263,6 +263,13 @@ export async function boot(root: HTMLElement): Promise<void> {
      * palette can read it without a tainted canvas. `player/native.ts` owns the Capacitor import.
      */
     toLocalSrc: localFileSrc,
+    /*
+     * The metadata repair's second source (v1.9.22): the library's own answer for one song id, for a
+     * row a 1.9.19 build wrote whose playlist record is no longer here. Injected like the factories
+     * above — the store relays ids and Songs, it does not own a client — and read through `ctx` so
+     * it is the client of the session that connects, not of the moment this store was built.
+     */
+    songLookup: (songId) => ctx.library?.client.getSong(songId) ?? Promise.resolve(null),
   });
   ctx.offline = offline;
   void offline.hydrate();
@@ -2370,6 +2377,16 @@ async function renderDownloads(ctx: AppContext, shell: Shell): Promise<void> {
     ...songs.map((song, index) => songRow(ctx, song, index, items, items[0]?.context ?? null, true)),
   );
   updateRowHighlight(ctx, shell);
+  /*
+   * v1.9.22 — **the rows are repaired after they are drawn, never before.** Everything above is
+   * local and synchronous (`downloadedSongs()` answers from a map), and a row a 1.9.19 build wrote
+   * has no title and no duration to draw: `repairMetadata` fills them in from the download's own
+   * record on the phone and then from the server, writes them back to the store, and the re-draw
+   * arrives through the store's own `onChange`. What must not happen again is the first paint
+   * waiting on a `bridge.list()` round trip, which is the 1.9.19 defect this view was built to
+   * avoid (§4.2), or a plausible-looking stand-in for a title nobody has asked for yet.
+   */
+  void ctx.offline?.repairMetadata();
 }
 
 async function renderArtist(ctx: AppContext, shell: Shell, id: string): Promise<void> {

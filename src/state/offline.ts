@@ -360,9 +360,21 @@ export class OfflineStore {
   private readonly lyricsFallback: (song: Song) => Promise<string | null>;
   private readonly artUrl: (coverArtId: string) => string | null;
   private readonly toLocalSrc: (fileUrl: string) => string;
+  /**
+   * The metadata repair's second source (v1.9.22): the library's own answer for one song id.
+   *
+   * Injected like the URL factories above, and for the same reason — `src/state/offline.ts` does
+   * not own a client. It is asked only for a complete row whose copy metadata is still blank after
+   * the download's own record has had its turn (see {@link repairMetadata}).
+   */
+  private readonly songLookup: (songId: string) => Promise<Song | null>;
   private readonly unlisteners: Array<() => void> = [];
   private readonly changeListeners = new Set<() => void>();
   private listening = false;
+  /** A repair pass is running; a second caller joins the first rather than starting another. */
+  private repairing = false;
+  /** The ids this session has already asked the server about, so a blank row is asked once. */
+  private readonly askedServer = new Set<string>();
   /** True once this process has done its boot reconcile; only that first pass may re-enqueue. */
   private bootReconciled = false;
   /**
@@ -414,6 +426,11 @@ export class OfflineStore {
        * the identity, which is exactly right for a path that is already a URL the page can read.
        */
       toLocalSrc?: (fileUrl: string) => string;
+      /**
+       * The library's answer for one song id, or null when it does not know it (v1.9.22). Used by
+       * {@link repairMetadata} for a row the download's own record cannot name.
+       */
+      songLookup?: (songId: string) => Promise<Song | null>;
       store?: MirrorStore;
     } = {},
   ) {
@@ -424,6 +441,7 @@ export class OfflineStore {
     this.lyricsFallback = options.lyricsFallback ?? (async () => null);
     this.artUrl = options.artUrl ?? (() => null);
     this.toLocalSrc = options.toLocalSrc ?? ((fileUrl) => fileUrl);
+    this.songLookup = options.songLookup ?? (async () => null);
     // Seed the in-memory map from the mirror synchronously, so the resolver answers local on the
     // very first start of a session — before `hydrate()` has had a chance to talk to the plugin.
     const mirror = loadMirror(this.store);
@@ -512,6 +530,128 @@ export class OfflineStore {
       return this.toLocalSrc(`${row.path.slice(0, slash + 1)}${art.file}`);
     }
     return null;
+  }
+
+  /**
+   * **Every complete row ends up with real copy metadata (v1.9.22)** — at the source, once.
+   *
+   * The owner, on the installed build: *"the library was populated by a bunch of nameless songs with
+   * no durations... when I click in, they are playable and even have album art and lyrics."* 497
+   * tracks, ten rows of blanks and `--:--`, and nothing wrong with any of the files.
+   *
+   * The mechanism is a version boundary, not a bug in the writer. A row carries the song's
+   * title/artist/album/coverArt/durationSec only as far as the build that wrote it passed them
+   * (`src/storage/offline.ts:24-38`: the fields arrived in v1.9.20, and a row a 1.9.19 build wrote
+   * parses with `title` absent), and `downloadedSongs()` maps a row straight to a `Song` — so the
+   * browse list drew a column of blanks, with `formatDuration(undefined)`'s `--:--` where the
+   * duration goes, over files that play perfectly (the art and lyrics resolve from the file and the
+   * server lazily, which is why those looked fine). Every download older than v1.9.20 is in that
+   * state, and nothing ever went back for them.
+   *
+   * Two passes, in this order, and both of them write to the row — never to the view:
+   *
+   *   1. **the download's own record.** The manifest holds the `Song` objects the playlist was
+   *      answered with when the owner pressed the button, titles and durations included
+   *      (`src/storage/offline.ts`'s `OfflinePlaylistManifest.songs`). It is on the phone, so this
+   *      pass needs no connection at all, and it is the one that covers everything a playlist
+   *      download brought in.
+   *   2. **the server**, one `getSong` per row that is still blank and one ask per row per session
+   *      (`askedServer`), for the tracks that came in through a build whose record is gone.
+   *
+   * It is never on the first paint's path: the view draws from `downloadedSongs()` synchronously and
+   * calls this afterwards, and the answer is what re-draws it (through `notify`). Making the rows
+   * wait for a round trip before they can be printed is the 1.9.19 defect this view was built to
+   * avoid. Returns how many rows were filled.
+   */
+  async repairMetadata(): Promise<number> {
+    if (this.repairing) return 0;
+    this.repairing = true;
+    try {
+      let fixed = this.repairFromRecords();
+      if (fixed > 0) {
+        this.saveMirror();
+        this.notify();
+      }
+      for (const songId of this.blankRows()) {
+        if (this.askedServer.has(songId)) continue;
+        this.askedServer.add(songId);
+        let song: Song | null = null;
+        try {
+          song = await this.songLookup(songId);
+        } catch {
+          // No connection, no such song, a server that does not answer: the row stays as it is, and
+          // the next pass (or the next launch, from the manifest) has another go.
+          continue;
+        }
+        const row = this.rows.get(songId);
+        if (song === null || row === undefined) continue;
+        if (this.fillFrom(row, song)) fixed += 1;
+      }
+      if (fixed > 0) {
+        this.saveMirror();
+        this.notify();
+      }
+      return fixed;
+    } finally {
+      this.repairing = false;
+    }
+  }
+
+  /** The repair's first source: the `Song`s the downloads were asked for, from the phone itself. */
+  private repairFromRecords(): number {
+    let fixed = 0;
+    const sources: Song[][] = [];
+    for (const manifest of this.manifests.values()) sources.push(manifest.songs);
+    for (const record of this.playlists.values()) sources.push(record.songs);
+    for (const songs of sources) {
+      for (const song of songs) {
+        const row = this.rows.get(song.id);
+        if (row === undefined || row.state !== 'complete') continue;
+        if (this.fillFrom(row, song)) fixed += 1;
+      }
+    }
+    return fixed;
+  }
+
+  /**
+   * Copy what a `Song` knows into a row's empty fields, and nothing else. `false` when the row
+   * already had everything the song had to give — which is what keeps a repair pass quiet.
+   */
+  private fillFrom(row: IndexRow, song: Song): boolean {
+    let changed = false;
+    if (row.title === '' && song.title !== '') {
+      row.title = song.title;
+      changed = true;
+    }
+    if (row.artist === '' && (song.artist ?? '') !== '') {
+      row.artist = song.artist ?? '';
+      changed = true;
+    }
+    if (row.album === '' && (song.album ?? '') !== '') {
+      row.album = song.album ?? '';
+      changed = true;
+    }
+    if ((row.durationSec ?? 0) <= 0 && (song.duration ?? 0) > 0) {
+      row.durationSec = song.duration ?? 0;
+      changed = true;
+    }
+    const cover = song.coverArt ?? song.albumId;
+    if ((row.coverArt ?? '') === '' && cover !== undefined && cover !== '') {
+      row.coverArt = cover;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** The complete rows that cannot be named or timed yet — the repair's work list. */
+  private blankRows(): string[] {
+    const ids: string[] = [];
+    for (const [songId, row] of this.rows) {
+      if (row.state !== 'complete') continue;
+      if (row.title !== '' && (row.durationSec ?? 0) > 0) continue;
+      ids.push(songId);
+    }
+    return ids;
   }
 
   /**
@@ -787,8 +927,28 @@ export class OfflineStore {
     if (this.bridge) {
       try {
         const rows = await this.bridge.list();
+        /*
+         * **The copy metadata comes across the reconcile (v1.9.22).**
+         *
+         * `list()` is the truth about the *files*, and it carries the song's title/artist/album/
+         * duration only as far as the build that wrote the row passed them — the fields arrived in
+         * v1.9.20 (`src/storage/offline.ts:24-38`), so a 1.9.19 index answers with rows that have
+         * none. Replacing the map wholesale therefore threw away the one copy that does have them:
+         * the mirror's own (which opened the session, and which `repairMetadata` writes back). A
+         * repaired row would have been repaired again on every foreground — one round trip per
+         * track, for a fact the phone had already been told.
+         *
+         * So the rows come from `list()` and the *metadata* is filled from what this store already
+         * knew. The file, its bytes and its state are the index's; the names are the ones the
+         * library answered with.
+         */
+        const known = new Map(this.rows);
         this.rows.clear();
-        for (const row of rows) this.rows.set(row.songId, row);
+        for (const row of rows) {
+          const previous = known.get(row.songId);
+          if (previous !== undefined) this.fillFrom(row, this.songFromRow(previous));
+          this.rows.set(row.songId, row);
+        }
       } catch (error) {
         console.warn('[navilite] could not reconcile the offline index', error);
       }

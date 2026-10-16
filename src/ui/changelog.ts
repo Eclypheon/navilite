@@ -410,4 +410,13 @@ export const CHANGELOG: ChangelogRelease[] = [
         'A slow failure behaves the same way: an error about a screen you have left no longer replaces the screen in front of you.',
       ],
     },
+    {
+      version: '1.9.22',
+      date: '2026-10-16',
+      items: [
+        'Moving through songs quickly no longer leaves the spectrum at zero on the song you land on. Skipping fast could leave the bars flat for the rest of the track while it played: the app was still reading the song you had just left, and it now reads the one that is playing.',
+        'The songs in "On this phone" have their names and their lengths. Downloads made before the last two versions were stored without a title or a duration, so the list showed blank rows with `--:--` beside every one of them — while every one of them played, with its art and its lyrics. They are named now, from the download\'s own record on the phone and from your server when it is reachable, and the names stay.',
+        'A downloaded song that had been stored without its length now shows the right total while it plays, instead of `0:00`.',
+      ],
+    },
   ];

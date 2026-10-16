@@ -32,6 +32,11 @@ import type { Song } from '../src/api/types.ts';
  * read them the way the app does.
  */
 import { downloadControlLabel, grownControlLabel, playlistRowLabel, playlistSubLine } from '../src/ui/app.ts';
+/*
+ * v1.9.22 — the row's `--:--`, from the function the row actually calls. A test that restated the
+ * placeholder as a literal could pass while the view drew something else.
+ */
+import { formatDuration } from '../src/ui/dom.ts';
 
 const song = (id: string, size = 1000): Song => ({ id, title: `Track ${id}`, artist: 'Someone', album: 'Something', duration: 10, size });
 
@@ -417,4 +422,193 @@ test('the downloaded-songs view is one row per complete file, in library order, 
     ['Track a', 'Track b'],
     'the titles come from the mirror, not from a round trip',
   );
+});
+
+/* ------------------------------------------------- the rows that carry no metadata (v1.9.22) */
+
+/**
+ * The owner, on the installed build: *"the library was populated by a bunch of nameless songs with
+ * no durations... when I click in, they are playable and even have album art and lyrics. I went to
+ * the individual playlists and neither had blank songs."*
+ *
+ * 497 tracks, ten rows of blanks with `--:--` where the duration goes, and every file fine. The
+ * rows were written by a build before v1.9.20 carried a copy of the song's title/artist/album/
+ * coverArt/duration (`src/storage/offline.ts:24-38`), and `downloadedSongs()` maps a row straight
+ * to a `Song` — so the view printed what the row had, which was nothing, and nothing ever went back
+ * for it. The playlist pages looked right because they ask the server, and the track played fine
+ * because the file is on disk (art and lyrics resolve from the file and the server lazily).
+ *
+ * This is that state, made runnable: a legacy mirror (no `title` on any row) whose download's own
+ * record *does* name every song. The repair has to make the rows name them — from the phone, with
+ * no connection — and `--:--` has to become the real duration.
+ */
+test('a row a 1.9.19 build wrote is repaired from the download’s own record, with no connection', async () => {
+  const mirror = memoryStore();
+  // The legacy mirror, exactly as `parseMirror` reads it: rows with `path`, `bytes` and `state`, and
+  // no metadata key anywhere. The manifest beside them is the download's own record, which is where
+  // the `Song`s the playlist was answered with live.
+  mirror.setItem(
+    'navilite.offline',
+    JSON.stringify({
+      v: 1,
+      hydratedAt: Date.now(),
+      rows: {
+        a: { path: 'file:///a.mp3', bytes: 1000, state: 'complete' },
+        b: { path: 'file:///b.mp3', bytes: 2000, state: 'complete' },
+      },
+      playlists: {
+        'pl-1': { songs: [song('a'), song('b')], name: 'Driving', requestedAt: Date.now(), state: 'complete' },
+      },
+    }),
+  );
+  // No bridge and no server: this is the airplane-mode half, and it is the half that must work.
+  const store = new OfflineStore(null, { store: mirror });
+
+  const before = store.downloadedSongs();
+  assert.deepEqual(
+    before.map((entry) => [entry.id, entry.title, entry.duration]),
+    [
+      ['a', '', undefined],
+      ['b', '', undefined],
+    ],
+    'the rows the owner saw: no titles, no durations — and `formatDuration` draws that as `--:--`',
+  );
+  assert.equal(formatDuration(before[0]?.duration), '--:--', 'which is the placeholder on his screenshot');
+
+  const fixed = await store.repairMetadata();
+  assert.equal(fixed, 2, 'both rows are filled in');
+  assert.deepEqual(
+    store.downloadedSongs().map((entry) => [entry.id, entry.title, entry.artist, entry.duration]),
+    [
+      ['a', 'Track a', 'Someone', 10],
+      ['b', 'Track b', 'Someone', 10],
+    ],
+    'with real titles, artists and durations — never the song id, never a placeholder',
+  );
+  assert.equal(formatDuration(store.downloadedSongs()[0]?.duration), '0:10', 'and the row times the track');
+
+  /*
+   * …and it is **durable**: the repair writes the rows back to the mirror, so the next launch (and
+   * the next foreground reconcile, whose `list()` answer has none either) still has them.
+   */
+  assert.equal(loadMirror(mirror)?.rows['a']?.title, 'Track a', 'the mirror now carries the title');
+  assert.equal(loadMirror(mirror)?.rows['a']?.durationSec, 10, 'and the duration');
+
+  const relaunch = new OfflineStore(null, { store: mirror });
+  assert.deepEqual(
+    relaunch.downloadedSongs().map((entry) => entry.title),
+    ['Track a', 'Track b'],
+    'so a cold start draws the titles with nothing asked of anyone',
+  );
+
+  // Idempotent: a second pass has nothing to fill and writes nothing new.
+  assert.equal(await store.repairMetadata(), 0, 'a repair with nothing left to repair is a no-op');
+});
+
+/**
+ * The other half of the same requirement: **a fresh download shows its metadata immediately**, so
+ * the repair cannot be the only thing that ever names a row. The enqueue carries the `Song` fields
+ * (v1.9.20) and the row is written with them, so this list is never blank on the way in.
+ */
+test('a fresh download shows its metadata immediately, with no repair and no round trip', async () => {
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: memoryStore() });
+  await store.download('pl-1', [covered('a', 'cover-a', 4096)], { name: 'Driving' });
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 4096 });
+
+  const rows = store.downloadedSongs();
+  assert.deepEqual(
+    rows.map((entry) => [entry.id, entry.title, entry.artist, entry.album, entry.duration, entry.coverArt, entry.size]),
+    [['a', 'Track a', 'Someone', 'Something', 10, 'cover-a', 4096]],
+    'title, artist, album, duration and the cover id are on the row the moment the file lands',
+  );
+  // Nothing was asked of the server, and the repair has nothing to do: this is the path the fix must
+  // not have made the only one that works.
+  let asked = 0;
+  const counting = new OfflineStore(bridge, { store: memoryStore(), songLookup: async () => (asked += 1, song('a')) });
+  await counting.download('pl-1', [song('a')], { name: 'Driving' });
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+  assert.equal(await counting.repairMetadata(), 0, 'a complete row is not a repair job');
+  assert.equal(asked, 0, 'and the server is not asked about a row that already has its metadata');
+});
+
+/**
+ * What the repair asks the server, and what it does when nobody can answer.
+ *
+ * The residue case is real — a row from a build whose playlist record is gone, in airplane mode —
+ * and the honest answer is that it stays as it is. What this test pins is that it is asked **once**
+ * per session (not once per draw of the view), and that a row which cannot be named changes nothing
+ * else: the count and the bytes are still the files that are here, and the sort is still the
+ * library's own, blanks landing where an empty title sorts.
+ */
+test('a row nobody can name is asked for once, and leaves the count, the bytes and the sort alone', async () => {
+  const mirror = memoryStore();
+  mirror.setItem(
+    'navilite.offline',
+    JSON.stringify({
+      v: 1,
+      hydratedAt: Date.now(),
+      rows: {
+        a: { path: 'file:///a.mp3', bytes: 1000, state: 'complete' },
+        b: { path: 'file:///b.mp3', bytes: 2000, state: 'complete' },
+      },
+    }),
+  );
+  const asked: string[] = [];
+  const store = new OfflineStore(null, {
+    store: mirror,
+    // The server knows one of them and has never heard of the other.
+    songLookup: async (songId) => {
+      asked.push(songId);
+      return songId === 'a' ? { ...song('a'), title: 'Named by the server', duration: 42 } : null;
+    },
+  });
+
+  assert.equal(await store.repairMetadata(), 1, 'the server named one of the two');
+  assert.deepEqual(asked, ['a', 'b'], 'and both were asked, once each, in row order');
+  const rows = store.downloadedSongs();
+  const named = rows.find((entry) => entry.id === 'a');
+  const unnamed = rows.find((entry) => entry.id === 'b');
+  assert.deepEqual([named?.title, named?.duration], ['Named by the server', 42], 'the answered row is repaired');
+  assert.deepEqual([unnamed?.title, unnamed?.duration], ['', undefined], 'the other one keeps what it had — nothing is invented for it');
+  assert.equal(formatDuration(unnamed?.duration), '--:--', 'so it still draws the placeholder rather than a wrong number');
+
+  // The count and the bytes are the files that are here, named or not.
+  assert.equal(store.totalBytes(), 3000, 'the header’s size is the complete rows’ bytes');
+  assert.equal(rows.length, 2, 'and the header’s count is the rows');
+
+  // …and a second pass in the same session does not ask again.
+  assert.equal(await store.repairMetadata(), 0, 'nothing more to fill');
+  assert.deepEqual(asked, ['a', 'b'], 'and nobody is asked twice for the same row in one session');
+});
+
+/**
+ * **The reconcile must not throw the metadata away** — which is what it used to do, and what would
+ * have made the repair a chore repeated on every foreground: `hydrate()` replaces the row map with
+ * `list()`'s answer, and an index written before v1.9.20 answers with rows that have none.
+ */
+test('a reconcile with an older index keeps the metadata the mirror has', async () => {
+  const mirror = memoryStore();
+  mirror.setItem(
+    'navilite.offline',
+    JSON.stringify({
+      v: 1,
+      hydratedAt: Date.now(),
+      rows: {
+        a: { path: 'file:///a.mp3', bytes: 1000, state: 'complete', title: 'Track a', artist: 'Someone', album: 'Something', durationSec: 10 },
+      },
+    }),
+  );
+  // The native index is the truth about the *files* and has none of the metadata — the shape a
+  // 1.9.19 index has. The bytes it reports are its own, and must be what the row ends up with.
+  const bridge = fakeBridge([
+    { songId: 'a', path: 'file:///a.mp3', suffix: 'mp3', bytes: 1234, state: 'complete', refs: [], title: '', artist: '', album: '', durationSec: 0 },
+  ]);
+  const store = new OfflineStore(bridge, { store: mirror });
+  await store.hydrate();
+
+  const row = store.downloadedSongs()[0];
+  assert.deepEqual([row?.id, row?.size], ['a', 1234], 'the file, its bytes and its state come from the index');
+  assert.deepEqual([row?.title, row?.duration], ['Track a', 10], 'the names come from what the store already knew');
+  assert.equal(loadMirror(mirror)?.rows['a']?.title, 'Track a', 'and the reconcile wrote them back, so they stay known');
 });

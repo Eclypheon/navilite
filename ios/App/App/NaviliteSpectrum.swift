@@ -808,25 +808,49 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
         }
         if let item = player.currentItem {
             let track = await AudibleSpectrumTap.audioTrack(of: item)
-            if track != nil || spectrum.isTapped(item) {
-                switch spectrum.attach(to: item, track: track, player: player, requestedUrl: requested) {
-                case .success(let sampleRate):
-                    call.resolve([
-                        "started": true,
-                        "sampleRate": sampleRate,
-                        "bandCount": AudibleSpectrumTap.bandCount,
-                        "tapped": assetId
-                    ])
-                case .failure(let error):
-                    call.reject(error.errorDescription ?? "the spectrum could not be tapped onto the audible player")
+            /*
+             * v1.9.22 — **both questions are asked again once the wait is over.**
+             *
+             * The read above happens *before* the await, and the await is where this install spends
+             * its time: `audioTrack(of:)` resolves the item's own track list, and for a stream being
+             * replaced that can take a second or more (the loop below waits up to
+             * `trackWaitSeconds` for it). A track change during that window used to leave this
+             * install attaching to the item it had read — the item the player had just left — while
+             * a newer request had already installed the tap on the item that is playing. `attach`
+             * begins with `detach()`, so the tap came *off* the item being heard and went onto a
+             * dead one: `itemIsCurrent` false, no frames, and the canvas handed nothing while the
+             * song played. That is the owner's *"while the song is playing the spectrum is just
+             * zero"*, and it is a race, which is why it only showed up when he moved through songs
+             * quickly.
+             *
+             * The generation guard above is not enough on its own: it is checked before the read,
+             * and nothing after the await used to re-check it. So: a request that has been overtaken,
+             * or whose item is no longer the player's current item, does not attach. It re-reads and
+             * tries again instead — the same bounded retry as an item whose track list is not built
+             * yet — and a request that cannot find the player on its own item within the budget
+             * reports that, rather than taking the tap off the audio the listener is hearing.
+             */
+            if generation == self.generation, player.currentItem === item {
+                if track != nil || spectrum.isTapped(item) {
+                    switch spectrum.attach(to: item, track: track, player: player, requestedUrl: requested) {
+                    case .success(let sampleRate):
+                        call.resolve([
+                            "started": true,
+                            "sampleRate": sampleRate,
+                            "bandCount": AudibleSpectrumTap.bandCount,
+                            "tapped": assetId
+                        ])
+                    case .failure(let error):
+                        call.reject(error.errorDescription ?? "the spectrum could not be tapped onto the audible player")
+                    }
+                    return
                 }
-                return
             }
         }
         guard waited < AudibleSpectrumTap.trackWaitSeconds else {
             call.reject(player.currentItem == nil
                 ? "the audible player has no item loaded yet, so there is nothing to tap"
-                : "the audible player has not loaded an audio track yet, so there is nothing to tap")
+                : "the audible player's item was replaced while this request was waiting for its audio track, so there is nothing to tap")
             return
         }
         try? await Task.sleep(nanoseconds: 100_000_000)
