@@ -1040,7 +1040,7 @@ The design is `docs/design-v2.0-beta.md`. This entry records the owner's decisio
 10. **Released as v2.0-beta.** The word set and the regions above are what ships: item 2 is `279cfce` and items 3-4 are `6305608`, landed on `main` unreleased on 2026-10-17 with the refactor slices around them (`9e74ca7`, `3c054d4`, `30ead77`, `deafea9`, `f10ec06`, `3ba040c`, and the P3/P4 probe `5efc3ac`). The cut is card `t_b97b252b` — the version bump, the "What's new" entry, the tag `v2.0-beta` and the artifact in one commit. What the cut does **not** touch: `CHANGELOG.md`'s earlier headings, `docs/verification.md` §30-§32 (history), and §515.4 / §833.3, which stay as written and are superseded by this entry rather than edited.
 11. **One correction the cut made to this design's own drafted words.** §6's optional housekeeping bullet claimed *"the two giant files everything else had to be read through are now a handful of small ones"* — **false, and it does not ship as written**: after the mandatory slices `src/ui/app.ts` is **2,250 lines** and `src/player/engine.ts` is **3,448**, both still the two largest files in `src/`, and the split only claims what happened — seven modules came out of them (`player-bar.ts` 351, `context.ts` 112, `now-screen.ts` 429, `shell.ts` 522, `engine-contract.ts` 358, `engine-helpers.ts` 55, `warm-pool.ts` 110). The bullet that ships says the code was split into more, smaller files and promises nothing about the two big ones being gone. Nothing else about §3.3 changes: from this release the arming window is still invisible **in the word** (colour `arming` + the chip's `spectrumArming` tooltip only), which is the narrowing §3.3 itself states.
 
-## The duration the app trusts: the library's number, not the transport's estimate, 2026-10-17 (card `t_644f6085` — released as v2.0.0-beta.2)
+## The duration the app trusts: the library's number, not the transport's estimate, 2026-10-17 (cards `t_644f6085` and `t_972b8fc5` — the first released as v2.0.0-beta.2; the second, which gated the web path, unreleased)
 
 His report, his words: *"The song Tank! initially appears to be 3:30 long but when it ends or i try to seek on
 it it suddenly becomes 70:01 long — not sure how this error even came about."*
@@ -1085,10 +1085,32 @@ it it suddenly becomes 70:01 long — not sure how this error even came about."*
    nothing real sits near it. The player's own number is still kept verbatim in `pluginState` — the phone's
    account stays the phone's account — and nothing about the patch in §1 changes: **precise duration stays
    off**, because re-enabling it is a full-file read before playback, which is the regression the card forbids.
-5. **What is deliberately *not* gated: the web path.** There `el.duration` is read from the very media the
-   browser is decoding (Chrome reads 210.3475 s for this same file, exactly) and it is what the element's own
-   end is judged against. Calling that "less trustworthy than the metadata" would be false, and v1.9.5's
-   reason for preferring the player's number (the advertised length of a re-encode) still holds on that path.
+5. **The web path is gated by the same rule — this entry's first claim about it was wrong, and here is the reading that
+   retired it (card `t_972b8fc5`).** The entry as written said the web path needed no gate, on the strength of one file on
+   one browser: *"there `el.duration` is read from the very media the browser is decoding (Chrome reads 210.3475 s for
+   this same file, exactly)"*. `t_d3de2a88` then measured the web path on all three real Opus files plus the MP3 and FLAC
+   controls — the app's own `dist/` served over HTTP, `/rest/stream` answering those files and `getSong`'s duration each
+   file's own, both browsers at 393x852:
+   | file | the file (ffprobe) & `getSong` | Chrome `el.duration` | **WebKit (iOS 18.7) `el.duration`** |
+   |---|---|---|---|
+   | `tank.opus` | 210.3475 s | 210.3475 s | **4201.84 s** — the app painted *70:01* |
+   | `other1.opus` | 210.6275 s | 210.6275 s | **296.08 s** |
+   | `other2.opus` | 219.2875 s | 219.2875 s | **190.14 s** |
+   | `a.mp3` (control) | 180.6667 s | 180.6667 s | 180.696 s |
+   | `a.flac` (control) | 206.0732 s | 206.0732 s | 206.08 s |
+   The three WebKit numbers are **digit for digit the three §1 measured through AVFoundation** (4201.84 / 296.08 /
+   190.14) with MP3/FLAC within 30 ms, and `status().durationMs` equalled `el.duration * 1000` for every file — so
+   Safari-on-iOS and the iOS transport share the estimator, `el.duration` is a *measurement* rather than the container's
+   own last-granule answer, and "the browser is decoding it" is not a reason to believe it. **So the rule in §4 is
+   applied on the web path too, and through one spelling of it** — `believableMeasuredMs` is read by
+   `engine.durationMs()` (which the bar, the now screen, the clock's clamp and the near-end window all go through) and
+   by the facts judgment in `engine.reportIsAtEnd`; the web `timeupdate`'s progress report hands out the same judged
+   number, so the lock screen's position state cannot carry the estimate either. **Nothing about Chrome or about
+   v1.9.5's reason for preferring the transport's number changes:** every Chrome reading above is within 30 ms of its
+   file, so it is believed and used unchanged, and a track with no duration of its own (a stream, a blank row) still
+   keeps whatever the element measured. **The web path's *end* was never decided by this number and still is not** — it
+   is the element's own `ended`, a fact about the stream it decoded, and the guard neither supplies nor withholds it.
+   No version is bumped and nothing is shipped by that card: see `docs/verification.md` §35.
 6. **Released as v2.0.0-beta.2** (card `t_a7f2fc72`): the version bump, the "What's new" entry, the tag `v2.0-beta.2` and the artifact in one commit. The only unreleased commit on `main` when the cut was made was this fix itself (`4101a32`), so nothing else is in that cut. Proof on the harness that owns
    these numbers (`test/engine-native.test.ts`, 3 tests added; `npm test` 266/266, `npm run typecheck` and
    `npm run build` clean): with the transport reporting 4201.84 s for a 210.3475 s track the bar's number stays

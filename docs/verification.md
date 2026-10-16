@@ -3955,6 +3955,12 @@ $ git log --oneline 03eb486..HEAD -- src public index.html vite.config.ts capaci
 5. **The two residuals the earlier entries left open are untouched and not claimed closed.** The web path's `el.duration` is still deliberately not gated (§5 of the duration entry), and the native patch still sets
    `AVURLAssetPreferPreciseDurationAndTimingKey: false` — re-enabling it is a full-file read before playback,
    which is the regression the fix's own card forbade.
+   **Corrected 2026-10-17, by card `t_972b8fc5` (§35): of these two residuals, the web path's is now *closed*, and
+   this record's own §33.4 said the opposite.** `t_d3de2a88` measured WebKit-on-iOS returning 4201.84 / 296.08 /
+   190.14 s from `el.duration` on the three real Opus files §1 of the duration entry is about — the same three
+   numbers, MP3/FLAC within 30 ms — so "read from the very media the browser is decoding" was not evidence of
+   accuracy, and `engine.durationMs()` now gates it by the same rule as the native transport. The *native patch*
+   residual stands exactly as written here: the flag is still `false`.
 6. **This record is not the delivery.** No `.greenlit` marker was written and nothing was handed over: Sage's
    verification card is gated on this one, its SHIP writes the marker, and the orchestrator hands the IPA over.
    The artifact sits in `artifacts/` with no marker beside it.
@@ -4129,4 +4135,132 @@ Raw runs (this machine's agent scratch,
 `mock.log` (the fixture), `harness.txt` and `harness.json` (the 91 ok / 0 FAIL, with the scroll counts and the
 Rects behind every number), `ipa-build.txt` (the `xcodebuild` log and the script's own version/build read) and
 `ipa-index.js` (the chunk out of the archive, byte-identical to `dist/`).
+
+## 35. The web path's duration is gated too — the record's opposite claim, retired (2026-10-17, unreleased — card `t_972b8fc5`)
+
+§33 fixed the *native* duration and left one residual open on purpose: *"the web path's `el.duration` is still
+deliberately not gated"* (§33.4.5). That claim was wrong, and this section is the reading that retired it plus the
+change that closes it. **Nothing ships from this card**: no version bump, no tag, no artifact — the web-path gate
+rides into whatever release comes next, like any other unreleased `src/` commit.
+
+### 35.1 The reading this rests on, and whose it is
+
+`t_d3de2a88` (a measuring card, not this one) served the app's own `dist/` over HTTP with `/rest/stream` answering
+the **real** library files and `getSong`'s duration each file's own, and read the app in Chrome and in WebKit at
+393x852. Chrome is exact for all five files. **WebKit (iPhone 15 Pro Simulator, iOS 18.7, WebKit 605) is not:**
+
+| file | the file (ffprobe) & `getSong` | Chrome `el.duration` | **WebKit `el.duration`** | the app's answer in WebKit |
+|---|---|---|---|---|
+| `tank.opus` | 210.3475 s | 210.3475 s | **4201.84 s** | 4201840 ms — *70:01* painted |
+| `other1.opus` | 210.6275 s | 210.6275 s | **296.08 s** | 296080 ms |
+| `other2.opus` | 219.2875 s | 219.2875 s | **190.14 s** | 190140 ms |
+| `a.mp3` (control) | 180.6667 s | 180.6667 s | 180.696 s | 180696 ms |
+| `a.flac` (control) | 206.0732 s | 206.0732 s | 206.08 s | 206080 ms |
+
+The three WebKit numbers are **digit for digit the three §1 of the duration entry measured through AVFoundation**,
+MP3/FLAC within 30 ms — so Safari-on-iOS and the iOS transport share the estimator, and `el.duration` is a
+measurement, not automatically the container's own answer. The raw readings are the artifacts attached to
+`t_d3de2a88` (`chrome-web-duration.json`, `webkit-web-duration.json`).
+
+**That run's own caveat, quoted so nothing here is built on a misreading:** the Simulator's Safari refuses to start
+playback without a user gesture, so the app never left `loading` (position 0:00) and its label paints lagged one
+item behind. What is *not* in doubt is the number the label is painted from: `status().durationMs` equalled
+`el.duration * 1000` for every file, and a bare `<audio>` element on the same URL read the same values,
+independent of the app.
+
+### 35.2 What changed
+
+* `src/player/engine-helpers.ts` — `measuredDurationIsBelievable`'s doc block gains the web column above and the
+  sentence that makes the rule one rule: a number the transport reports — the native player's **or** the browser
+  element's — is used when the track has no duration of its own, or when the two agree.
+* `src/player/engine.ts` — one private `believableMeasuredMs(measured)` is the single spelling of the rule, read by
+  `durationMs()` (both backends) and by the facts judgment in `reportIsAtEnd`; `durationMs()`'s web branch is
+  `believableMeasuredMs(this.el.duration * 1000) || track.durationMs` instead of the element's number unjudged, and
+  the web `timeupdate`'s progress report now hands out that same judged number rather than `el.duration * 1000`, so
+  the estimate cannot reach the lock screen's position state either.
+* `test/engine-native.test.ts` — two web-path cases in the file that owns these numbers, plus a `setDuration`
+  accessor on the fake element.
+
+**What deliberately did *not* change:** the native path (same rule, now spelled once), the native patch
+(`precise duration` stays off), and the web path's *end of an item* — that is the element's own `ended`, a fact
+about the stream it decoded, and it was never a comparison against this number, so the guard neither supplies nor
+withholds it. Chrome's exact readings and any track with no duration of its own are used unchanged.
+
+### 35.3 Fail-before: the fix, shown failing without it
+
+```console
+$ node --test --test-name-pattern 'twenty times its length|separation, not a preference' test/engine-native.test.ts   # before, on the unfixed tree
+...
+    Tank!.opus — the owner’s track: the element measures 4201840 ms and the track's own duration is 210348 ms → the bar prints "70:01" (the app holds 4201840 ms)
+✖ a browser that calls an Opus track twenty times its length does not become the duration the app shows
+  AssertionError [ERR_ASSERTION]: Tank!.opus — the owner’s track: the track's own duration is the number the bar prints
+  + actual - expected
+  + 4201840
+  - 210348
+ℹ tests 3 / pass 2 / fail 1
+```
+
+The failing case fails on the reported defect itself — **70:01 painted on the bar from the element's own
+estimate**, 4201840 ms against the track's 210348 — and it is the *new* case, not an old one: the pre-existing 33
+tests of §33 pass on both trees. The second new case ("a browser that reads the container exactly keeps its own
+number") passes before and after by construction: it asserts the behaviour Chrome needs and the change must not
+take away.
+
+### 35.4 After: `npm test`, and Chrome re-read on the fixed bytes
+
+```console
+$ npm test
+ℹ tests 269 / pass 269 / fail 0 / cancelled 0 / skipped 0          # 267 before this card + the 2 added
+$ npm run typecheck                                                # clean
+$ npm run build                                                    # clean; dist/assets/index-8egvYqwW.js
+```
+
+The three web cases on the fixed tree, printed by the harness:
+
+```console
+    Tank!.opus — the owner’s track: the element measures 4201840 ms and the track's own duration is 210348 ms → the bar prints "3:30" (the app holds 210348 ms)
+    以朋友的身份.opus: the element measures 296080 ms and the track's own duration is 210628 ms → the bar prints "3:30" (the app holds 210628 ms)
+    那些你不能给我的.opus: the element measures 190140 ms and the track's own duration is 219288 ms → the bar prints "3:39" (the app holds 219288 ms)
+    and the element's own `ended` on that same 4201840 ms element: the end was reported — the machine rests on "ended"
+    Tank!.opus: the element says 210347.5 ms, the track's own is 210347.5 ms → the app holds 210348 ms
+    a.mp3 (CBR): the element says 180696 ms, the track's own is 180666.7 ms → the app holds 180696 ms
+    a track with no duration of its own: the element says 4201840 ms → the app holds 4201840 ms
+```
+
+**And Chrome, re-read on those fixed bytes** — `t_d3de2a88`'s own harness (`proxy.mjs` in front of
+`tools/mock-subsonic.mjs`, serving the three real Opus files + one MP3 + one FLAC, `chrome-probe.mjs` over CDP at
+393x852, muted), against a fresh `dist/` built from the fixed `src/`:
+
+| file | the file's own | the bar & now label | `el.duration` | `status().durationMs` |
+|---|---|---|---|---|
+| `tank.opus` | 210.3475 s | **3:30** | 210.3475 | 210347.5 |
+| `other1.opus` | 210.6275 s | **3:30** | 210.6275 | 210627.5 |
+| `other2.opus` | 219.2875 s | **3:39** | 219.2875 | 219287.5 |
+| `a.mp3` | 180.6667 s | **3:00** | 180.666667 | 180666.667 |
+| `a.flac` | 206.0732 s | **3:26** | 206.073167 | 206073.167 |
+
+Identical to the pre-fix Chrome run, label for label and to the millisecond — so the gate is invisible where the
+measurement agrees, and the seek-to-just-before-the-end and the end-of-item rows are unchanged too (the MP3 reaches
+`ended` and the queue moves on to the next item's own number, as before).
+
+### 35.5 Not verified here, and not claimed
+
+1. **WebKit with playback actually started.** The Simulator's Safari will not begin playback without a user
+   gesture (the caveat in §35.1), so no run here has seen a WebKit element play, seek or end. The *number* the bar
+   is painted from was measured, and the gate is proved on that number in the harness and in Chrome; a WebKit
+   element that is actually playing is not measured.
+2. **The end of an Opus track in WebKit.** On this path the boundary is the element's own `ended`; that it is not
+   gated by any duration is structural (and asserted in the harness case that reaches `ended` on the very element
+   holding 4201840 ms), but a WebKit end-of-item has not been observed.
+3. **Android, and any artifact.** Nothing is built for this card: no APK, no IPA, no version bump, no tag, no
+   `.greenlit` marker. The change is an unreleased `src/` commit.
+4. **The native path is not re-measured here.** §1-§2 of the duration entry, §33's fail-before and the device
+   behaviour of the shipped `v2.0.0-beta.3` are untouched by this card — the native branch of `durationMs()` is the
+   same rule with a different spelling, and the native-patch residual of §33.4.5 (the flag stays `false`) stands.
+
+Raw runs (card workspace `/Users/neokester/.hermes/kanban/workspaces/t_972b8fc5/`): `fail-before-web-path.txt`,
+`fail-after-web-path.txt`, `npm-test.txt` (the 269/269), `chrome-web-duration-fixed.json` (the Chrome run on the
+fixed bytes, verbatim), `chrome-probe.err` (the poll log), `proxy.mjs` / `probe.js` / `chrome-probe.mjs` /
+`summarize.mjs` (the harness, copied from `t_d3de2a88`; `proxy.mjs` retargeted at this workspace's `media/`, which
+holds the five real files) and `mock.log` / `proxy.log`.
 
