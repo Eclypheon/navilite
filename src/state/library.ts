@@ -8,6 +8,13 @@ export type AlbumListType = 'alphabeticalByName' | 'newest' | 'recent' | 'freque
 export type OfflinePathResolver = (songId: string) => string | null;
 
 /**
+ * Resolves a **cover id** to a URL the page can read when that cover is on this phone, else null
+ * (v1.9.20). Injected exactly like {@link OfflinePathResolver} above, so the browser bundle and the
+ * tests can pass a stub and this file never touches `Capacitor`.
+ */
+export type OfflineArtResolver = (coverArtId: string) => string | null;
+
+/**
  * How many entries each detail cache may hold (v1.9.7).
  *
  * `albumCache`, `artistDetailCache` and `playlistCache` were evicted only by {@link Library.invalidate}
@@ -41,18 +48,34 @@ export class Library {
   private playlistCache = new Map<string, PlaylistWithEntries>();
   private starredCache: Starred2 | null = null;
   private readonly resolveOffline: OfflinePathResolver;
+  private readonly resolveOfflineArt: OfflineArtResolver;
 
-  constructor(client: SubsonicClient, resolveOffline: OfflinePathResolver = () => null) {
+  constructor(client: SubsonicClient, resolveOffline: OfflinePathResolver = () => null, resolveOfflineArt: OfflineArtResolver = () => null) {
     this.client = client;
     this.resolveOffline = resolveOffline;
+    this.resolveOfflineArt = resolveOfflineArt;
   }
 
   get crossOrigin(): boolean {
     return this.client.isCrossOrigin;
   }
 
+  /**
+   * The cover for a cover id — **the one chokepoint for art resolution** (v1.9.20), exactly as
+   * {@link streamUrl} is the one for audio.
+   *
+   * A local copy wins when there is one: the art that came down with the song is what the spectrum
+   * page draws and what `player/palette.ts` reads its colours from, with no connection at all. Every
+   * caller in the app already goes through here — the palette, the player bar, the spectrum page and
+   * every thumb — so this one edit is what makes all of them offline-capable, and `palette.ts` is not
+   * touched.
+   *
+   * Offline with no local cover the URL is still the network's, and the view draws its placeholder
+   * exactly as it did before: art is never a reason for a view to wait or to fail (§I3).
+   */
   coverUrl(coverArtId: string | undefined, size = 512): string | null {
-    return coverArtId ? this.client.coverArtUrl(coverArtId, size) : null;
+    if (!coverArtId) return null;
+    return this.resolveOfflineArt(coverArtId) ?? this.client.coverArtUrl(coverArtId, size);
   }
 
   /**

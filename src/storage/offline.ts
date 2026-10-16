@@ -22,6 +22,21 @@ export interface OfflineMirrorRow {
   bytes: number;
   state: 'complete' | 'staging' | 'failed';
   /**
+   * Copy metadata (v1.9.20). Optional, on the same rule as everything the mirror carries: a row
+   * written by 1.9.19 parses exactly as it always did (`title` absent → the browse list draws the
+   * id for one paint, until the next `saveMirror` writes it).
+   *
+   * Why it is here at all: the mockless first paint is local, and the downloaded-songs list has to
+   * print **titles**, not a column of blanks for the length of a `bridge.list()` round trip. Making
+   * the view wait for that round trip is the 1.9.19 defect, rebuilt in a new place.
+   */
+  title?: string;
+  artist?: string;
+  album?: string;
+  /** The row's cover id, so the art file can be found by cover rather than by song (§5). */
+  coverArt?: string;
+  durationSec?: number;
+  /**
    * The lyrics axis, stored beside the audio row (v1.9.12). Never the text — the `.lyrics` file
    * holds the raw body and is parsed at read time; this is only the state and the measured bytes,
    * so the resolver and the estimator answer synchronously.
@@ -31,6 +46,11 @@ export interface OfflineMirrorRow {
    * already recorded.
    */
   lyrics?: { state: 'pending' | 'present' | 'none' | 'failed'; bytes: number; fetchedAt?: number };
+  /**
+   * The art axis (v1.9.20): state, file name and measured bytes, keyed by cover. Optional, like
+   * everything a 1.9.19 row does not have.
+   */
+  art?: { state: 'pending' | 'present' | 'none' | 'failed'; file?: string; bytes: number; fetchedAt?: number };
 }
 
 /**
@@ -121,7 +141,41 @@ export function parseMirror(raw: string | null): OfflineMirror | null {
         fetchedAt: typeof r.lyrics.fetchedAt === 'number' ? r.lyrics.fetchedAt : undefined,
       };
     }
-    rows[songId] = { path: r.path, bytes: r.bytes, state: r.state, lyrics };
+    /*
+     * The art axis, on exactly the lyrics rule: kept only when it is well-formed enough to trust, and
+     * **dropped rather than defaulted** when it is not — a row that claims `present` with no file name
+     * would send `artPathFor` looking for a file that cannot be named, and the honest answer for a
+     * row we cannot read is "no art", which the network URL then fills.
+     */
+    let art: OfflineMirrorRow['art'];
+    if (
+      r.art &&
+      typeof r.art === 'object' &&
+      (r.art.state === 'pending' || r.art.state === 'present' || r.art.state === 'none' || r.art.state === 'failed') &&
+      typeof r.art.bytes === 'number' &&
+      (r.art.state !== 'present' || (typeof r.art.file === 'string' && r.art.file !== ''))
+    ) {
+      art = {
+        state: r.art.state,
+        file: typeof r.art.file === 'string' && r.art.file !== '' ? r.art.file : undefined,
+        bytes: r.art.bytes,
+        fetchedAt: typeof r.art.fetchedAt === 'number' ? r.art.fetchedAt : undefined,
+      };
+    }
+    rows[songId] = {
+      path: r.path,
+      bytes: r.bytes,
+      state: r.state,
+      // The metadata (v1.9.20) is passed through only as far as it is usable: an empty title is the
+      // same fact as no title, and the store treats both the same way.
+      title: typeof r.title === 'string' ? r.title : undefined,
+      artist: typeof r.artist === 'string' ? r.artist : undefined,
+      album: typeof r.album === 'string' ? r.album : undefined,
+      coverArt: typeof r.coverArt === 'string' && r.coverArt !== '' ? r.coverArt : undefined,
+      durationSec: typeof r.durationSec === 'number' ? r.durationSec : undefined,
+      lyrics,
+      art,
+    };
   }
   return { v: OFFLINE_MIRROR_VERSION, hydratedAt: candidate.hydratedAt ?? Date.now(), rows, playlists: parseManifests(candidate.playlists) };
 }

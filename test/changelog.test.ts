@@ -33,8 +33,8 @@ test('CHANGELOG.md and the in-app changelog say the same thing, in the same orde
   assert.deepEqual(releases, CHANGELOG);
 });
 
-test('the changelog is the owner-visible list: v1.0 through v1.9.19, and nothing internal', () => {
-  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4', '1.7.5', '1.7.6', '1.7.7', '1.8.0', '1.8.1', '1.9.0', '1.9.1', '1.9.2', '1.9.3', '1.9.4', '1.9.5', '1.9.6', '1.9.7', '1.9.8', '1.9.9', '1.9.10', '1.9.11', '1.9.12', '1.9.13', '1.9.14', '1.9.15', '1.9.16', '1.9.17', '1.9.18', '1.9.19']);
+test('the changelog is the owner-visible list: v1.0 through v1.9.20, and nothing internal', () => {
+  assert.deepEqual(CHANGELOG.map((release) => release.version), ['1.0', '1.1', '1.2', '1.3', '1.4', '1.5', '1.5.1', '1.6', '1.6.1', '1.6.2', '1.7', '1.7.1', '1.7.3', '1.7.4', '1.7.5', '1.7.6', '1.7.7', '1.8.0', '1.8.1', '1.9.0', '1.9.1', '1.9.2', '1.9.3', '1.9.4', '1.9.5', '1.9.6', '1.9.7', '1.9.8', '1.9.9', '1.9.10', '1.9.11', '1.9.12', '1.9.13', '1.9.14', '1.9.15', '1.9.16', '1.9.17', '1.9.18', '1.9.19', '1.9.20']);
   for (const release of CHANGELOG) {
     assert.ok(release.items.length > 0, `${release.version} has no entries`);
     for (const item of release.items) {

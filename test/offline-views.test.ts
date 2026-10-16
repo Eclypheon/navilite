@@ -80,6 +80,14 @@ interface Reading {
   subtitle: string | null;
   rows: string[];
   downloadedRows: string[];
+  /** v1.9.20: the playlist rows with their mark, and the song rows with theirs. */
+  playlistRows?: Array<{ title: string | null; sub: string | null; mark: string; label: string | null }>;
+  songMarks?: Array<{ title: string | null; mark: string; label: string | null }>;
+  artSrcs?: string[];
+  /** The shell's `--accent-primary` on a reading (the `paletteOffline` state carries before/after). */
+  primary?: string;
+  before?: string;
+  after?: string;
   pill: { visible: boolean; text: string } | null;
   emptyBox: string | null;
   leaked: string[];
@@ -186,6 +194,78 @@ test('a downloaded playlist is browsable with no connection, and no view prints 
     for (const [name, state] of Object.entries(report.states)) {
       assert.deepEqual(state.leaked ?? [], [], `${name} printed the transport’s own text`);
     }
+
+    /*
+     * ---------------------------------------------------------------------------------------
+     * v1.9.20 — the downloaded-content acceptance, asserted on the numbers the harness reported
+     * rather than on its exit code (the pattern this file already uses for 1.9.18's claims).
+     * ---------------------------------------------------------------------------------------
+     */
+
+    // **Item 1, with the server answering.** One row per playlist: the store used to paint its
+    // own row beside the server's, which is the duplicated playlist the owner photographed. The row
+    // the server draws for the playlist that is *also* on this phone must carry the mark.
+    const onlinePlaylists = report.states.playlistsOnline;
+    const onlineTitles = (onlinePlaylists?.playlistRows ?? []).map((row) => row.title);
+    assert.ok(onlineTitles.length > 2, 'the online playlists screen drew no rows');
+    assert.equal(
+      new Set(onlineTitles).size,
+      onlineTitles.length,
+      `a playlist name was painted twice with the server up: ${JSON.stringify(onlineTitles)}`,
+    );
+    const markedOnline = (onlinePlaylists?.playlistRows ?? []).filter((row) => row.mark !== 'none');
+    assert.equal(markedOnline.length, 1, `expected exactly one marked playlist row, got ${JSON.stringify(markedOnline)}`);
+    assert.equal(markedOnline[0]?.mark, 'complete', 'the downloaded playlist did not read as downloaded');
+    assert.match(String(markedOnline[0]?.sub), /on this phone/, 'and its row does not say the music is here');
+
+    // **Item 1, with the server refused** — and item 2's honesty rule: the playlist the store holds
+    // only part of must not read as complete.
+    const offlinePlaylists = report.states.playlistsOffline;
+    const offlineTitles = (offlinePlaylists?.playlistRows ?? []).map((row) => row.title);
+    assert.equal(offlineTitles.length, 2, `the offline playlists screen drew ${JSON.stringify(offlineTitles)}`);
+    assert.equal(new Set(offlineTitles).size, 2, 'a playlist name was painted twice with the server refused');
+    const complete = offlinePlaylists?.playlistRows?.find((row) => row.mark === 'complete');
+    const partial = offlinePlaylists?.playlistRows?.find((row) => row.mark === 'partial');
+    assert.ok(complete, 'the fully downloaded playlist is not marked complete offline');
+    assert.ok(partial, 'the partially downloaded playlist is not marked partial offline');
+    assert.match(String(partial?.sub), /1 of 3 on this phone/, 'the partial row does not say how much is here');
+    // The cover on those rows is the copy beside the audio, not a URL on the API: the API is refused,
+    // so a network URL here would be a broken image and an unthemed spectrogram.
+    assert.ok((offlinePlaylists?.artSrcs ?? []).length > 0, 'the offline playlists rows drew no cover at all');
+    for (const src of offlinePlaylists?.artSrcs ?? []) {
+      assert.match(String(src), /\/offline-art\//, `a cover was drawn from somewhere other than the device copy: ${src}`);
+    }
+
+    // **Item 2, per track** — every downloaded song row carries its mark with no connection.
+    const offlinePage = report.states.playlistOffline;
+    assert.equal(offlinePage?.songMarks?.length, 3, 'the offline playlist page did not draw three song rows');
+    for (const row of offlinePage?.songMarks ?? []) {
+      assert.equal(row.mark, 'complete', `${row.title} is on this phone and is not marked`);
+      assert.match(String(row.label), /downloaded$/, 'and its accessible name does not say so');
+    }
+
+    // **Item 3** — "On this phone" is a view over the store, drawn with no round trip.
+    const downloads = report.states.downloadsOffline;
+    assert.equal(downloads?.title, 'On this phone', 'the downloaded-songs view is not titled for where the music lives');
+    assert.deepEqual(
+      [...(downloads?.rows ?? [])].sort(),
+      ['Only this one is here', '夜に駆ける', 'A very long unbroken track title for the 393 px audit', '海底、月明かり'].sort(),
+      'the downloaded-songs view did not list the tracks on the phone',
+    );
+    assert.deepEqual(downloads?.playlistRows ?? [], [], 'it drew a playlist-shaped row: that is the entity the owner reported');
+    const hungDownloads = report.states.downloadsWithPendingRequest;
+    assert.ok(
+      Number(hungDownloads?.ms) < 3000,
+      `the downloaded-songs view waited ${hungDownloads?.ms} ms for a server that never answered`,
+    );
+
+    // **Item 4** — the cover on disk drove the palette. `DEFAULT_PALETTE.primary` is what the shell
+    // wears when no art was read at all, so anything else is the proof that the local cover was
+    // fetched and sampled rather than silently fallen back from.
+    const palette = report.states.paletteOffline;
+    assert.equal(palette?.before, '#7cd2ff', 'the shell was not wearing the default palette before the tap');
+    assert.notEqual(palette?.after, '#7cd2ff', 'the palette stayed on the default: the cover on disk was not read');
+    assert.ok(String(palette?.after).length > 0, 'no palette was written at all');
   } finally {
     mock.kill('SIGKILL');
   }

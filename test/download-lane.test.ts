@@ -156,3 +156,62 @@ test('the route’s own error document is never stored as lyrics, wherever the b
   assert.match(source, /String\(decoding: data\.prefix\(512\), as: UTF8\.self\)/, 'the 512-byte window is decoded with no nil branch');
   assert.doesNotMatch(source, /String\(data: data\.prefix\(512\), encoding: \.utf8\)/, 'the nil-returning initialiser is gone');
 });
+
+/**
+ * v1.9.20 — the **album-art axis**, as source-level claims.
+ *
+ * Swift cannot be run from `node --test`, so this is where the two silent catastrophes the design
+ * names are held: an art job without its own kind (which overwrites the song's audio job and hands
+ * the player a JPEG) and an art file the boot sweep does not know about (which is deleted on the next
+ * launch, taking the owner's covers with it).
+ */
+test('the art axis has its own kind, or a cover overwrites the song it belongs to', () => {
+  assert.match(source, /private static let artKind = "art"/, 'the third kind exists');
+  assert.match(source, /return suffix == artKind \? artKind : audioKind/, 'and the suffix maps to it');
+  assert.match(
+    source,
+    /kind == Self\.artKind \? Self\.artKind : "mp3"/,
+    'a job-less art transfer still lands as <cover>.art, never as <cover>.mp3',
+  );
+});
+
+test('every field the art axis adds to a durable record is Optional', () => {
+  /*
+   * §I9, and it is a hard rule rather than a preference: `readIndex()` returns `[:]` when the decode
+   * fails and the boot sweep then deletes **every file the index does not name** — so one
+   * non-optional field added against the owner's 1.9.19 `index.json` is a silent deletion of every
+   * download he has, and the same for a job in `navilite.offline.jobs`.
+   */
+  assert.match(source, /var coverArt: String\? = nil/, 'IndexRow.coverArt is optional');
+  assert.match(source, /var art: ArtRow\? = nil/, 'IndexRow.art is optional');
+  assert.match(source, /var coverOf: \[String\]\? = nil/, 'Job.coverOf is optional');
+  assert.equal((source.match(/var coverArt: String\? = nil/g) ?? []).length, 2, 'on both the row and the job');
+  assert.doesNotMatch(source, /var coverArt: String$/, 'never non-optional');
+});
+
+test('the boot sweep is taught the cover file, which is named after a cover id', () => {
+  assert.match(source, /if let file = row\.art\?\.file, !file\.isEmpty \{ names\.append\(file\) \}/, 'the named set includes every art file');
+  assert.match(source, /let named = Set\(\s*\n\s*index\.values\.flatMap \{ row -> \[String\] in/, 'and it is still the orphan predicate');
+  assert.match(source, /if !named\.contains\(file\.lastPathComponent\)/, 'unchanged: a file no row names is swept');
+});
+
+test('remove deletes the shared cover only when the last row naming it goes', () => {
+  assert.match(source, /let stillNamed = index\.values\.contains \{ \$0\.art\?\.file == file \}/, 'the scan reads the whole index');
+  assert.match(
+    source,
+    /if !stillNamed, let base = baseURL \{\s*\n\s*try\? FileManager\.default\.removeItem\(at: base\.appendingPathComponent\(file\)\)/,
+    'and the file goes with the last row that names it',
+  );
+  assert.match(source, /let removed = index\.removeValue\(forKey: songId\)/, 'the row that was removed is examined, not just dropped');
+});
+
+test('the cover is fanned out by cover id, and a body that is not an image is refused', () => {
+  assert.match(source, /fileprivate static func looksLikeImage\(_ url: URL\) -> Bool/, 'the image sniff exists where the bytes become a row');
+  assert.match(source, /guard Self\.looksLikeImage\(destination\) else \{/, 'and it refuses a body that is not an image');
+  assert.match(source, /if kind == Self\.artKind \{/, 'the art branch of `finish`');
+  assert.match(source, /let targets = index\.keys\.filter \{ key in/, 'which collects every row that names the cover');
+  assert.match(source, /index\[key\]\?\.coverArt = cover/, 'and writes the cover id, so a row written by 1.9.19 learns it');
+  assert.match(source, /index\[key\]\?\.art = artRow/, 'and the art row itself');
+  assert.match(source, /"songId": cover, "kind": kind, "bytes": bytes/, 'the done event is keyed by the cover, never by a song');
+  assert.match(source, /guard !targets\.isEmpty else \{/, 'a cover whose audio never landed is not recorded as a row');
+});

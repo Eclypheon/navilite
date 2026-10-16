@@ -1582,6 +1582,14 @@ interface NaviliteDownloadsPlugin {
     artist: string;
     album: string;
     durationSec: number;
+    /**
+     * v1.9.20, the art axis. `coverArt` is the cover this transfer is for (an art job's own
+     * `songId` is the same cover id), and `coverOf` names the songs that share it — the rows the
+     * finished cover must be attached to, which is what lets a download made by 1.9.19 learn which
+     * cover is its own. Optional, both: an audio or lyrics job carries neither.
+     */
+    coverArt?: string;
+    coverOf?: string[];
   }): Promise<void>;
   cancel(options: { songId: string }): Promise<void>;
   remove(options: { songId: string }): Promise<void>;
@@ -1591,8 +1599,40 @@ interface NaviliteDownloadsPlugin {
   writeLyrics(options: { songId: string; text: string }): Promise<void>;
   addListener(
     eventName: 'progress' | 'done' | 'failed',
-    listener: (event: { songId: string; path?: string; bytes?: number; total?: number; error?: string; status?: number; kind?: 'audio' | 'lyrics' }) => void,
+    listener: (event: {
+      songId: string;
+      path?: string;
+      bytes?: number;
+      total?: number;
+      error?: string;
+      status?: number;
+      /** `art` events are keyed by **cover id**, not by song (§5.4). */
+      kind?: 'audio' | 'lyrics' | 'art';
+    }) => void,
   ): Promise<PluginListenerHandle>;
+}
+
+/**
+ * A `file://` URL from the app's own container, made readable by the page (v1.9.20).
+ *
+ * The page's origin is `https://localhost` and the offline files live in
+ * `Library/Application Support/navilite-offline/`; a `file://` URL is not fetchable from that
+ * origin, and inside a WKWebView an `<img src="file://…">` is blocked — which is why the audio path
+ * never needed this (the player reads the file natively, and the path goes to the native side, not
+ * into the page). `Capacitor.convertFileSrc` is the bridge that exists for exactly this: on iOS it
+ * produces a custom-scheme URL that is **same-origin with the page**, so the cover renders and a
+ * `fetch` of it yields an untainted canvas for `paletteFromArtwork` (§5.5).
+ *
+ * Only `file://` is converted. Anything else is already a URL the page can read, and running it
+ * through the platform bridge would name a file that does not exist.
+ */
+export function localFileSrc(path: string): string {
+  if (!path.startsWith('file://')) return path;
+  try {
+    return Capacitor.convertFileSrc(path);
+  } catch {
+    return path;
+  }
 }
 
 /**

@@ -311,3 +311,101 @@ So the sequence of verdicts is now the same as the design's, with v1.7.4 no long
 Not covered here: this reads the **streaming** spectrum (the mock's WAV through the web engine). The
 local-file path (`playlistPath`/`localFile`, the v1.9.16/17 ground) is a different engine and was not
 exercised by this check.
+
+**What this criterion is blind to, named rather than left implicit** (from t_e62d2b6b, 2026-10-16).
+It is a **settled-state** criterion: it asserts that the tail only falls, that +900/+1200/+1500 ms are
+byte-identical, that what is left is ≤ 10 % of the loud frame, and that the frame it settles on is
+flat bars. It is therefore **silent about how the tail got there**. The shape between +240 ms and
++900 ms is printed (the +700 ms reading is in the output) and judged by nothing; and a build that
+drops from loud to flat **instantly** — the v1.2 snap the owner asked to be rid of — passes every one
+of those four assertions exactly as the v1.7.4 envelope does (v1.2 is a passing control under this
+tool, §above). So: the tool proves the spectrum *ends* silent and flat, and does not prove the
+release is *graceful*; that property is asserted only by the envelope's own constants in
+`src/player/visualizer.ts` (`ATTACK_S`/`RELEASE_S`/`FLOOR`) and by the eye of the person watching it.
+It also says nothing after +1500 ms — a bar creeping back up two seconds later is outside its window.
+Anyone reading a pass from this tool must not read it as an envelope claim.
+
+## 1.9.20, 2026-10-16 — downloaded content annotates the rows that already exist
+
+Owner's report (Telegram 2026-10-15 evening, with his screenshot of the Playlists tab on 1.9.19):
+*"a separate playlist is created for downloaded songs, this should not be the case … the duplicated
+playlist confuses the user"*, plus four asks in the same message — a mark beside a downloaded track
+and beside a playlist when the whole playlist is downloaded, a way to browse the library for
+downloaded songs, and **album art downloaded with the song so it can populate and theme the spectrum
+page**.
+
+**What the gate found, on the built app with a real server answering** (`dist/` of ac12206 against
+`tools/mock-subsonic.mjs`, Chrome at 393 × 852, the app's own offline mirror holding one downloaded
+playlist that also exists on the server): the screen draws that playlist **twice** — once from the
+store (`renderPlaylists`' `Downloaded` section, `ui/app.ts:2073-2077` → `offlinePlaylistRow:1779`,
+`cover(null)`, sub-line from the store's record) and once from the server's own list
+(`playlistRow:2102`, art, `formatDuration`) — and both rows navigate to the same playlist. The
+section is **not** a placeholder the server's answer replaces: `ui/app.ts:2094-2099` replaces the
+server half only, so both lists are painted whenever a server answers at all. His screenshot reads
+the pairs as a second entity rather than a second row because the two orders differ, one of each pair
+has a placeholder glyph where the other has art, and the sub-lines differ in kind (`5 GB` of
+*estimate* next to `269 on this phone`, versus `17:03:55` of runtime).
+
+**Nothing creates a playlist for downloads, and the report's wording is not the mechanism.**
+`createPlaylist` has exactly one caller, the Create button (`ui/app.ts:2061` →
+`state/library.ts:165` → `api/subsonic.ts:302-303`). The defect is one playlist painted on two
+surfaces at once. Six decisions follow; the long form, the seams and the file:line plan are in
+`docs/design-downloaded-surfaces.md`, which is part of this release.
+
+1. **One row per playlist, always.** The store's knowledge **annotates** the row another source
+   draws; it never appends a row of its own. The only place the store *is* the list is a screen the
+   server cannot answer at all (`renderOffline`), where there is no other row to annotate. His
+   screenshot's `DOWNLOADED` heading over four rows — two names, twice each — is the failing case,
+   and the acceptance is exact: **no playlist name may appear twice on that screen, with the network
+   up or refused, and a downloaded playlist must read as downloaded on its one row.**
+2. **The mark is one predicate, read synchronously, and it is never the estimate.** A track is
+   downloaded iff the store holds a `complete` row for it (`pathFor`) — the same predicate that
+   already decides whether a row is playable, so a badge and a playable row cannot disagree. A
+   playlist's mark comes from its record: `complete` only when audio and lyrics are all in **and**
+   the playlist in front of him has not grown since (`expectedTracks > record.total` ⇒ `partial`,
+   because the row must not claim to hold tracks it has never seen). And the row's size figure is
+   **measured from the rows**, never `record.bytes`, which is a ceiling for a download that has not
+   happened: the screenshot shows the two confused.
+3. **Browsing downloaded songs is a view, not an entity.** `#/downloads` — **On this phone** — at the
+   top of the Library and from the Settings row that already prints its numbers. It is a filter's
+   result over rows that already exist, with no id, no name, nothing on the server, nothing to
+   create, rename or delete, and membership is the same `pathFor` predicate as the badge; its queue
+   context is its own (`downloads`), not a playlist's. A route is a view; a playlist-shaped row under
+   the Playlists tab is an entity — that distinction is the whole of why this does not re-create the
+   defect above.
+4. **Album art is a third axis of a download, beside audio and lyrics, and it gates nothing.** One
+   file per **cover id** (`<coverId>.art`), not per track: a 12-track album is one cover, and storing
+   twelve copies would show up in the "Downloaded music" figure he reads. Resolution has **one
+   chokepoint** — `Library.coverUrl`, exactly as `streamUrl` is the one for audio — so the palette,
+   the player bar, the spectrum page and every thumb become offline-capable in one edit, and
+   `player/palette.ts` is **not touched**: the theming machinery has existed since v1.4.1 and what
+   was missing was art on disk. **A missing or failed cover never gates anything**: a track's audio
+   row decides whether it plays, a playlist's state is decided by audio and lyrics, and no album art
+   failure may put a playlist on `· retry`. The art bytes count in the playlist's total size estimate
+   **once per cover**, measured after the first download and bounded by a constant before it — the
+   same rule and the same shape as `LYRICS_ASSUMED_BYTES`.
+5. **Downloads that already exist on his phone keep working, and are not re-fetched.** The marks
+   appear immediately from the audio rows 1.9.19 wrote; the browse view works immediately; the art is
+   absent until he asks for it. The way he asks is the control he already has: a `complete` playlist
+   with a cover that is not here reads `✓ 312 MB · ↓ covers`, and that tap calls the same
+   `download()` — which only enqueues what is *not* already on disk, so **no audio byte is
+   re-fetched**, and the label returns to `✓ 312 MB` (whose tap is the removal it is today) once the
+   covers land. There is no automatic backfill: a download the owner did not ask for is still not a
+   download, and a boot-time art fetch would be a sync.
+6. **Every field added to a durable record must be optional.** `NaviliteDownloads.readIndex()`
+   (`:383-386`) answers `[:]` when a decode fails, and the boot sweep (`:601-614`) then deletes
+   **every file the index does not name** — so a single non-optional field added to `IndexRow` or
+   `Job` against the 1.9.19 records on his phone is a silent deletion of 5 GB of downloaded music,
+   not a rendering fault. The same rule binds the JS mirror, whose parse failure is likewise a
+   silent cold start with no local rows. This is the one rule in this release that exists to protect
+   data rather than to render a screen, and it is why the native edits are so narrow. The mirror also
+   gains the copy metadata (title, artist, album, cover, duration), because the first paint of a cold
+   offline launch is drawn from the mirror alone — without it the new browse view would be a column
+   of blank titles for the seconds `bridge.list()` takes, which is 1.9.19's own defect rebuilt in a
+   new place.
+7. **The spectrum proof asserts the reading it prints, and its blind spot is named.** `tools/
+   spectrum-proof.mjs:164` asserted the tail's monotonicity across +240 → +1200 ms while skipping the
+   +700 ms reading it puts in its own output; the +700 ms reading joins the chain. And the
+   re-baselined criterion's silence about *how* the tail got there is now written down in the section
+   above, so no reader takes a pass from that tool for an envelope claim it never made.
+

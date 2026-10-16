@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { OfflineStore } from '../src/state/offline.ts';
+import { ART_ASSUMED_BYTES, OfflineStore } from '../src/state/offline.ts';
 import type { DownloadEvent, DownloadJob, DownloadsBridge, IndexRow } from '../src/state/offline.ts';
 import { OFFLINE_MIRROR_KEY, loadMirror } from '../src/storage/offline.ts';
 import type { Song } from '../src/api/types.ts';
@@ -519,4 +519,118 @@ test('a no-space abort takes its own manifest back out of the mirror', async () 
   await two.hydrate();
   assert.equal(two.record('pl-1'), null, 'so the next boot has no download to resume');
   assert.equal(second.enqueued.length, 0, 'and nothing is fetched behind the owner back');
+});
+
+/* --------------------------------------------------------- the album-art axis (v1.9.20) */
+
+/** A track that names its cover, the way a `Song` from the server does. */
+const covered = (id: string, coverArt: string): Song => ({ ...song(id), coverArt, albumId: `${coverArt}-album` });
+
+/** Land the audio **and** the lyric of every song, so an assertion is about the art axis alone. */
+function landAudioAndLyrics(bridge: FakeBridge, songs: Song[]): void {
+  for (const entry of songs) {
+    bridge.emit('done', { songId: entry.id, path: `file:///${entry.id}.mp3`, bytes: 1000 });
+    bridge.emit('done', { songId: entry.id, kind: 'lyrics', bytes: 100 });
+  }
+}
+
+test('a download enqueues one cover transfer per distinct cover id, keyed by the cover', async () => {
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: memoryStore(), artUrl: (coverArtId) => `getCoverArt?id=${coverArtId}&size=512` });
+  const songs = [covered('a', 'cover-1'), covered('b', 'cover-1'), covered('c', 'cover-2')];
+  await store.download('pl-1', songs, { name: 'Driving' });
+
+  const art = bridge.enqueued.filter((job) => job.suffix === 'art');
+  assert.deepEqual(
+    art.map((job) => [job.songId, job.suffix, job.coverArt]),
+    [
+      ['cover-1', 'art', 'cover-1'],
+      ['cover-2', 'art', 'cover-2'],
+    ],
+    'one transfer per cover — a 12-track album is one file, not twelve — and the key is the cover id',
+  );
+  assert.equal(art[0].url, 'getCoverArt?id=cover-1&size=512', 'asked at the size the spectrum page draws');
+  assert.deepEqual(art[0].coverOf, ['a', 'b'], 'carrying the songs that share it, so a 1.9.19 row can learn its cover');
+  assert.deepEqual(
+    bridge.enqueued.filter((job) => job.suffix !== 'art').map((job) => job.coverArt),
+    ['cover-1', 'cover-1', 'cover-2'],
+    'and the audio jobs carry it too: a row knows its cover from birth',
+  );
+});
+
+test('a cover whose event is keyed by the cover id reaches every row that carries it', async () => {
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: memoryStore(), artUrl: (coverArtId) => `getCoverArt?id=${coverArtId}` });
+  const songs = [covered('a', 'cover-1'), covered('b', 'cover-1')];
+  await store.download('pl-1', songs, { name: 'Driving' });
+  landAudioAndLyrics(bridge, songs);
+  const before = store.estimate(songs);
+  assert.equal(before.exact, false, 'the cover is not here yet, so the figure is still a ceiling');
+
+  /*
+   * The event's key is a **cover id**, so `this.rows.get(event.songId)` misses by construction and
+   * the event is dropped on the floor unless the handler fans out. That is what this asserts.
+   */
+  bridge.emit('done', { songId: 'cover-1', kind: 'art', bytes: 41_230 });
+  assert.equal(store.artPathFor('cover-1'), 'file:///cover-1.art', 'the file is named after the cover, beside the audio');
+  const after = store.estimate(songs);
+  assert.equal(after.total, before.total - ART_ASSUMED_BYTES + 41_230, 'the assumption is replaced by the measured file');
+  assert.equal(after.exact, true, 'and the figure is exact again');
+  assert.equal(store.playlistBadge('pl-1').coverArt, 'cover-1', 'the row the UI draws can name the cover');
+});
+
+test('a cover fails without gating anything, and a 404 is a recorded fact', async () => {
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: memoryStore(), artUrl: (coverArtId) => `getCoverArt?id=${coverArtId}` });
+  const songs = [covered('a', 'cover-1')];
+  await store.download('pl-1', songs, { name: 'Driving' });
+  landAudioAndLyrics(bridge, songs);
+  assert.equal(store.record('pl-1')?.state, 'complete');
+
+  bridge.emit('failed', { songId: 'cover-1', kind: 'art', status: 500, error: 'HTTP 500' });
+  assert.equal(store.record('pl-1')?.state, 'complete', 'a missing picture never puts a playlist on `· retry`');
+  assert.equal(store.missingCovers(songs), 1, 'and the control can still offer it');
+
+  bridge.emit('failed', { songId: 'cover-1', kind: 'art', status: 404 });
+  assert.equal(store.missingCovers(songs), 0, 'the library has no cover for this album: a fact, not a retry for ever');
+  assert.equal(store.record('pl-1')?.state, 'complete', 'and it is still not the playlist’s business');
+});
+
+test('the cover of a shared album goes only when the last row that names it goes', async () => {
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: memoryStore(), artUrl: (coverArtId) => `getCoverArt?id=${coverArtId}` });
+  const songs = [covered('a', 'cover-1')];
+  await store.download('pl-1', songs, { name: 'One' });
+  landAudioAndLyrics(bridge, songs);
+  bridge.emit('done', { songId: 'cover-1', kind: 'art', bytes: 41_230 });
+  await store.download('pl-2', songs, { name: 'Two' });
+
+  await store.remove('pl-1');
+  assert.equal(store.pathFor('a'), 'file:///a.mp3', 'the track survives one playlist’s removal (S9/S10)');
+  assert.deepEqual(bridge.removed, [], 'and nothing is deleted while another playlist still holds it');
+  assert.equal(store.artPathFor('cover-1'), 'file:///cover-1.art', 'so the cover still resolves');
+
+  await store.remove('pl-2');
+  assert.deepEqual(bridge.removed, ['a'], 'the last ref went: the song is removed from the device');
+  assert.equal(store.artPathFor('cover-1'), null, 'and nothing names its cover any more');
+  /*
+   * The file itself is the native side's to delete — `<coverId>.art` is not `<songId>.<suffix>` for
+   * any row, which is why `remove`'s shared-file scan and the boot sweep's `named` set are asserted
+   * as source claims in `test/download-lane.test.ts`.
+   */
+});
+
+test('a download from 1.9.19 — audio and lyrics, no cover — is offered as a covers-only fetch', async () => {
+  // Rows exactly as `list()` reports them for a download an older build wrote: no cover id, no art.
+  const bridge = fakeBridge([indexRow('a')]);
+  const store = new OfflineStore(bridge, { store: memoryStore(), artUrl: (coverArtId) => `getCoverArt?id=${coverArtId}` });
+  await store.hydrate();
+  const songs = [covered('a', 'cover-1')];
+  assert.equal(store.record('pl-1')?.state, 'complete', 'the audio is all there, so it reads complete');
+  assert.equal(store.missingCovers(songs), 1, 'the cover is not, and that is what the `↓ covers` label is for');
+
+  await store.download('pl-1', songs, { name: 'Driving' });
+  const art = bridge.enqueued.filter((job) => job.suffix === 'art');
+  assert.deepEqual(art.map((job) => [job.songId, job.coverOf]), [['cover-1', ['a']]], 'the tap fetches the cover, naming the row it belongs to');
+  assert.equal(bridge.enqueued.filter((job) => job.suffix !== 'art').length, 0, 'and not one audio byte is re-fetched');
 });

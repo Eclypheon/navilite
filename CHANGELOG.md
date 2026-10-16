@@ -258,3 +258,12 @@ Plain language, user-visible changes only. The app shows this same list under
 - Starting a song no longer gets overwritten by the last session your server saved. With a slow server the old queue could arrive a few seconds late and take over the screen — the bar, the now playing screen and the highlight jumping to another track while the music kept playing what you chose.
 - A playlist that is not downloaded says so in words instead of showing you its id.
 - If a screen fails for a reason that is not the connection, it now tells you what happened. Anything that went wrong was being reported as "Offline".
+
+## 1.9.20 — 2026-10-16
+
+- Downloading a playlist no longer shows it twice. The playlists screen lists each playlist once, with a download mark on the ones that are on your phone and how much space they take.
+- A song that is on your phone shows a small download mark next to it, wherever you see it, and a playlist whose tracks are all here shows the mark on its own row. A playlist you only partly downloaded says how many of its tracks are here instead of reading as complete.
+- You can browse everything that is on your phone in one place: "On this phone", at the top of the Library and from Settings. It is not a playlist — it is your own music, and it is there with no connection.
+- The album art comes down with your music, so the spectrum page shows the cover and takes its colours from it with no connection.
+- Downloads from earlier versions keep working and are marked as downloaded straight away. Their album art comes down the next time you press the download button on that playlist, without downloading any music again.
+- The download button now tells you how much space the download will take including the album art, before you press it.

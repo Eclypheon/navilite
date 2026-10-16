@@ -32,6 +32,28 @@ export type DownloadState = 'complete' | 'staging' | 'failed';
 /** The lyrics axis, independent of the audio axis (§"Offline lyrics"): per song. */
 export type LyricsState = 'pending' | 'present' | 'none' | 'failed';
 
+/**
+ * The album-art axis (v1.9.20), the third one beside audio and lyrics.
+ *
+ * Same shape and the same job as the lyric axis, with one difference that is the whole of its
+ * design: **it is keyed by cover id, not by song.** A 12-track album is one cover, so the file is
+ * one per cover (`<coverId>.art`) and every index row of that album carries the same row here.
+ * A missing, failed or 404 cover gates nothing (§I5): a track plays because its *audio* row is
+ * `complete`, and a playlist's state is decided by audio and lyrics only.
+ */
+export type ArtState = 'pending' | 'present' | 'none' | 'failed';
+
+/** The durable art row, held on every index row that carries the cover. Never the bytes. */
+export interface ArtRow {
+  state: ArtState;
+  /** The file name under the offline root, e.g. `cover-album-1-1.art`. */
+  file?: string;
+  /** The measured body bytes when `present`, else 0. */
+  bytes: number;
+  /** When the row was last written — the `none` staleness window reads this. */
+  fetchedAt?: number;
+}
+
 /** The durable lyrics row, held beside the audio row. Never the text — only state and bytes. */
 export interface LyricsRow {
   state: LyricsState;
@@ -58,6 +80,14 @@ export interface IndexRow {
   durationSec: number;
   /** The lyrics axis; absent = never asked. */
   lyrics?: LyricsRow;
+  /**
+   * This row's cover id (v1.9.20), optional by hard rule (§I9): `readIndex()` returns `[:]` on a
+   * decode failure and the native boot sweep then deletes every file the index does not name, so a
+   * non-optional field added against a 1.9.19 index is a silent deletion of the owner's downloads.
+   */
+  coverArt?: string;
+  /** The art axis; absent = never asked. */
+  art?: ArtRow;
 }
 
 export interface DownloadJob {
@@ -71,12 +101,28 @@ export interface DownloadJob {
   artist: string;
   album: string;
   durationSec: number;
+  /** The cover this transfer is for, when it is an art transfer (§5.4). */
+  coverArt?: string;
+  /**
+   * The songs that share this cover, for an **art** transfer only (§5.4).
+   *
+   * The native side needs it to attach the finished cover to rows that have never carried a
+   * `coverArt` of their own — the rows a 1.9.19 download wrote. Without it those rows cannot learn
+   * which cover is theirs: their audio job is never re-enqueued (the track is already on disk), so
+   * there is no other moment at which the association can be recorded.
+   */
+  coverOf?: string[];
 }
 
 export interface DownloadEvent {
   songId: string;
-  /** `lyrics` for a lyrics transfer; the audio axis is the default. */
-  kind?: 'audio' | 'lyrics';
+  /**
+   * `lyrics` for a lyrics transfer, `art` for a cover transfer; the audio axis is the default.
+   *
+   * For an art transfer `songId` is a **cover id**, so every handler that looks a song up by it
+   * misses by construction — `onDone`/`onFailed` fan out by cover instead (§5.4).
+   */
+  kind?: 'audio' | 'lyrics' | 'art';
   path?: string;
   bytes?: number;
   total?: number;
@@ -157,6 +203,18 @@ const FALLBACK_FLOOR_BYTES = 1_000_000;
  * exceeds it; the rule does not.
  */
 export const LYRICS_ASSUMED_BYTES = 12 * 1024;
+/**
+ * 256 KB per unresolved **cover**, an upper bound for the re-encoded 512 px cover the app asks for
+ * (`getCoverArt?size=512`, §5.1). The rule is the lyric rule, and so is the honesty about it:
+ * Navidrome passes an original through whole when it is already smaller than the requested size, so
+ * a pathological multi-megabyte original is the one case where `up to` is optimistic. The free-space
+ * guard's 250 MB margin absorbs it, asking the server for each cover's length first would be a round
+ * trip per album (§I3), and the remedy if it ever bites is to move this constant.
+ *
+ * It is counted **once per cover**, never once per track (§5.6): a 14-track, 2-album playlist adds
+ * 512 KB, not 3.5 MB. After the first download the term is the measured file, so the figure is exact.
+ */
+export const ART_ASSUMED_BYTES = 256 * 1024;
 /** How long a `none` row stays fresh before a network-reachable reconcile re-asks it. */
 export const LYRICS_MISS_TTL_MS = 5 * 60 * 1000;
 /** §5: leave this much headroom over the estimate before a download is allowed to start. */
@@ -164,18 +222,21 @@ const FREE_SPACE_MARGIN = 250 * 1024 * 1024;
 const MAX_CONCURRENT = 3;
 
 /**
- * §4 — the size a playlist will take, summed over its entries, plus the lyric bodies.
+ * §4 — the size a playlist will take, summed over its entries, plus the lyric bodies and the covers.
  *
  * Exact (byte-equal to the sum of `Content-Length`, because the files come from `download?id=` —
  * original, untranscoded, exact length) when every entry carries a `size` **and** every lyric is
- * already resolved (`present` or `none`); otherwise the figure is an over-estimate, prefixed
- * `up to` by the UI — a missing audio size is bounded above by 320 kbit/s and an unresolved lyric
- * by `LYRICS_ASSUMED_BYTES`, so the number is a ceiling, never an under-promise.
+ * already resolved (`present` or `none`) **and** every cover is (`present` or `none`); otherwise the
+ * figure is an over-estimate, prefixed `up to` by the UI — a missing audio size is bounded above by
+ * 320 kbit/s, an unresolved lyric by `LYRICS_ASSUMED_BYTES` and an unresolved cover by
+ * `ART_ASSUMED_BYTES`, so the number is a ceiling, never an under-promise.
+ *
+ * Album art is counted once per **cover id** (§5.6), the same way the file itself is stored: two
+ * tracks of one album are one JPEG, and charging for it twice would be a lie in the other direction.
  */
-export function estimateBytes(
-  songs: Array<Pick<Song, 'id' | 'size' | 'duration'>>,
-  rows?: ReadonlyMap<string, IndexRow>,
-): SizeEstimate {
+export type EstimateSong = Pick<Song, 'id' | 'size' | 'duration'> & { coverArt?: string; albumId?: string };
+
+export function estimateBytes(songs: EstimateSong[], rows?: ReadonlyMap<string, IndexRow>): SizeEstimate {
   let total = 0;
   let exact = true;
   for (const song of songs) {
@@ -198,7 +259,44 @@ export function estimateBytes(
       lyricsExact = false;
     }
   }
-  return { total: total + lyrics, exact: exact && lyricsExact };
+  /*
+   * …and the covers, deduped by cover id (§5.6). The row is per song, the *file* per cover, so the
+   * lookup below can be answered by any row that names this cover — the fee is charged once, to the
+   * first track of the album that mentions it.
+   */
+  let art = 0;
+  let artExact = true;
+  const covers = new Set<string>();
+  for (const song of songs) {
+    const cover = song.coverArt ?? song.albumId;
+    if (cover === undefined || cover === '') continue; // nothing to fetch
+    if (covers.has(cover)) continue; // one cover per album
+    covers.add(cover);
+    const row = artRowForCover(rows, cover);
+    if (row?.state === 'present') art += row.bytes;
+    else if (row?.state === 'none') {
+      // Asked, this album has no cover: zero, and exact.
+    } else {
+      art += ART_ASSUMED_BYTES;
+      artExact = false;
+    }
+  }
+  return { total: total + lyrics + art, exact: exact && lyricsExact && artExact };
+}
+
+/**
+ * The art row for a cover id, from any index row that carries it — synchronously, memory only.
+ *
+ * The file is keyed by cover and the row is held *per song*, so the answer is "does any of this
+ * cover's rows know?" rather than "does the first track's row know?" — the fan-out writes the same
+ * row to all of them, and this reads it the same way.
+ */
+function artRowForCover(rows: ReadonlyMap<string, IndexRow> | undefined, cover: string): ArtRow | undefined {
+  if (!rows) return undefined;
+  for (const row of rows.values()) {
+    if (row.coverArt === cover && row.art) return row.art;
+  }
+  return undefined;
 }
 
 /** "312 MB", "1.2 GB", "0 B" — the same shape the settings line and the control use. */
@@ -227,6 +325,29 @@ export function formatBytes(bytes: number): string {
  */
 export type DownloadResult = { kind: 'started' } | { kind: 'no-space'; free: number; needed: number };
 
+/**
+ * What the store knows about a playlist, for the one row the UI draws (v1.9.20, §3.1).
+ *
+ * `state` is the badge, and nothing here is a second state machine: it is `record()` plus the one
+ * question the record cannot answer on its own — *"is the playlist in front of me still the one that
+ * was downloaded?"*, which is what `expectedTracks` (the server's `songCount`, when there is a
+ * server) answers.
+ */
+export interface PlaylistBadge {
+  state: 'none' | 'partial' | 'downloading' | 'complete';
+  /** Complete files among the playlist's songs — never `record.total`, never the estimate. */
+  done: number;
+  /** The playlist's length as the store knows it (the manifest's). */
+  total: number;
+  /**
+   * **Measured** bytes of the audio rows that are here (§I4) — never `record.bytes`, which is a
+   * ceiling for a download that has not happened. 0 when none.
+   */
+  bytes: number;
+  /** A cover id that is on this phone, when one is (§5). */
+  coverArt?: string;
+}
+
 export class OfflineStore {
   private readonly rows = new Map<string, IndexRow>();
   private readonly playlists = new Map<string, PlaylistRecord>();
@@ -237,6 +358,8 @@ export class OfflineStore {
   private readonly downloadUrl: (song: Song) => string;
   private readonly lyricsUrl: (song: Song) => string | null;
   private readonly lyricsFallback: (song: Song) => Promise<string | null>;
+  private readonly artUrl: (coverArtId: string) => string | null;
+  private readonly toLocalSrc: (fileUrl: string) => string;
   private readonly unlisteners: Array<() => void> = [];
   private readonly changeListeners = new Set<() => void>();
   private listening = false;
@@ -280,6 +403,17 @@ export class OfflineStore {
       lyricsUrl?: (song: Song) => string | null;
       /** The `getLyrics` fallback body for a track (route has no URL), or null → `none`. */
       lyricsFallback?: (song: Song) => Promise<string | null>;
+      /** The cover URL for a cover id (the cover route), or null when there is none to enqueue. */
+      artUrl?: (coverArtId: string) => string | null;
+      /**
+       * Make a `file://` URL from the app's own container readable by the page (v1.9.20).
+       *
+       * Injected, like the two URL factories above and for the same reason: this store **never
+       * mints a URL**, and the platform call that turns a device path into a same-origin one
+       * (`Capacitor.convertFileSrc`) belongs to the shell that knows the platform. The default is
+       * the identity, which is exactly right for a path that is already a URL the page can read.
+       */
+      toLocalSrc?: (fileUrl: string) => string;
       store?: MirrorStore;
     } = {},
   ) {
@@ -288,6 +422,8 @@ export class OfflineStore {
     this.downloadUrl = options.downloadUrl ?? ((song) => `download?id=${song.id}`);
     this.lyricsUrl = options.lyricsUrl ?? (() => null);
     this.lyricsFallback = options.lyricsFallback ?? (async () => null);
+    this.artUrl = options.artUrl ?? (() => null);
+    this.toLocalSrc = options.toLocalSrc ?? ((fileUrl) => fileUrl);
     // Seed the in-memory map from the mirror synchronously, so the resolver answers local on the
     // very first start of a session — before `hydrate()` has had a chance to talk to the plugin.
     const mirror = loadMirror(this.store);
@@ -314,7 +450,15 @@ export class OfflineStore {
     }
   }
 
-  /** Copy mirror rows into the in-memory index, carrying the lyrics `fetchedAt` with them. */
+  /**
+   * Copy mirror rows into the in-memory index, carrying the lyrics `fetchedAt` with them — and
+   * (v1.9.20) the metadata the browse list and the badges need with no round trip.
+   *
+   * The metadata fields are optional in the mirror (§I9), so a row written by 1.9.19 lands here with
+   * empty strings and `durationSec: 0`: the first paint after the upgrade can show a row with an
+   * empty sub-line, and the next `saveMirror` — one `list()` away, in the same launch — writes it.
+   * Nothing is dropped and nothing throws, which is the whole requirement.
+   */
   private seedRows(rows: OfflineMirror['rows']): void {
     for (const [songId, row] of Object.entries(rows)) {
       this.rows.set(songId, {
@@ -324,13 +468,15 @@ export class OfflineStore {
         bytes: row.bytes,
         state: row.state,
         refs: [],
-        title: '',
-        artist: '',
-        album: '',
-        durationSec: 0,
+        title: row.title ?? '',
+        artist: row.artist ?? '',
+        album: row.album ?? '',
+        durationSec: row.durationSec ?? 0,
+        coverArt: row.coverArt,
         lyrics: row.lyrics
           ? { state: row.lyrics.state, bytes: row.lyrics.bytes, fetchedAt: row.lyrics.fetchedAt }
           : undefined,
+        art: row.art ? { state: row.art.state, file: row.art.file, bytes: row.art.bytes, fetchedAt: row.art.fetchedAt } : undefined,
       });
     }
   }
@@ -339,6 +485,143 @@ export class OfflineStore {
   pathFor(songId: string): string | null {
     const row = this.rows.get(songId);
     return row !== undefined && row.state === 'complete' ? row.path : null;
+  }
+
+  /**
+   * The local art for a cover id, or null (v1.9.20, §5.5). Synchronous, memory only (§I2, §I3).
+   *
+   * The path is derived from the row's own `path` — the art file sits in the same directory as the
+   * audio, and `list()` reports the audio's absolute URL — so the store still needs to know nothing
+   * about where the container lives. It is then handed to the injected `toLocalSrc`, which is where
+   * `Capacitor.convertFileSrc` makes it same-origin for the page: a `file://` URL is not fetchable
+   * from `https://localhost`, and an art URL the page cannot read is an art URL that never themes
+   * anything (§5.5's tainted-canvas failure mode, closed by construction).
+   *
+   * Answered for a **cover id, never a song**: one file serves every track of the album, which is
+   * the point of keying it that way.
+   */
+  artPathFor(coverArtId: string): string | null {
+    if (coverArtId === '') return null;
+    for (const row of this.rows.values()) {
+      const art = row.art;
+      if (art?.state !== 'present' || art.file === undefined || art.file === '') continue;
+      if (row.coverArt !== coverArtId) continue;
+      const slash = row.path.lastIndexOf('/');
+      if (slash < 0) return null;
+      // The art file shares the audio's directory: `<dir>/<songId>.<suffix>` → `<dir>/<coverId>.art`.
+      return this.toLocalSrc(`${row.path.slice(0, slash + 1)}${art.file}`);
+    }
+    return null;
+  }
+
+  /**
+   * Every track with a complete file on disk, as `Song`s, for the one view that browses them
+   * (v1.9.20, §4.2).
+   *
+   * Rows only — never the manifests: a song in two playlists is one row and one entry here, and a
+   * song whose playlist record was removed is on the phone only if its row survived (§S9/S10).
+   * Order is the library's own (artist, album, title), because this is "browse my library", not
+   * "what did I download last". No I/O and no fetch: it answers from the same map `pathFor` does,
+   * which is what makes the view draw with no connection at all.
+   */
+  downloadedSongs(): Song[] {
+    const out: Song[] = [];
+    for (const [songId, row] of this.rows) {
+      if (row.state !== 'complete') continue;
+      out.push({
+        id: songId,
+        title: row.title,
+        artist: row.artist === '' ? undefined : row.artist,
+        album: row.album === '' ? undefined : row.album,
+        duration: row.durationSec === 0 ? undefined : row.durationSec,
+        coverArt: row.coverArt,
+        suffix: row.suffix,
+        size: row.bytes,
+      });
+    }
+    out.sort((a, b) => {
+      const byArtist = (a.artist ?? '').localeCompare(b.artist ?? '');
+      if (byArtist !== 0) return byArtist;
+      const byAlbum = (a.album ?? '').localeCompare(b.album ?? '');
+      if (byAlbum !== 0) return byAlbum;
+      const byTitle = (a.title ?? '').localeCompare(b.title ?? '');
+      return byTitle !== 0 ? byTitle : a.id.localeCompare(b.id);
+    });
+    return out;
+  }
+
+  /**
+   * The badge for a playlist row (§3.1) — `record()` plus the one question the record cannot answer
+   * on its own: *is the playlist in front of me still the one that was downloaded?*
+   *
+   * `expectedTracks` is the server's `songCount` when there is a server. A playlist the owner has
+   * added to since downloading it is **not** entirely downloaded, and the row must not say it is;
+   * the playlist page reaches the same verdict through `missingCount`, which counts the same songs
+   * the same way (`missingCount(songs) > 0` ⟺ `songCount > record.total`).
+   *
+   * Nothing here reads `record.bytes` (an estimate for a download that has not happened), the
+   * manifest's length (a claim about what was asked for) or `staging` (a transfer in flight): the
+   * mark is read from complete files, synchronously, so it can never disagree with what plays.
+   */
+  playlistBadge(playlistId: string, expectedTracks?: number): PlaylistBadge {
+    const record = this.playlists.get(playlistId);
+    if (!record || record.state === 'idle') return { state: 'none', done: 0, total: 0, bytes: 0 };
+    if (record.state === 'failed' && record.done === 0) return { state: 'none', done: 0, total: 0, bytes: 0 };
+    let bytes = 0;
+    for (const song of record.songs) {
+      const row = this.rows.get(song.id);
+      if (row?.state === 'complete') bytes += row.bytes;
+    }
+    const coverArt = this.localCoverFor(record.songs);
+    const badge: PlaylistBadge = {
+      state: 'partial',
+      done: record.done,
+      total: record.total,
+      bytes,
+      ...(coverArt === undefined ? {} : { coverArt }),
+    };
+    if (expectedTracks !== undefined && expectedTracks > record.total) return badge; // grown
+    if (record.state === 'complete') return { ...badge, state: 'complete' };
+    if (record.state === 'estimating' || record.state === 'downloading') return { ...badge, state: 'downloading' };
+    return badge;
+  }
+
+  /**
+   * Distinct covers among these songs with no complete art file on disk (v1.9.20, §5.8).
+   *
+   * This is the one thing that keeps the download control from lying to the owner: a playlist that
+   * is `complete` on audio and lyrics but whose covers are not here is not *finished*, and its
+   * label says so (`✓ 312 MB · ↓ covers`) so one tap can fetch the covers and nothing else.
+   */
+  missingCovers(songs: Song[]): number {
+    const pending = new Set<string>();
+    for (const song of songs) {
+      const cover = song.coverArt ?? song.albumId;
+      if (cover === undefined || cover === '') continue;
+      const row = artRowForCover(this.rows, cover);
+      if (row?.state === 'present' || row?.state === 'none') continue;
+      pending.add(cover);
+    }
+    return pending.size;
+  }
+
+  /**
+   * The cover a playlist row can draw, for the case where there is no server object to ask (§2.2):
+   * a row of the playlist that is on disk and knows its own cover, or a cover whose file is here.
+   */
+  private localCoverFor(songs: Song[]): string | undefined {
+    for (const song of songs) {
+      /*
+       * The **row** first: it is the thing on disk, and it is the only source that knows the cover of
+       * a download made by an older build — whose manifest carries the song as the server sent it.
+       */
+      const row = this.rows.get(song.id);
+      if (row?.state === 'complete' && row.coverArt !== undefined && row.coverArt !== '') return row.coverArt;
+      const cover = song.coverArt ?? song.albumId;
+      if (cover === undefined || cover === '') continue;
+      if (artRowForCover(this.rows, cover)?.state === 'present') return cover;
+    }
+    return undefined;
   }
 
   /**
@@ -640,7 +923,7 @@ export class OfflineStore {
     this.notify();
   }
 
-  /** The one place a song list becomes transfers: audio first (the long pole), its lyric second. */
+  /** The one place a song list becomes transfers: audio first (the long pole), then its lyric, then its cover. */
   private async enqueueSongs(playlistId: string, songs: Song[]): Promise<void> {
     if (!this.bridge) return;
     for (const song of songs) {
@@ -649,6 +932,16 @@ export class OfflineStore {
         // Already on disk: add this playlist's ref (S9/S10 — a shared track must survive one
         // playlist's removal) and fetch no audio.
         if (!existing.refs.includes(playlistId)) existing.refs.push(playlistId);
+        /*
+         * …and record which cover this row belongs to (v1.9.20), if it does not know yet. A row a
+         * 1.9.19 build wrote carries no cover id — which is exactly why the owner's existing
+         * downloads cannot get their art back without this line and the `coverOf` the art job
+         * carries below.
+         */
+        if (existing.coverArt === undefined || existing.coverArt === '') {
+          const cover = song.coverArt ?? song.albumId;
+          if (cover !== undefined && cover !== '') existing.coverArt = cover;
+        }
       } else {
         this.addRef(song.id, playlistId, song);
         await this.bridge.enqueue({
@@ -661,10 +954,15 @@ export class OfflineStore {
           artist: song.artist ?? '',
           album: song.album ?? '',
           durationSec: song.duration ?? 0,
+          // The row's cover id travels with the audio job, so the native index knows it from the
+          // song's birth and the art fan-out can match by cover — not only by the `coverOf` list.
+          coverArt: song.coverArt ?? song.albumId,
         });
       }
       // The lyric rides its own transfer, in the same lane, keyed by its own kind.
       await this.enqueueLyrics(song);
+      // …and so does the cover, one transfer per distinct cover id, keyed by the cover (§5.4).
+      await this.enqueueArt(song, songs);
     }
   }
 
@@ -747,6 +1045,16 @@ export class OfflineStore {
   }
 
   private onDone(event: DownloadEvent): void {
+    /*
+     * An art transfer's key is a **cover id**, not a song id (§5.4). The lookup below would miss by
+     * construction and the event would be dropped on the floor: the rows would stay `pending` for
+     * ever, the estimate would never become exact, and no cover would ever reach a screen. So the
+     * fan-out happens first, over the rows that carry that cover.
+     */
+    if (event.kind === 'art') {
+      this.onArtDone(event);
+      return;
+    }
     const row = this.rows.get(event.songId);
     if (!row) return;
     if (event.kind === 'lyrics') {
@@ -770,6 +1078,10 @@ export class OfflineStore {
   }
 
   private onFailed(event: DownloadEvent): void {
+    if (event.kind === 'art') {
+      this.onArtFailed(event);
+      return;
+    }
     const row = this.rows.get(event.songId);
     if (!row) return;
     if (event.kind === 'lyrics') {
@@ -798,6 +1110,111 @@ export class OfflineStore {
     for (const playlistId of row.refs) this.reconcileRecord(playlistId);
     this.saveMirror();
     this.notify();
+  }
+
+  /**
+   * A cover landed (§5.4). Every row that carries this cover gets the same art row — the file is one
+   * per cover, and the rows that name it are what make the file findable (`artPathFor`) and what
+   * keep it alive (the native boot sweep deletes a file no row names).
+   */
+  private onArtDone(event: DownloadEvent): void {
+    const cover = event.songId;
+    const bytes = typeof event.bytes === 'number' ? event.bytes : 0;
+    const art: ArtRow = { state: 'present', file: `${cover}.art`, bytes, fetchedAt: Date.now() };
+    let touched = false;
+    for (const row of this.rows.values()) {
+      if (row.coverArt !== cover) continue;
+      row.art = art;
+      touched = true;
+    }
+    if (!touched) {
+      /*
+       * No row names this cover: the transfer is a fact about a file whose album is not on the phone.
+       * The file is not named by the mirror either, so the native sweep collects it (§5.7). Recording
+       * nothing is the honest answer — an index row for a song that was never downloaded would be a
+       * row claiming a file that is not there.
+       */
+      return;
+    }
+    this.saveMirror();
+    this.notify();
+  }
+
+  /**
+   * A cover did not land (§5's failure table). It gates nothing: the track plays, the badge stays on,
+   * the playlist is not held on `· retry` — a missing cover is a missing picture, not a missing song.
+   *
+   * A `404` is the library saying this album has no cover at all, which is a fact worth keeping
+   * (`none`, zero bytes), so the estimate does not carry a phantom 256 KB for it and the control does
+   * not offer to fetch it again for ever. Anything else is `failed`, and a later tap may re-ask.
+   */
+  private onArtFailed(event: DownloadEvent): void {
+    const cover = event.songId;
+    const art: ArtRow =
+      event.status === 404
+        ? { state: 'none', bytes: 0, fetchedAt: Date.now() }
+        : { state: 'failed', bytes: 0, fetchedAt: Date.now() };
+    let touched = false;
+    for (const row of this.rows.values()) {
+      if (row.coverArt !== cover) continue;
+      row.art = art;
+      touched = true;
+    }
+    if (!touched) return;
+    // Deliberately **no** `reconcileRecord`: the art axis is not part of a playlist's state (§I5).
+    this.saveMirror();
+    this.notify();
+  }
+
+  /**
+   * Enqueue one cover's transfer — one per distinct cover id per download (§5.1, §5.4).
+   *
+   * `songs` is the whole list being downloaded, and that is what makes the legacy case work: the art
+   * job carries `coverOf` (every song id that shares the cover), so the native side can attach the
+   * finished cover to rows a 1.9.19 download wrote — rows that have never carried a cover id, whose
+   * audio job is never re-enqueued, and which therefore have no other moment at which to learn it.
+   *
+   * Skips a cover that is already resolved (`present`) or recorded as absent (`none`), and one whose
+   * transfer is already in flight (`pending`), so calling this for every track of an album enqueues
+   * exactly one transfer. A `failed` row is re-asked: the only way this runs is a tap the owner made.
+   */
+  private async enqueueArt(song: Song, songs: Song[]): Promise<void> {
+    if (!this.bridge) return;
+    const row = this.rows.get(song.id);
+    if (!row) return;
+    const cover = song.coverArt ?? song.albumId;
+    if (cover === undefined || cover === '') return; // nothing to fetch
+    const known = artRowForCover(this.rows, cover);
+    if (known && known.state !== 'failed') return;
+    const url = this.artUrl(cover);
+    if (url === null || url === '') return;
+    const coverOf = songs
+      .filter((entry) => (entry.coverArt ?? entry.albumId) === cover)
+      .map((entry) => entry.id);
+    // The association is recorded here, before a byte moves: it is what maps the finished file back
+    // to these rows, both in this session and in the mirror the next launch reads.
+    for (const songId of coverOf) {
+      const sibling = this.rows.get(songId);
+      if (sibling) {
+        sibling.coverArt = cover;
+        sibling.art = { state: 'pending', bytes: 0 };
+      }
+    }
+    await this.bridge.enqueue({
+      songId: cover,
+      url,
+      suffix: 'art',
+      // No byte count is known before the transfer starts, and inventing one would be a lie. Native
+      // verifies against the response's own `Content-Length` and records the measured bytes back.
+      bytes: 0,
+      refs: row.refs,
+      title: song.album ?? song.title,
+      artist: song.artist ?? '',
+      album: song.album ?? '',
+      durationSec: 0,
+      coverArt: cover,
+      coverOf,
+    });
   }
 
   /**
@@ -837,6 +1254,9 @@ export class OfflineStore {
       artist: song.artist ?? '',
       album: song.album ?? '',
       durationSec: song.duration ?? 0,
+      // The lyric row is an index row too, so it carries the cover id (v1.9.20): whichever of the
+      // three transfers writes this song's row first, the row knows its cover.
+      coverArt: song.coverArt ?? song.albumId,
     });
   }
 
@@ -914,9 +1334,11 @@ export class OfflineStore {
 
   private addRef(songId: string, playlistId: string, song: Song): void {
     const existing = this.rows.get(songId);
+    const cover = song.coverArt ?? song.albumId;
     if (existing) {
       if (!existing.refs.includes(playlistId)) existing.refs.push(playlistId);
       existing.state = 'staging';
+      if (existing.coverArt === undefined || existing.coverArt === '') existing.coverArt = cover;
       return;
     }
     this.rows.set(songId, {
@@ -930,6 +1352,7 @@ export class OfflineStore {
       artist: song.artist ?? '',
       album: song.album ?? '',
       durationSec: song.duration ?? 0,
+      coverArt: cover,
     });
   }
 
@@ -1067,14 +1490,24 @@ export class OfflineStore {
   }
 
   private saveMirror(): void {
-    const rows: Record<string, { path: string; bytes: number; state: DownloadState; lyrics?: { state: LyricsState; bytes: number; fetchedAt?: number } }> = {};
+    const rows: Record<string, OfflineMirror['rows'][string]> = {};
     for (const [songId, row] of this.rows) {
       rows[songId] = {
         path: row.path,
         bytes: row.bytes,
         state: row.state,
+        // Carried so the browse list and the badge are correct on the first paint of the next
+        // launch, with no round trip (§4.3). Every one is optional in the mirror, so a 1.9.19
+        // mirror is still written as a 1.9.20 one and still parses.
+        title: row.title,
+        artist: row.artist,
+        album: row.album,
+        coverArt: row.coverArt,
+        durationSec: row.durationSec,
         // `fetchedAt` is written or a `none` row answers `miss` again on the next launch.
         lyrics: row.lyrics ? { state: row.lyrics.state, bytes: row.lyrics.bytes, fetchedAt: row.lyrics.fetchedAt } : undefined,
+        // The art file is named by cover, and the row is how the next launch finds it (§5.7).
+        art: row.art ? { state: row.art.state, file: row.art.file, bytes: row.art.bytes, fetchedAt: row.art.fetchedAt } : undefined,
       };
     }
     const playlists: Record<string, OfflinePlaylistManifest> = {};

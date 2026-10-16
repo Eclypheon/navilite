@@ -159,9 +159,17 @@ async function main() {
      *    before it: nothing re-lights, no bar grows back, nothing of the loud frame is coming up
      *    from underneath. The slack (1 % of the loud frame, min 20 px) is for antialiasing on a
      *    fractional edge, not for a rising bar.
+     *
+     *    v1.9.20: the chain includes **every reading this tool prints**. It used to judge
+     *    `+240 → +1200` while printing the `+700` figure it never looked at, so a bar that rose at
+     *    +700 ms and fell again by +1200 ms passed — the tool asserted less than it showed. The
+     *    readings are the same; only the chain they belong to grew.
      */
     const slack = Math.max(20, Math.round(loud.lit * 0.01));
-    const falls = t240.lit <= t160.lit + slack && t1200.lit <= t240.lit + slack;
+    const falls =
+      t240.lit <= t160.lit + slack &&
+      t700.lit <= t240.lit + slack &&
+      t1200.lit <= t700.lit + slack;
     /*
      * 2. **It settles, and it stays settled.** Once the envelope has reached its floor, silence is
      *    one frame: the pixels stop changing entirely (not "almost" — a bar holding a memory of the

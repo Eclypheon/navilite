@@ -27,6 +27,9 @@ import type { Song } from '../src/api/types.ts';
 
 const song = (id: string, size = 1000): Song => ({ id, title: `Track ${id}`, artist: 'Someone', album: 'Something', duration: 10, size });
 
+/** A track that names its cover, the way a `Song` from the server does. */
+const covered = (id: string, coverArt: string, size = 1000): Song => ({ ...song(id, size), coverArt, albumId: `${coverArt}-album` });
+
 interface MemoryStore {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -206,4 +209,85 @@ test('a manifest written before names were recorded is named by the server’s o
   const guarded = new OfflineStore(null, { store: counted });
   guarded.rememberPlaylistName('pl-none', 'Nothing downloaded here');
   assert.deepEqual(writes, [], 'a playlist with no download is not ours to name');
+});
+
+/* ------------------------------------------- the badge and the downloaded-songs view (v1.9.20) */
+
+/**
+ * §3.1's table, in order, on one store: the mark is `record()` plus the one question the record
+ * cannot answer on its own — *is the playlist in front of me still the one that was downloaded?*
+ */
+test('the badge is read from complete files, and a grown playlist is never called complete', async () => {
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: memoryStore() });
+  assert.equal(store.playlistBadge('pl-none').state, 'none', 'a playlist nothing was asked of');
+
+  await store.download('pl-1', [covered('a', 'cover-a'), covered('b', 'cover-a')], { name: 'Driving' });
+  assert.equal(store.playlistBadge('pl-1').state, 'downloading', 'asked for, nothing landed yet');
+  assert.equal(store.playlistBadge('pl-1').bytes, 0, 'and it promises no bytes that are not here');
+
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+  assert.equal(store.playlistBadge('pl-1').state, 'downloading', 'one of two is in flight, not complete');
+  assert.equal(store.playlistBadge('pl-1').done, 1);
+  assert.equal(store.playlistBadge('pl-1').bytes, 1000, 'measured from the rows that are here');
+
+  bridge.emit('done', { songId: 'b', path: 'file:///b.mp3', bytes: 1000 });
+  assert.equal(store.playlistBadge('pl-1').state, 'complete');
+  assert.equal(store.playlistBadge('pl-1').bytes, 2000, 'the measured rows, never the estimate');
+  assert.equal(store.playlistBadge('pl-1', 2).state, 'complete', 'the length it was downloaded at');
+
+  // The server now says three tracks: the row must stop claiming to hold everything.
+  assert.equal(store.playlistBadge('pl-1', 3).state, 'partial', 'a playlist that grew is not entirely downloaded');
+
+  // …and a track that never landed leaves the playlist partial, with the count of what did.
+  await store.download('pl-2', [covered('c', 'cover-a'), covered('d', 'cover-a')], { name: 'Stopped' });
+  bridge.emit('done', { songId: 'c', path: 'file:///c.mp3', bytes: 1000 });
+  bridge.emit('failed', { songId: 'd', error: 'HTTP 500' });
+  assert.equal(store.playlistBadge('pl-2').state, 'partial');
+  assert.equal(store.playlistBadge('pl-2').done, 1);
+
+  await store.remove('pl-1');
+  assert.equal(store.playlistBadge('pl-1').state, 'none', 'and a removed download is not marked at all');
+});
+
+test('the downloaded-songs view is one row per complete file, in library order, and answers cold', async () => {
+  const mirror = memoryStore();
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: mirror });
+  await store.download('pl-1', [song('a'), song('b')], { name: 'Driving' });
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 111 });
+  assert.deepEqual(store.downloadedSongs().map((entry) => entry.id), ['a'], 'a staging row is not on the phone yet');
+
+  bridge.emit('done', { songId: 'b', path: 'file:///b.mp3', bytes: 222 });
+  assert.deepEqual(
+    store.downloadedSongs().map((entry) => [entry.id, entry.title, entry.size]),
+    [
+      ['a', 'Track a', 111],
+      ['b', 'Track b', 222],
+    ],
+    'one entry per song, with the metadata the rows carry',
+  );
+
+  /*
+   * The cold start this view has to survive (the 1.9.19 defect, in a new place): a bridge whose
+   * `list()` answers on a timer, nothing awaited, so every title on screen comes from the mirror.
+   */
+  let answered = false;
+  const slow: FakeBridge = {
+    ...fakeBridge(),
+    list: () =>
+      new Promise((resolve) => {
+        setTimeout(() => {
+          answered = true;
+          resolve([]);
+        }, 50);
+      }),
+  };
+  const cold = new OfflineStore(slow, { store: mirror });
+  assert.equal(answered, false, 'the native index has not answered yet');
+  assert.deepEqual(
+    cold.downloadedSongs().map((entry) => entry.title),
+    ['Track a', 'Track b'],
+    'the titles come from the mirror, not from a round trip',
+  );
 });

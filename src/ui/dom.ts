@@ -126,6 +126,15 @@ export const ICONS = {
   repeatOne:
     'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z',
   changelog: 'M6 3h9l5 5v13H6V3zm2 8h8v2H8v-2zm0 4h8v2H8v-2z',
+  /*
+   * v1.9.20 — the two download marks. One arrow into a tray, drawn solid for "this is on your phone"
+   * and hollow for "some of it is / it is coming". Paths rather than images: they inherit
+   * `currentColor` like every other icon, they cost nothing to ship, and there is no new asset
+   * pipeline. They are never buttons — the whole row is the one tap target (v1.5) — so the
+   * accessible name carries the state instead (`Play X, downloaded`).
+   */
+  download: 'M12 3v9.6l3.3-3.3 1.4 1.4L12 16.4 7.3 10.7l1.4-1.4L12 12.6V3zM5 17h14v2H5v-2z',
+  downloadPartial: 'M12 3.8 8.5 7.3 7.4 6.2 12 1.6l4.6 4.6-1.1 1.1L12 3.8v8.8h-1.5V3.8zM5 17.5h14v1.7H5v-1.7z',
 };
 
 export function playIcon(playing: boolean, size = 24): SVGSVGElement {

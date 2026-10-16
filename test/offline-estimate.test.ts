@@ -19,7 +19,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateBytes, formatBytes, LYRICS_ASSUMED_BYTES, type IndexRow } from '../src/state/offline.ts';
+import { ART_ASSUMED_BYTES, estimateBytes, formatBytes, LYRICS_ASSUMED_BYTES, type EstimateSong, type IndexRow } from '../src/state/offline.ts';
 import type { Song } from '../src/api/types.ts';
 
 const song = (id: string, size: number | undefined, duration: number | undefined): Pick<Song, 'id' | 'size' | 'duration'> => ({ id, size, duration });
@@ -93,4 +93,56 @@ test('two playlists sharing a song count its lyric bytes once (deduped by songId
   const estimate = estimateBytes([song('a', 31_204_321, 231), song('b', 22_000_000, 180)], rows);
   assert.equal(estimate.total, 31_204_321 + 22_000_000 + 4213 + LYRICS_ASSUMED_BYTES);
   assert.equal(estimate.exact, false);
+});
+
+/* ------------------------------------------------------ the album-art axis (v1.9.20) */
+
+/** A track that names its cover, the way a `Song` from the server does. */
+const covered = (id: string, coverArt: string, size = 1_000_000): EstimateSong => ({ id, size, duration: 200, coverArt });
+
+/** A row that resolves its lyric to `none`, so the audio and art terms are isolated. */
+const artRow = (id: string, art?: IndexRow['art'], coverArt?: string): IndexRow => ({
+  ...row(id, { state: 'none', bytes: 0 }),
+  coverArt,
+  art,
+});
+
+test('an unresolved cover is bounded once per cover, not once per track', () => {
+  // Fourteen tracks, two albums: 2 × ART_ASSUMED_BYTES, never 14 ×. Charging per track would be a
+  // lie in the other direction — the file is one per album.
+  const songs = [
+    ...Array.from({ length: 7 }, (_, index) => covered(`a${index}`, 'cover-a')),
+    ...Array.from({ length: 7 }, (_, index) => covered(`b${index}`, 'cover-b')),
+  ];
+  const rows = new Map(songs.map((entry) => [entry.id, artRow(entry.id, undefined, entry.coverArt)]));
+  const estimate = estimateBytes(songs, rows);
+  assert.equal(estimate.exact, false, 'an unresolved cover makes the figure a ceiling');
+  assert.equal(estimate.total, songs.reduce((total, entry) => total + (entry.size ?? 0), 0) + 2 * ART_ASSUMED_BYTES);
+});
+
+test('a cover that landed is counted at its measured size, and the figure is exact again', () => {
+  const songs = [covered('a', 'cover-a'), covered('b', 'cover-a')];
+  const rows = new Map([
+    ['a', artRow('a', { state: 'present', file: 'cover-a.art', bytes: 41_230 }, 'cover-a')],
+    ['b', artRow('b', { state: 'present', file: 'cover-a.art', bytes: 41_230 }, 'cover-a')],
+  ]);
+  const estimate = estimateBytes(songs, rows);
+  assert.equal(estimate.total, 2_000_000 + 41_230, 'the same file, read once, added once');
+  assert.equal(estimate.exact, true);
+});
+
+test('a cover the library does not have is zero bytes and does not make the figure inexact', () => {
+  const songs = [covered('a', 'cover-a')];
+  const rows = new Map([['a', artRow('a', { state: 'none', bytes: 0 }, 'cover-a')]]);
+  const estimate = estimateBytes(songs, rows);
+  assert.equal(estimate.total, 1_000_000, 'no phantom 256 KB for an album with no cover');
+  assert.equal(estimate.exact, true);
+});
+
+test('a track with no cover at all contributes no art term', () => {
+  const songs: EstimateSong[] = [{ id: 'a', size: 1_000_000, duration: 200 }];
+  const rows = new Map([['a', artRow('a')]]);
+  const estimate = estimateBytes(songs, rows);
+  assert.equal(estimate.total, 1_000_000);
+  assert.equal(estimate.exact, true);
 });

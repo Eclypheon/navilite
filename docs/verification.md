@@ -1550,3 +1550,64 @@ The local-file path (`playlistPath`/`localFile`, the v1.9.16/17 ground) is a dif
 not exercised by this check. Nothing here touched the v1.9.19 offline fixes: no `src/` file changed
 in this work (`tools/` and this document only).
 
+
+## 17. v1.9.20 — the downloaded-content surfaces (2026-10-16)
+
+The design is `docs/design-downloaded-surfaces.md`; the decisions are in `DECISIONS.md` under 1.9.20.
+This section is what was **run** here, and what was not.
+
+**The harness, once, with the real assertions added to it.** `tools/offline-check.mjs` (the existing
+1.9.18 harness) gained the design's §8.3 acceptance and was run against a built `dist/` with the mock
+answering as a real Navidrome would:
+
+```
+$ node tools/mock-subsonic.mjs --port 4641 --stress --dist dist
+$ node tools/offline-check.mjs --app http://127.0.0.1:4641 --online-playlist pl-stress-ja
+```
+
+25 checks, all green. The ones this release added, with what they reported:
+
+| check | reading |
+| --- | --- |
+| no playlist name twice, server **up** | 4 rows, every name once (the failing baseline drew the playlist twice and tapped to the same id from both rows) |
+| the downloaded playlist is marked on the server's one row | 1 marked row of 4 — `complete`, sub `3 tracks · 1:15 · 23.2 MB on this phone` |
+| no playlist name twice, server **refused** | 2 rows: `Late night driving`, `Half downloaded` |
+| a fully downloaded playlist reads downloaded | `complete`, `3 tracks · 10:42 · 23.2 MB on this phone` |
+| a partially downloaded playlist does **not** read complete | `partial`, `3 tracks · 1 of 3 on this phone` |
+| every downloaded track carries its mark, server refused | 3 of 3 rows marked, each with `, downloaded` on its accessible name |
+| the covers come from the device copy, API refused | `http://127.0.0.1:4641/offline-art/cover-album-1-1.art` |
+| `#/downloads` lists the downloaded tracks by title | `4 rows`, h1 `On this phone`, no playlist-shaped row |
+| the cover drives the shell's palette, API refused | `--accent-primary` `#7cd2ff` → `hsl(262 85% 66%)` |
+| neither view waits for a server that never answers | 3 rows in 32 ms; 4 rows in 2 ms (the app's own request timeout is 20 s) |
+
+`npm test` (240 tests, including this harness run under `test/offline-views.test.ts`), `npm run
+typecheck`, `node tools/spectrum-proof.mjs` (the +700 reading is now in the monotonicity chain) and
+`xcodebuild` are all green. The IPA carries 1.9.20 (41) in its own `Info.plist`.
+
+**The race this release found and fixed.** The new "one row per playlist" check waits for the
+playlists screen to draw its rows — and was, intermittently, shown the *playlist page it had just
+left*: a view that awaits the library paints after the await, so a slow answer wrote the old screen
+over the new one (the list's subtitle inside the playlist page's header). `overtaken()` in
+`src/ui/app.ts` guards the paint in the three views this acceptance depends on (the playlist page,
+the playlists screen, the Library) and leaves the data work alone. The same class exists in the other
+awaited views (`renderAlbum`, `renderArtist`, `renderFavourites`, `renderSearch`) and was **not**
+touched here; it is the next card, not a claim of this one.
+
+**Not verified here, and not claimed.**
+
+1. **Art in the WebView.** That `Capacitor.convertFileSrc` renders a downloaded cover and yields an
+   **untainted** canvas (`getImageData` succeeding) is a platform claim. The harness proves the app
+   *asks for and samples the local copy* rather than the API's; the device path itself is the owner's
+   to confirm, and it is the one thing that decides whether item 4's theming works offline.
+2. **The native art lane end to end** — `URLSession` → staging → `<coverId>.art` → the index row →
+   `list()`. Everything above `list()` is exercised against a bridge double in
+   `test/offline-store.test.ts`; nothing below it can be run here. The Swift **compiles** (a green
+   grep is not a compiler: this pass shipped one Swift error — `ArtRow(state:)` missing — that the
+   source assertions could not see, and `xcodebuild` caught it).
+3. **The migration on his phone**: that his 1.9.19 `index.json` and jobs still decode against the new
+   optional fields, and that his existing downloads still play. Source-level claims only.
+4. **What `getCoverArt?size=512` returns on his instance** (bytes, format, whether an original is
+   passed through whole). `ART_ASSUMED_BYTES` is a bound asserted from the request.
+5. **Background transfers of art** (the lane's own background behaviour, unchanged since 1.8.x).
+6. **The 393 px layout with badged rows on the phone.** The harness measures overflow at 393 × 852 on
+   every screen it visits, including the badged lists (0 px), but the device is the owner's.

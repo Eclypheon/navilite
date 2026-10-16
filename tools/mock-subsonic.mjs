@@ -1021,6 +1021,25 @@ const server = createServer((request, response) => {
     return;
   }
 
+  /*
+   * The harness's stand-in for a file in the app's **own container** (v1.9.20).
+   *
+   * On the phone a downloaded cover lives in `Library/Application Support/navilite-offline/` and
+   * reaches the page through `Capacitor.convertFileSrc`, which produces a URL on the *app's own*
+   * origin rather than the API's. A browser has no such container, so this route is the closest
+   * honest equivalent: `tools/offline-check.mjs` seeds the app's offline mirror with art rows whose
+   * file URL is here — same-origin with the page, exactly as the converted device path is — and the
+   * check then proves the app draws art from there **with the API refused**, which is the half of
+   * §5.5's claim a browser can carry. It is a fixture, and it says so; the device path stays the
+   * owner's to confirm.
+   */
+  if (path.startsWith('/offline-art/')) {
+    const name = path.replace('/offline-art/', '');
+    const seed = name.split('').reduce((total, char) => (total * 31 + char.charCodeAt(0)) % 997, 7);
+    send(response, 200, coverFor(seed, 512), { 'content-type': 'image/png', 'cache-control': 'no-store' });
+    return;
+  }
+
   serveStatic(response, path === '/' ? '/index.html' : path);
 });
 

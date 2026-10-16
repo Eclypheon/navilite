@@ -63,9 +63,14 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     private static let jobsKey = "navilite.offline.jobs"
     private static let maxConcurrent = 3
 
-    /// The two axes of a song's download. The kind is part of every key, never implied by the song.
+    /// The axes of a song's download. The kind is part of every key, never implied by the song.
     private static let audioKind = "audio"
     private static let lyricsKind = "lyrics"
+    /// The third axis (v1.9.20): a cover, keyed by **cover id** rather than by song, because one
+    /// file serves every track of an album. Without its own kind an art job keys as `audio:<id>`,
+    /// overwrites the song's audio job and writes `suffix: "art"` into the song's audio row — i.e.
+    /// `pathFor()` hands the player a JPEG.
+    private static let artKind = "art"
     private static let stagingSuffix = ".part"
     /// E7: a staging file nobody came back for is swept after a day.
     private static let stagingMaxAge: TimeInterval = 24 * 60 * 60
@@ -77,7 +82,8 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
 
     /// Which axis a transfer belongs to. The suffix is the discriminator the JS job carries.
     private static func kind(forSuffix suffix: String) -> String {
-        suffix == lyricsKind ? lyricsKind : audioKind
+        if suffix == lyricsKind { return lyricsKind }
+        return suffix == artKind ? artKind : audioKind
     }
 
     /// Split a `"<kind>:<songId>"` key back into its two halves.
@@ -112,6 +118,27 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         return head.hasPrefix("{\"error\"") || head.contains("no lyrics sidecar for this track")
     }
 
+    /// Is this file an image? (v1.9.20)
+    ///
+    /// The art axis's last door, the exact shape of the lyrics rule above: a `200` whose body is not
+    /// an image — a JSON error envelope, an HTML door page — is **not a cover**, and promoting it
+    /// would record a row that renders nothing and themes nothing. JS is already safe behind it
+    /// (`createImageBitmap` throws and `paletteFromArtwork` catches), but a wrong body is worse than
+    /// an absent one, so it is refused where the bytes become a row. Magic numbers only: five
+    /// formats, twelve bytes, no decoding.
+    fileprivate static func looksLikeImage(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url) else { return false }
+        let head = [UInt8](data.prefix(12))
+        guard head.count >= 4 else { return false }
+        if head[0] == 0xFF, head[1] == 0xD8, head[2] == 0xFF { return true } // JPEG
+        if head[0] == 0x89, head[1] == 0x50, head[2] == 0x4E, head[3] == 0x47 { return true } // PNG
+        if head[0] == 0x47, head[1] == 0x49, head[2] == 0x46 { return true } // GIF
+        if head[0] == 0x42, head[1] == 0x4D { return true } // BMP
+        if head.count >= 12, head[0] == 0x52, head[1] == 0x49, head[2] == 0x46, head[3] == 0x46,
+           head[8] == 0x57, head[9] == 0x45, head[10] == 0x42, head[11] == 0x50 { return true } // WEBP
+        return false
+    }
+
     /// One enqueued download, persisted so a relaunch can reconcile `URLSession`'s own tasks.
     private struct Job: Codable {
         var songId: String
@@ -123,6 +150,13 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         var artist: String
         var album: String
         var durationSec: Int
+        /// The cover this row belongs to (v1.9.20). Optional by hard rule: a job persisted by
+        /// 1.9.19 must still decode, or the whole jobs dictionary is dropped as unreadable.
+        var coverArt: String? = nil
+        /// For an **art** job: the songs that share the cover. It is how a row written by 1.9.19 —
+        /// which has no cover id of its own, and whose audio job is never re-enqueued — learns which
+        /// cover is its own when the file lands.
+        var coverOf: [String]? = nil
 
         /// The axis this transfer belongs to — derived from the suffix, never stored twice.
         var kind: String { NaviliteDownloads.kind(forSuffix: suffix) }
@@ -148,10 +182,25 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         var album: String
         var durationSec: Int
         var lyrics: LyricsRow?
+        /// This row's cover id (v1.9.20). **Optional, and it must stay optional**: `readIndex()`
+        /// returns `[:]` when the decode fails, and the boot sweep below then deletes every file the
+        /// index does not name — one non-optional field against the owner's 1.9.19 `index.json` is a
+        /// silent deletion of 5 GB of downloads.
+        var coverArt: String? = nil
+        /// The art axis of this row; the file is shared between every row of the same cover.
+        var art: ArtRow? = nil
     }
 
     /// The lyrics axis of a row (v1.9.12): state, file and measured bytes — never the text.
     private struct LyricsRow: Codable {
+        var state: String
+        var file: String?
+        var bytes: Int
+        var fetchedAt: Double?
+    }
+
+    /// The art axis of a row (v1.9.20): state, the **cover's** file name, and the measured bytes.
+    private struct ArtRow: Codable {
         var state: String
         var file: String?
         var bytes: Int
@@ -245,7 +294,9 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             title: call.getString("title") ?? "",
             artist: call.getString("artist") ?? "",
             album: call.getString("album") ?? "",
-            durationSec: call.getInt("durationSec") ?? 0
+            durationSec: call.getInt("durationSec") ?? 0,
+            coverArt: call.getString("coverArt"),
+            coverOf: call.getArray("coverOf") as? [String]
         )
         persist(job: job)
         // Only this song's transfer of this kind: a lyrics enqueue must never cancel the audio one.
@@ -284,7 +335,19 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             removeJob(kind: kind, songId: songId)
         }
         var index = readIndex()
-        index.removeValue(forKey: songId)
+        let removed = index.removeValue(forKey: songId)
+        /*
+         * v1.9.20 — **the art file belongs to the download**, and it is *shared*: one file serves
+         * every row of the same cover. So it goes when the last index row that **names** it goes, and
+         * not before — otherwise removing one playlist would take the cover off an album another
+         * playlist still holds.
+         */
+        if let file = removed?.art?.file, !file.isEmpty {
+            let stillNamed = index.values.contains { $0.art?.file == file }
+            if !stillNamed, let base = baseURL {
+                try? FileManager.default.removeItem(at: base.appendingPathComponent(file))
+            }
+        }
         writeIndex(index)
         if let base = baseURL {
             let suffixes = ["mp3", "flac", "wav", "m4a", "ogg", "opus", "lyrics"]
@@ -323,6 +386,17 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
                     "file": lyrics.file as Any,
                     "bytes": lyrics.bytes,
                     "fetchedAt": lyrics.fetchedAt as Any
+                ]
+            }
+            // v1.9.20 — the art axis and the row's cover id, so the JS store can resolve a cover
+            // from disk (`artPathFor`) and draw the badge without a round trip of its own.
+            result["coverArt"] = row.coverArt as Any
+            if let art = row.art {
+                result["art"] = [
+                    "state": art.state,
+                    "file": art.file as Any,
+                    "bytes": art.bytes,
+                    "fetchedAt": art.fetchedAt as Any
                 ]
             }
             return result
@@ -455,7 +529,7 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     fileprivate func didFinishDownload(taskKey: String, from location: URL, responseExpected: Int) {
         guard let base = baseURL, let (kind, songId) = Self.splitKey(taskKey) else { return }
         let job = readJobs()[taskKey]
-        let suffix = job?.suffix ?? (kind == Self.lyricsKind ? Self.lyricsKind : "mp3")
+        let suffix = job?.suffix ?? (kind == Self.lyricsKind ? Self.lyricsKind : kind == Self.artKind ? Self.artKind : "mp3")
         // The route's own `Content-Length` when the response carried one (the lyrics route does),
         // else what the JS job promised. `0` means "nothing to check against".
         let expected = responseExpected > 0 ? responseExpected : (job?.expectedBytes ?? 0)
@@ -511,6 +585,69 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             ])
             return
         }
+        /*
+         * **The art axis** (v1.9.20, §5.4). The transfer's key is a **cover id**, and one file serves
+         * every row that carries that cover — so the row is not `index[songId]`, it is *every* row
+         * that names this cover, exactly as the JS side fans out.
+         *
+         * The final file is `<coverId>.art` (built from the key and the suffix by the caller), which
+         * is why the boot sweep has to be taught about it: it is not `<songId>.<suffix>` for any row.
+         */
+        if kind == Self.artKind {
+            /*
+             * The last door on the art axis: a `200` whose body is not an image is not a cover. The
+             * lyrics rule's exact shape, one axis over.
+             */
+            guard Self.looksLikeImage(destination) else {
+                try? FileManager.default.removeItem(at: destination)
+                removeJob(kind: kind, songId: songId)
+                notifyListeners("failed", data: [
+                    "songId": songId,
+                    "kind": kind,
+                    "status": 0,
+                    "error": "the body is not an image"
+                ])
+                return
+            }
+            let cover = job?.coverArt ?? songId
+            let artRow = ArtRow(state: "present", file: "\(cover).art", bytes: bytes, fetchedAt: Date().timeIntervalSince1970)
+            let covered = Set(job?.coverOf ?? [])
+            var index = readIndex()
+            /*
+             * Every row that names the cover: `key == cover` (the rare case where a row is keyed by
+             * the cover itself), the songs the job carried (`coverOf`, which is how a row written by
+             * 1.9.19 — with no cover id of its own — learns which cover is its own), and any row that
+             * already knows it. Collected first and then written, so nothing is mutated while the
+             * dictionary is being walked.
+             */
+            let targets = index.keys.filter { key in
+                key == cover || covered.contains(key) || index[key]?.coverArt == cover
+            }
+            for key in targets {
+                index[key]?.coverArt = cover
+                index[key]?.art = artRow
+            }
+            writeIndex(index)
+            removeJob(kind: kind, songId: songId)
+            guard !targets.isEmpty else {
+                /*
+                 * No row carries this cover: the audio of every one of its songs never landed, so
+                 * there is nothing to annotate and the file is not named by the index. It is left on
+                 * disk for the boot sweep (§5.7) rather than deleted here — a transfer of the same
+                 * cover may still be in flight — and reported as a failure so no row claims a cover
+                 * that no song holds.
+                 */
+                notifyListeners("failed", data: [
+                    "songId": cover,
+                    "kind": kind,
+                    "status": 0,
+                    "error": "no song on this phone carries this cover"
+                ])
+                return
+            }
+            notifyListeners("done", data: ["songId": cover, "kind": kind, "bytes": bytes])
+            return
+        }
         var index = readIndex()
         if kind == Self.lyricsKind {
             var row = index[songId] ?? IndexRow(
@@ -519,12 +656,17 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
                 album: job?.album ?? "", durationSec: job?.durationSec ?? 0, lyrics: nil
             )
             row.lyrics = LyricsRow(state: "present", file: "\(songId).lyrics", bytes: bytes, fetchedAt: Date().timeIntervalSince1970)
+            // The cover id travels with the audio row too (v1.9.20), so the art fan-out can find this
+            // row without the `coverOf` list on a later download of the same album.
+            if row.coverArt == nil { row.coverArt = job?.coverArt }
             index[songId] = row
         } else {
             index[songId] = IndexRow(
                 songId: songId, suffix: suffix, bytes: bytes, sha: nil, downloadedAt: Date().timeIntervalSince1970,
                 state: "complete", refs: job?.refs ?? [], title: job?.title ?? "", artist: job?.artist ?? "",
-                album: job?.album ?? "", durationSec: job?.durationSec ?? 0, lyrics: index[songId]?.lyrics
+                album: job?.album ?? "", durationSec: job?.durationSec ?? 0, lyrics: index[songId]?.lyrics,
+                coverArt: job?.coverArt ?? index[songId]?.coverArt,
+                art: index[songId]?.art
             )
         }
         writeIndex(index)
@@ -600,7 +742,20 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         }
         // E7's other half: a file the index does not name is nobody's download.
         let index = readIndex()
-        let named = Set(index.values.flatMap { row in ["\(row.songId).\(row.suffix)", "\(row.songId).lyrics"] })
+        /*
+         * **Every file the index names** — including each row's art file (v1.9.20).
+         *
+         * The art file is named after a **cover id**, so it is not `<songId>.<suffix>` for any row:
+         * without this last entry the sweep would delete every cover on the next launch, and the
+         * owner would see the art he just downloaded vanish between two starts of the app.
+         */
+        let named = Set(
+            index.values.flatMap { row -> [String] in
+                var names = ["\(row.songId).\(row.suffix)", "\(row.songId).lyrics"]
+                if let file = row.art?.file, !file.isEmpty { names.append(file) }
+                return names
+            }
+        )
         if let contents = try? FileManager.default.contentsOfDirectory(
             at: base,
             includingPropertiesForKeys: nil,

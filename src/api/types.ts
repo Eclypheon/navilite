@@ -131,7 +131,7 @@ export interface QueueItem {
 }
 
 export interface QueueContext {
-  kind: 'album' | 'artist' | 'playlist' | 'favourites' | 'search' | 'song';
+  kind: 'album' | 'artist' | 'playlist' | 'favourites' | 'search' | 'song' | 'downloads';
   id?: string;
   name: string;
 }

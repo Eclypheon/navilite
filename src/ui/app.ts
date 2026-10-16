@@ -22,8 +22,8 @@ import { platformInfo, type PlatformInfo } from '../platform.ts';
 import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
-import { OfflineStore, estimateBytes, formatBytes, type DownloadedPlaylist, type SizeEstimate } from '../state/offline.ts';
-import { createDownloadsBridge } from '../player/native.ts';
+import { OfflineStore, estimateBytes, formatBytes, type DownloadedPlaylist, type PlaylistBadge, type SizeEstimate } from '../state/offline.ts';
+import { createDownloadsBridge, localFileSrc } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore, type SecretStore } from '../storage/secret.ts';
 import { loadSettings, saveSettings, type Settings } from '../storage/settings.ts';
@@ -251,6 +251,18 @@ export async function boot(root: HTMLElement): Promise<void> {
         return null;
       }
     },
+    /*
+     * The art axis (v1.9.20): the cover route, asked once per distinct cover id at the size the
+     * spectrum page draws (512 — the same file serves the palette's 256 read and the list thumbs).
+     * Handed in as a factory, like the two above: the store relays URLs, it does not mint them.
+     */
+    artUrl: (coverArtId) => ctx.library?.client.coverArtUrl(coverArtId, 512) ?? null,
+    /*
+     * …and the one platform call, injected for the same reason: `convertFileSrc` is what makes a
+     * file in the app's own container readable from the page's origin, so the cover renders and the
+     * palette can read it without a tainted canvas. `player/native.ts` owns the Capacitor import.
+     */
+    toLocalSrc: localFileSrc,
   });
   ctx.offline = offline;
   void offline.hydrate();
@@ -1472,8 +1484,14 @@ interface Credentials {
 
 function connect(ctx: AppContext, shell: Shell, credentials: Credentials, applyPalette: ApplyPalette, options: { silent?: boolean } = {}): void {
   const client = new SubsonicClient(credentials);
-  // The offline resolver is the one `streamUrl` consults first (local-first playback, v1.9.12).
-  const library = new Library(client, (songId) => ctx.offline?.pathFor(songId) ?? null);
+  // The offline resolver is the one `streamUrl` consults first (local-first playback, v1.9.12), and
+  // — since v1.9.20 — the art resolver is what `coverUrl` consults first, so the cover that came down
+  // with a song is what the spectrum page draws and what the palette reads offline.
+  const library = new Library(
+    client,
+    (songId) => ctx.offline?.pathFor(songId) ?? null,
+    (coverArtId) => ctx.offline?.artPathFor(coverArtId) ?? null,
+  );
   const queue = new PlaybackQueue(ctx.engine, library, {
     /*
      * A failed start for a track the library resolved to a `file://` path is the app's only evidence
@@ -1564,6 +1582,16 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
   // listeners are a list, so the settings row and a playlist control coexist while both are on
   // screen — and neither outlives the node it paints.
   clearOfflineSubscriptions();
+  /*
+   * v1.9.20 — the download marks the render below draws are repainted **in place** when the store
+   * changes, never by a `ctx.render()`: a re-render would drop the scroll offset and the highlighted
+   * row, and the playlists screen carries a live control already (the same reasoning as the download
+   * control, `#/app.ts:2185-2203`). `songRow`/`playlistRow` register their own repaint as they are
+   * built; this one listener walks them, and the list is emptied per render because the nodes it
+   * names do not outlive it.
+   */
+  clearDownloadMarks();
+  subscribeOffline(ctx.offline, repaintDownloadMarks);
   const [head = 'artists', id, extra] = routeParts();
   setActiveTab(shell, head);
   const nowOpen = head === 'now';
@@ -1643,6 +1671,11 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
     case 'playlists':
       drawn(renderPlaylists(ctx, shell));
       break;
+    case 'downloads':
+      // v1.9.20 — "On this phone": the downloaded tracks, drawn from the store alone. A route and a
+      // filter, never an entity: there is nothing here to name, create, rename or delete (§4.2).
+      drawn(renderDownloads(ctx, shell));
+      break;
     case 'favourites':
       drawn(renderFavourites(ctx, shell));
       break;
@@ -1714,6 +1747,24 @@ function loading(shell: Shell, message = 'Loading…'): void {
   replace(shell.view, h('div', { class: 'empty' }, [h('p', { class: 'muted', text: message })]));
 }
 
+/**
+ * Has this render been overtaken? (v1.9.20)
+ *
+ * Every view that awaits the library paints *after* the await, and by then the router may already
+ * have drawn whatever the owner navigated to — so a late answer writes the old screen over the new
+ * one. He sees a screen that will not open, with the two screens' parts mixed together (the
+ * playlists list's subtitle inside the playlist page's header), and it needs only a slow answer.
+ * This release's own acceptance check found it: waiting for the playlists screen's rows, it was
+ * shown the playlist page it had just left.
+ *
+ * `shell.viewRoute` is the route the router drew for the view that is on screen now, set
+ * synchronously before that view renders, so it is the honest answer to "am I still the view?".
+ * Data work — remembering a playlist's name, say — is not a paint and is deliberately not guarded.
+ */
+function overtaken(shell: Shell, route: string): boolean {
+  return shell.viewRoute !== route;
+}
+
 /* ------------------------------------------------------- offline (v1.9.18) */
 
 /** What each server-only route was drawn as, so the offline state can keep its own heading. */
@@ -1771,25 +1822,137 @@ function renderOffline(ctx: AppContext, shell: Shell, head: string, error: unkno
     );
     return;
   }
-  host.append(...downloaded.map((entry) => offlinePlaylistRow(entry)));
+  host.append(...downloaded.map((entry) => playlistRow(ctx, storePlaylistInput(ctx, entry))));
   host.append(h('p', { class: 'muted', text: 'These play here with no connection. Everything else needs your library.' }));
 }
 
-/** A downloaded playlist, drawn from the store alone — no cover art, because art is a fetch. */
-function offlinePlaylistRow(entry: DownloadedPlaylist): HTMLElement {
-  return bindTap(
-    h('button', { class: 'row', 'aria-label': `Open ${entry.name}` }, [
-      cover(null, 'thumb', entry.name),
-      h('div', { class: 'row-text' }, [
-        h('span', { class: 'row-title', text: entry.name }),
-        h('span', {
-          class: 'row-sub',
-          text: `${entry.record.songs.length} track${entry.record.songs.length === 1 ? '' : 's'} · ${entry.record.done} on this phone · ${formatBytes(entry.record.bytes)}`,
-        }),
-      ]),
+/* -------------------------------------------- downloaded playlists, one row each (v1.9.20) */
+
+/**
+ * What the one playlist row needs. Every field is optional except the id and the name — both
+ * sources fill the same slots, which is the whole of why there is one renderer rather than two
+ * (§2.2): the server supplies `songCount`/`duration`/`coverArt` online, and the store's manifest
+ * supplies the same three offline.
+ */
+interface PlaylistRowInput {
+  id: string;
+  name: string;
+  /** The playlist's length: the server's `songCount`, or the manifest's length offline. */
+  songCount?: number;
+  /** Its runtime: the server's `duration`, or the sum of the manifest's own `Song.duration`. */
+  duration?: number;
+  /** Its cover: the server's `coverArt`, or a manifest song's — whatever is in hand. */
+  coverArt?: string;
+}
+
+/**
+ * The store's own facts in the row's shape (§2.2) — the same slots, filled from the manifest.
+ *
+ * This is what makes the offline list and the server's list one list: offline there is no server row
+ * to annotate, so the store *is* the row, and it is drawn by the same function.
+ */
+function storePlaylistInput(ctx: AppContext, entry: DownloadedPlaylist): PlaylistRowInput {
+  const first = entry.record.songs[0];
+  return {
+    id: entry.id,
+    name: entry.name,
+    songCount: entry.record.total,
+    // The server's `duration` is not available offline, so it is summed from the rows — the same
+    // arithmetic the playlist page does on the same songs.
+    duration: entry.record.songs.reduce((total, song) => total + (song.duration ?? 0), 0),
+    coverArt: first?.coverArt ?? first?.albumId ?? ctx.offline?.playlistBadge(entry.id).coverArt,
+  };
+}
+
+/**
+ * A playlist row's sub-line, from the store's verdict and the figures in hand.
+ *
+ * `complete` prints the **measured** size and says where it is (`on this phone`); a partial or live
+ * download says `n of m on this phone` instead, which is the one sentence the owner's screenshot
+ * needed and did not have. Nothing here ever prints `record.bytes` — that is a ceiling for a
+ * download that has not happened, which is exactly the confusion the screenshot shows (`5 GB` next
+ * to `269 on this phone`).
+ */
+function playlistSubLine(input: PlaylistRowInput, badge: PlaylistBadge): string {
+  const tracks = input.songCount ?? badge.total;
+  const tracksText = `${tracks} track${tracks === 1 ? '' : 's'}`;
+  if (badge.state === 'complete') {
+    return [tracksText, formatDuration(input.duration), `${formatBytes(badge.bytes)} on this phone`].filter(Boolean).join(' · ');
+  }
+  if (badge.state === 'partial' || badge.state === 'downloading') {
+    return `${tracksText} · ${badge.done} of ${badge.total} on this phone`;
+  }
+  return [tracksText, formatDuration(input.duration)].filter(Boolean).join(' · ');
+}
+
+/** The mark's glyph: solid when the file is here, hollow when part of it is or it is on its way. */
+function downloadMarkIcon(state: 'partial' | 'downloading' | 'complete'): SVGSVGElement {
+  return icon(state === 'complete' ? ICONS.download : ICONS.downloadPartial, 15);
+}
+
+/**
+ * **The one playlist row** (§A3). Online it is the server's row with the store's knowledge drawn
+ * *on* it — badge, measured size, and art through `Library.coverUrl`, so it is local when local art
+ * exists and the server's when it does not. Offline it is the same row with the store's own facts in
+ * the same slots. No view may paint a playlist twice, and one renderer is what makes that checkable.
+ *
+ * The mark is a `<span>` inside the row's own button: no second tap target, and its state is on the
+ * row's accessible name instead.
+ */
+function playlistRow(ctx: AppContext, input: PlaylistRowInput): HTMLElement {
+  const mark = h('span', { class: 'row-dl hidden', 'aria-hidden': 'true' });
+  const sub = h('span', { class: 'row-sub' });
+  const row = bindTap(
+    h('button', { class: 'row', 'aria-label': '' }, [
+      cover(ctx.library!.coverUrl(input.coverArt, 128), 'thumb', input.name),
+      h('div', { class: 'row-text' }, [h('span', { class: 'row-title', text: input.name }), sub]),
+      mark,
     ]),
-    () => (location.hash = `#/playlist/${encodeURIComponent(entry.id)}`),
+    () => (location.hash = `#/playlist/${encodeURIComponent(input.id)}`),
   );
+  const paint = (): void => {
+    const badge = ctx.offline?.playlistBadge(input.id, input.songCount) ?? { state: 'none' as const, done: 0, total: 0, bytes: 0 };
+    sub.textContent = playlistSubLine(input, badge);
+    const marked = badge.state !== 'none';
+    mark.className = marked ? `row-dl${badge.state === 'complete' ? '' : ' partial'}` : 'row-dl hidden';
+    replace(mark, ...(marked ? [downloadMarkIcon(badge.state === 'complete' ? 'complete' : 'partial')] : []));
+    row.setAttribute(
+      'aria-label',
+      marked
+        ? `Open ${input.name}, ${badge.state === 'complete' ? 'downloaded' : `${badge.done} of ${badge.total} downloaded`}`
+        : `Open ${input.name}`,
+    );
+  };
+  paint();
+  trackDownloadMark(paint);
+  return row;
+}
+
+/*
+ * The download marks on the view that is on screen, as repaint closures (v1.9.20).
+ *
+ * Registered by the row builders as they run and emptied by every render, because the nodes it names
+ * are replaced with the view. One store listener walks it (`renderRoute`), which is how a download
+ * that finishes while a list is on screen flips its own mark — and only its own mark.
+ */
+let downloadMarks: Array<() => void> = [];
+
+function trackDownloadMark(paint: () => void): void {
+  downloadMarks.push(paint);
+}
+
+function clearDownloadMarks(): void {
+  downloadMarks = [];
+}
+
+function repaintDownloadMarks(): void {
+  for (const paint of downloadMarks) {
+    try {
+      paint();
+    } catch {
+      // A repaint that throws is a UI bug, never a reason to stop repainting the others.
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ views */
@@ -1887,6 +2050,8 @@ function applyPaletteGlobal(shell: Shell, palette: Palette): void {
 }
 
 async function renderArtists(ctx: AppContext, shell: Shell): Promise<void> {
+  // The route this render answers for: a late answer paints only if it is still the view (v1.9.20).
+  const route = location.hash || DEFAULT_ROUTE;
   // Search lives here now that the Search tab is gone (the owner asked for the tab to go,
   // not the ability), and the URL is still `#/search/<query>` so a deep link works.
   const query = h('input', {
@@ -1910,8 +2075,14 @@ async function renderArtists(ctx: AppContext, shell: Shell): Promise<void> {
     h('button', { class: 'button', 'aria-label': 'Search', text: 'Search', onclick: run }),
   ]);
   const listHost = h('div', { class: 'list' }, [h('p', { class: 'muted', text: 'Loading artists…' })]);
-  shell.view.append(listHost);
+  /*
+   * v1.9.20 — **"On this phone"** stands at the top of the Library, above the artists, drawn from the
+   * store alone: the one place the owner browses the songs that are downloaded, and it is there
+   * whether or not the server answers (§4.1). It is a view, never a playlist — see `renderDownloads`.
+   */
+  shell.view.append(h('div', { class: 'list' }, [downloadsEntryRow(ctx)]), listHost);
   const artists = await ctx.library!.artists();
+  if (overtaken(shell, route)) return;
   if (artists.length === 0) {
     replace(listHost, h('p', { class: 'muted', text: 'No artists in this library.' }));
     return;
@@ -1969,6 +2140,89 @@ function artistRow(ctx: AppContext, artist: Artist): HTMLElement {
     ]),
     () => (location.hash = `#/artist/${encodeURIComponent(artist.id)}`),
   );
+}
+
+/**
+ * The Library's entry row into the downloaded music (v1.9.20).
+ *
+ * Drawn from the store alone — `totalTracks`/`totalBytes` are reads of the in-memory index — so it
+ * paints before anything is asked of the server and stays correct with no connection. It is a
+ * **door to a view**, not a playlist row: it carries no id, nothing on the server is named by it, and
+ * tapping it navigates to `#/downloads`.
+ */
+function downloadsEntryRow(ctx: AppContext): HTMLElement {
+  const sub = h('span', { class: 'row-sub' });
+  const row = bindTap(
+    h('button', { class: 'row row-entry', 'aria-label': 'Open On this phone' }, [
+      h('span', { class: 'row-play' }, [icon(ICONS.download, 18)]),
+      h('div', { class: 'row-text' }, [h('span', { class: 'row-title', text: 'On this phone' }), sub]),
+    ]),
+    () => (location.hash = '#/downloads'),
+  );
+  const paint = (): void => {
+    const tracks = ctx.offline?.totalTracks() ?? 0;
+    const bytes = ctx.offline?.totalBytes() ?? 0;
+    sub.textContent =
+      tracks === 0 ? 'nothing downloaded yet' : `${tracks} track${tracks === 1 ? '' : 's'} · ${formatBytes(bytes)}`;
+  };
+  paint();
+  trackDownloadMark(paint);
+  return row;
+}
+
+/**
+ * **On this phone** (v1.9.20, §4): the tracks that are downloaded, browsable with no connection.
+ *
+ * Why this is not the defect the owner reported — and why it cannot become it:
+ *
+ *   - it has **no id, no name and no server object**: nothing in `getPlaylists`, nothing in the
+ *     Playlists list, nothing creatable, renamable, deletable or shareable, and no code path that
+ *     could ever POST it to the library;
+ *   - it is a **filter's result over rows that already exist** (`downloadedSongs`), and its
+ *     membership is the same `pathFor` predicate as the badge — so a track cannot be in this list and
+ *     unbadged, or badged and absent from it;
+ *   - it is a **route**, and a route is a view the app can draw. The forbidden thing is a
+ *     playlist-shaped row under the Playlists tab; a screen that exists only on the phone cannot be
+ *     confused with something on the server;
+ *   - and it says where it lives: the title is **On this phone**, the same words the rows, the badge
+ *     and the offline pill already use.
+ *
+ * The body is the app's existing `songRow`, so the rows carry the badge, the tap-to-play behaviour
+ * and the highlight the rest of the app has; the queue's context is its own kind (`downloads`), so
+ * the now-playing line cannot claim these came from a playlist.
+ */
+async function renderDownloads(ctx: AppContext, shell: Shell): Promise<void> {
+  const songs = ctx.offline?.downloadedSongs() ?? [];
+  const items: QueueItem[] = songs.map((song) => ({ song, context: { kind: 'downloads', name: 'On this phone' } }));
+  const playAll = h('button', { class: 'button primary', text: 'Play all' }, [icon(ICONS.play, 16)]);
+  playAll.disabled = items.length === 0;
+  playAll.addEventListener('click', () => {
+    if (items.length > 0) void ctx.queue!.play(items, 0, items[0]?.context ?? null);
+  });
+  const tracks = songs.length;
+  const bytes = ctx.offline?.totalBytes() ?? 0;
+  pageTitle(
+    shell,
+    'On this phone',
+    tracks === 0 ? 'nothing downloaded yet' : `${tracks} track${tracks === 1 ? '' : 's'} · ${formatBytes(bytes)}`,
+    [playAll],
+  );
+  const host = h('div', { class: 'list' });
+  shell.view.append(host);
+  if (songs.length === 0) {
+    host.append(
+      h('p', {
+        class: 'muted',
+        text: 'Nothing is downloaded on this phone yet. Open a playlist while you have a connection and press ↓ in its header — it stays here, and it stays playable with no connection.',
+      }),
+    );
+    return;
+  }
+  replace(
+    host,
+    ...songs.map((song, index) => songRow(ctx, song, index, items, items[0]?.context ?? null, true)),
+  );
+  updateRowHighlight(ctx, shell);
 }
 
 async function renderArtist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
@@ -2051,6 +2305,8 @@ async function renderAlbum(ctx: AppContext, shell: Shell, id: string): Promise<v
  * contents come from, and the name is remembered against the manifest as it arrives.
  */
 async function renderPlaylists(ctx: AppContext, shell: Shell): Promise<void> {
+  // The route this render answers for: a late answer paints only if it is still the view (v1.9.20).
+  const route = location.hash || DEFAULT_ROUTE;
   const nameInput = h('input', { class: 'field inline', placeholder: 'New playlist name', autocomplete: 'off' });
   const createButton = h('button', { class: 'button primary', text: 'Create' });
   createButton.addEventListener('click', () => {
@@ -2069,48 +2325,69 @@ async function renderPlaylists(ctx: AppContext, shell: Shell): Promise<void> {
   });
   const pill = offlinePill();
   pill.classList.add('hidden');
-  pageTitle(shell, 'Playlists', 'getPlaylists / createPlaylist', [nameInput, createButton, pill]);
+  /*
+   * v1.9.20 — the subtitle is the facts, not the endpoints.
+   *
+   * It read `getPlaylists / createPlaylist`: a developer's note rendered on the owner's screen, and
+   * visible in the screenshot he sent (the same defect 1.9.19's item 5 fixed — "the header uses
+   * words, not the id"). The count is written once the answer is in, so it is never a lie about what
+   * is on the screen.
+   */
+  pageTitle(shell, 'Playlists', 'Loading…', [nameInput, createButton, pill]);
   const downloaded = ctx.offline?.downloadedPlaylists() ?? [];
-  const host = h('div', { class: 'list' });
-  if (downloaded.length > 0) {
-    host.append(h('h2', { class: 'section', text: 'Downloaded' }), ...downloaded.map((entry) => offlinePlaylistRow(entry)));
-  }
+  /*
+   * **One list, and the server's rows are it.** The store's own list used to be painted beside this
+   * one under a `Downloaded` heading — one playlist, two rows, which the owner read as a duplicated
+   * playlist. It is drawn only where there is no server row to annotate: the catch below (§I1).
+   */
   const serverHost = h('div', { class: 'list' }, [h('p', { class: 'muted', text: 'Loading playlists…' })]);
-  shell.view.append(host, serverHost);
+  shell.view.append(serverHost);
   let playlists: Playlist[];
   try {
     playlists = await ctx.library!.playlists();
   } catch (error) {
     /*
      * Nothing downloaded: let the router draw the offline state, which explains where these come
-     * from. With downloads in hand there is something to show, so the screen keeps it and the badge
-     * says what is missing.
+     * from. With downloads in hand there is something to show — and here, with no server row at all,
+     * the store *is* the list, drawn through the same renderer.
      */
     if (!isUnreachable(error) || downloaded.length === 0) throw error;
+    if (overtaken(shell, route)) return;
     pill.classList.remove('hidden');
-    replace(serverHost, h('p', { class: 'muted', text: 'These are the playlists on this phone. Your library’s full list needs a connection.' }));
+    setSubtitle(shell, `${downloaded.length} on this phone`);
+    replace(
+      serverHost,
+      ...downloaded.map((entry) => playlistRow(ctx, storePlaylistInput(ctx, entry))),
+      h('p', { class: 'muted', text: 'These are the playlists on this phone. Your library’s full list needs a connection.' }),
+    );
     return;
   }
   for (const playlist of playlists) ctx.offline?.rememberPlaylistName(playlist.id, playlist.name);
+  // The names above are data and are kept; the paint below only happens if this is still the view.
+  if (overtaken(shell, route)) return;
+  setSubtitle(shell, `${playlists.length} playlist${playlists.length === 1 ? '' : 's'}`);
   if (playlists.length === 0) {
     replace(serverHost, h('p', { class: 'muted', text: 'No playlists yet — name one above.' }));
     return;
   }
-  replace(serverHost, ...playlists.map((playlist) => playlistRow(ctx, playlist)));
+  replace(
+    serverHost,
+    ...playlists.map((playlist) =>
+      playlistRow(ctx, {
+        id: playlist.id,
+        name: playlist.name,
+        songCount: playlist.songCount,
+        duration: playlist.duration,
+        coverArt: playlist.coverArt ?? playlist.id,
+      }),
+    ),
+  );
 }
 
-function playlistRow(ctx: AppContext, playlist: Playlist): HTMLElement {
-  const row = bindTap(
-    h('button', { class: 'row', 'aria-label': `Open ${playlist.name}` }, [
-      cover(ctx.library!.coverUrl(playlist.coverArt ?? playlist.id, 128), 'thumb', playlist.name),
-      h('div', { class: 'row-text' }, [
-        h('span', { class: 'row-title', text: playlist.name }),
-        h('span', { class: 'row-sub', text: `${playlist.songCount ?? 0} tracks · ${formatDuration(playlist.duration)}` }),
-      ]),
-    ]),
-    () => (location.hash = `#/playlist/${encodeURIComponent(playlist.id)}`),
-  );
-  return row;
+/** Rewrite the page's own subtitle, for the views whose second line is a fact they learn late. */
+function setSubtitle(shell: Shell, text: string): void {
+  const node = shell.view.querySelector('.page-head .muted');
+  if (node) node.textContent = text;
 }
 
 /**
@@ -2156,6 +2433,14 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
   };
   /** Tracks the downloaded set does not cover — a playlist a song was added to afterwards. */
   const missing = (): number => offline?.missingCount(playlistId, songs) ?? 0;
+  /**
+   * Covers this playlist's download has not got (v1.9.20, §5.8).
+   *
+   * This is what gives a playlist downloaded by 1.9.19 — one with its audio and lyrics but no art —
+   * a way back to a cover that costs one tap and no audio: the label says `↓ covers` and the tap
+   * calls the same `download()`, which re-enqueues only what is absent.
+   */
+  const missingCovers = (): number => offline?.missingCovers(songs) ?? 0;
   const label = (): string => {
     const record = offline?.record(playlistId);
     if (!record || record.state === 'idle') {
@@ -2168,9 +2453,13 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
         return `${record.done} of ${record.total} · ${sizeLabel()}`;
       case 'partial':
         return `${record.done} of ${record.total} · retry`;
-      case 'complete':
+      case 'complete': {
         // The playlist changed after it was downloaded: not complete any more, and it says so.
-        return missing() > 0 ? `${songs.length - missing()} of ${songs.length} · retry` : `✓ ${sizeLabel()}`;
+        if (missing() > 0) return `${songs.length - missing()} of ${songs.length} · retry`;
+        // All the music is here, a cover is not: one tap fetches the covers and nothing else.
+        if (missingCovers() > 0) return `✓ ${sizeLabel()} · ↓ covers`;
+        return `✓ ${sizeLabel()}`;
+      }
       case 'failed':
         return 'Retry';
     }
@@ -2187,7 +2476,20 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
     const record = offline.record(playlistId);
     // A `complete` record whose playlist has grown is a resume, not a removal.
     const grown = record?.state === 'complete' && missing() > 0;
-    if (!record || record.state === 'idle' || record.state === 'failed' || record.state === 'partial' || grown) {
+    /*
+     * …and a `complete` record with a cover missing is a **covers-only** fetch (v1.9.20): the tap
+     * goes through the same `download()`, which skips every `complete` audio row and every resolved
+     * lyric, so no music byte is re-fetched and the label returns to `✓ 312 MB` when the covers land.
+     */
+    const coversOnly = record?.state === 'complete' && !grown && missingCovers() > 0;
+    if (
+      !record ||
+      record.state === 'idle' ||
+      record.state === 'failed' ||
+      record.state === 'partial' ||
+      grown ||
+      coversOnly
+    ) {
       void (async () => {
         // Wi-Fi only by default: the native side enforces `allowsCellularAccess = false`.
         // The name goes with the request: it is the one fact about this download that cannot be
@@ -2224,6 +2526,8 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
  */
 async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promise<void> {
   const store = ctx.offline;
+  // The route this render answers for: a late answer paints only if it is still the view (v1.9.20).
+  const route = location.hash || DEFAULT_ROUTE;
   const record = store?.record(id) ?? null;
   const localSongs = record !== null && record.done > 0 ? record.songs : [];
   const pill = offlinePill();
@@ -2250,6 +2554,9 @@ async function renderPlaylist(ctx: AppContext, shell: Shell, id: string): Promis
     return;
   }
   if (playlist.name) store?.rememberPlaylistName(id, playlist.name);
+  // The owner may have left this screen while the answer was in flight: the name above is data and
+  // is kept, the paint is not (`overtaken`).
+  if (overtaken(shell, route)) return;
   paintPlaylist(ctx, shell, id, playlist.name, playlist.entry ?? [], { pill, removable: true });
 }
 
@@ -2471,13 +2778,19 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
   });
 
   // §S11: how much the owner's downloaded music takes, and the one action that removes all of it.
-  const downloadSummary = h('p', { class: 'muted', text: '' });
+  /*
+   * v1.9.20 — this line is the door to **On this phone**, and it already prints the figures that view
+   * lists: the count and the size are the same two numbers, read from the same store. Nothing about
+   * the text moves; it becomes tappable.
+   */
+  const downloadSummary = h('button', { class: 'button downloads-link', 'aria-label': 'Browse the music on this phone' });
   const paintDownloads = (): void => {
     const bytes = ctx.offline?.totalBytes() ?? 0;
     const tracks = ctx.offline?.totalTracks() ?? 0;
-    downloadSummary.textContent = `Downloaded music: ${formatBytes(bytes)} · ${tracks} track${tracks === 1 ? '' : 's'}`;
+    downloadSummary.textContent = `Downloaded music: ${formatBytes(bytes)} · ${tracks} track${tracks === 1 ? '' : 's'} →`;
   };
   paintDownloads();
+  downloadSummary.addEventListener('click', () => (location.hash = '#/downloads'));
   const removeDownloads = h('button', { class: 'button danger', text: 'Remove all downloads' });
   removeDownloads.addEventListener('click', () => {
     void ctx.offline?.removeAll().then(() => ctx.toast('All downloads removed'));
@@ -2562,6 +2875,7 @@ function songRow(
    * a control, and the favourite star is gone from rows: the album screen still stars albums, the
    * Favourites screen still lists what is starred, and the row's own highlight is untouched.
    */
+  const mark = h('span', { class: 'row-dl hidden', 'aria-hidden': 'true' });
   const row = bindTap(
     h(
       'button',
@@ -2575,6 +2889,12 @@ function songRow(
           h('span', { class: 'row-title', text: song.title }),
           h('span', { class: 'row-sub', text: [song.artist, showAlbum ? song.album : null].filter(Boolean).join(' · ') }),
         ]),
+        /*
+         * v1.9.20 — the download mark, immediately before the time. It is a glyph, not a control:
+         * the whole row is the one tap target (v1.5), so the state goes on the row's accessible name
+         * instead, and the mark itself is `aria-hidden`.
+         */
+        mark,
         h('span', { class: 'row-time', text: formatDuration(song.duration) }),
       ],
     ),
@@ -2599,6 +2919,21 @@ function songRow(
     ctx.rows.set(song.id, rows);
   }
   rows.add(row);
+  /*
+   * The mark is painted from the store's own predicate — `pathFor`, the same one that decides
+   * whether this row is playable at all — and repainted in place when the store changes, so a
+   * download that finishes while this list is on screen flips its own mark with no re-render.
+   */
+  const paintMark = (): void => {
+    const downloaded = (ctx.offline?.pathFor(song.id) ?? null) !== null;
+    if (mark.dataset.on === String(downloaded)) return;
+    mark.dataset.on = String(downloaded);
+    mark.className = downloaded ? 'row-dl' : 'row-dl hidden';
+    replace(mark, ...(downloaded ? [icon(ICONS.download, 15)] : []));
+    row.setAttribute('aria-label', downloaded ? `Play ${song.title}, downloaded` : `Play ${song.title}`);
+  };
+  paintMark();
+  trackDownloadMark(paintMark);
   if (!onRemove) return row;
   // Remove-from-playlist cannot live inside the row any more — the row is one button — so it sits
   // beside it, in a wrapper that keeps the two on one line.

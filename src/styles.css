@@ -393,6 +393,49 @@ button {
 }
 
 /*
+ * v1.9.20 — the download mark beside a row, and the "On this phone" entry row.
+ *
+ * The mark is a glyph, never a control: it sits immediately before `.row-time` inside the row's own
+ * button, so it adds no tap target (the whole row is the one target, v1.5) and it inherits the row's
+ * colour like every other icon. A solid mark means the file is here; the hollow one means part of it
+ * is (a partial playlist, or a download still running). `flex: none` keeps it from being the thing
+ * that gets squeezed when a Japanese title is long — the title truncates first, as it always has.
+ */
+.row-dl {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--accent-primary);
+  margin-right: 8px;
+  opacity: 0.9;
+}
+
+.row-dl.partial {
+  color: var(--text-dim);
+}
+
+.row-dl.hidden {
+  display: none;
+}
+
+/* The Settings line that leads to "On this phone": a button that reads as the sentence it prints. */
+.downloads-link {
+  justify-content: flex-start;
+  text-align: left;
+  width: 100%;
+}
+
+/* The entry row at the top of the Library: a row that leads to a view, not to a track. */
+.row.row-entry .row-sub {
+  color: var(--text-dim);
+}
+
+.row.row-entry .row-play {
+  color: var(--accent-primary);
+  border-color: var(--line);
+}
+
+/*
  * v1.5: the play mark is the row's own affordance, not a button of its own — the whole row plays the
  * song now — so it keeps the pill shape and loses the parts that made it read as a separate control.
  */
