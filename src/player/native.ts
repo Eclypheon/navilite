@@ -148,6 +148,15 @@ export interface NativeSpectrumFrame {
   positionMs: number;
   playing: boolean;
   /**
+   * Whether the tap is on an item at all (v1.9.24, read for the first time).
+   *
+   * The plugin has always sent it (`NaviliteSpectrum.bands()`: `"attached": item != nil`) and the
+   * engine has always dropped it, so *"there is no tap"* and *"the tap is on an item the player has
+   * left"* were the same reading — and both were described on screen with the second sentence, which
+   * is false in the first case. Optional so a bridge that does not send it reads as "not known".
+   */
+  attached?: boolean;
+  /**
    * Whether the item the tap is installed on is still the player's current item — v1.8.0.
    *
    * The one signal that separates "the tap is broken" from "the player has moved on to another item

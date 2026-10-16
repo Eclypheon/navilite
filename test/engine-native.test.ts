@@ -154,6 +154,25 @@ interface SpectrumState {
   tappedUrl?: string | null;
   /** The item the plugin is holding for the *outgoing* track, when a test wants a slow landing. */
   slowLandUrls?: string[];
+  /**
+   * v1.9.24 — **the streams whose tap is installed and has not produced a frame for them yet.**
+   *
+   * The owner's case, in the two facts the plugin sends: the tap is on the item that is playing
+   * (`itemIsCurrent` true, `attached` true) and the tap's own counter stands still — because the
+   * counter is **process-lifetime** (`NaviliteSpectrum.swift:605`, reset by nothing), on a track
+   * after the first one that ever produced a frame its value is whatever the *previous* track left
+   * there. That is what the engine used to read as "this item's tap has answered", and this field is
+   * what makes the reading reproducible: the counter is non-zero and nothing has been measured for
+   * the item playing.
+   */
+  framesQuietUrls?: string[];
+  /**
+   * v1.9.24 — what the plugin answers to "is the tap on an item **at all**?" (`attached`,
+   * `NaviliteSpectrum.swift:422`: `item != nil`), when a test wants to state it directly. Defaults
+   * to the binding the fake is holding: the tapped item in `plugin` mode, "a request has started" in
+   * the simple one.
+   */
+  attached?: boolean;
   /** What the plugin answers to "is the tap on the item the player is on now?" (see v1.8.0). */
   itemIsCurrent?: boolean;
   /** Frames produced so far — what "silence reads as silence" is judged against. */
@@ -317,17 +336,28 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
          * zero. It is the window the bar chip has a third word for, and the engine's rule for when
          * that window ends ("the tap has answered for this item") is read off that same counter.
          */
-        if (record.tapProducing) record.spectrum.frames += 1;
+        /*
+         * v1.9.24 — `framesQuietUrls` is the tap that is installed on the item that is playing and
+         * has produced **nothing** for it: the plugin's own counter stands still (it is a
+         * process-lifetime count, so it holds the previous track's value) and every band reads zero.
+         */
+        const quiet =
+          record.playingUrl !== null && (record.spectrum.framesQuietUrls ?? []).includes(record.playingUrl);
+        const produced = record.tapProducing && !quiet;
+        if (produced) record.spectrum.frames += 1;
         const bound = record.spectrum.plugin === true;
         // The tap on an item the player has left measures nothing: no frames, and not current.
         const itemIsCurrent = bound
           ? record.spectrum.tappedUrl !== null && record.spectrum.tappedUrl === record.playingUrl
           : record.spectrum.itemIsCurrent;
-        const silent = !record.tapProducing || (bound && !itemIsCurrent) || record.spectrum.bands.every((value) => value === 0);
+        const silent =
+          !produced || quiet || (bound && !itemIsCurrent) || record.spectrum.bands.every((value) => value === 0);
         const bands = silent
           ? record.spectrum.bands.map(() => 0)
           : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
-        if (!silent) record.spectrum.silentFrames = 0;
+        if (!produced) {
+          // Nothing was measured, so there is no frame to be silent: `silentFrames` counts frames.
+        } else if (!silent) record.spectrum.silentFrames = 0;
         else record.spectrum.silentFrames += 1;
         record.spectrum.live = !silent;
         return {
@@ -338,6 +368,9 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
           silentFrames: record.spectrum.silentFrames,
           positionMs: record.truth.positionMs,
           playing: record.spectrum.playing && record.truth.playing,
+          // The plugin's own answer to "is the tap on an item at all?" — `NaviliteSpectrum.bands()`:
+          // `"attached": item != nil`, which the engine reads for the first time in v1.9.24.
+          attached: record.spectrum.attached ?? (bound ? record.spectrum.tappedUrl !== null : record.spectrum.started),
           // The plugin's own answer to "is the tap on the item the player is on now?" — flipped to
           // false by the orphan test, and decided by the tap's own binding in `plugin` mode.
           itemIsCurrent,
@@ -1752,6 +1785,168 @@ test('a tap that answers with silence ends the "spectrum…" window, once, with 
     assert.equal(status.spectrum, false, 'a tap reading silence feeds no bars');
     assert.equal(status.spectrumArming, false, 'and the engine has answered, so the chip stops saying the spectrum is coming');
     assert.match(status.modeReason, /digital silence/, 'with the sentence that names the case');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/** A second downloaded track, so a *change* between two local files can be driven. */
+const LOCAL_TRACK_2: TrackRequest = {
+  ...LOCAL_TRACK,
+  id: 'song-2-local',
+  url: 'file:///var/mobile/Containers/Data/Application/0F0A-DEAD/navilite-offline/song-2.mp3',
+  title: 'Track two, on the phone',
+};
+
+/** A third, for the burst. */
+const LOCAL_TRACK_3: TrackRequest = {
+  ...LOCAL_TRACK,
+  id: 'song-3-local',
+  url: 'file:///var/mobile/Containers/Data/Application/0F0A-DEAD/navilite-offline/song-3.mp3',
+  title: 'Track three, on the phone',
+};
+
+/**
+ * v1.9.24 — **a change of track must not turn the spectrum off while the new item's tap is still to
+ * produce its first frame.**
+ *
+ * The owner, on the installed build (v1.9.22/v1.9.23): *"the spectrum still doesn't work most of the
+ * time when i go to different tracks, it defaults to native audio and turns spectrum off … sometimes
+ * it appears the attach then immediately detach."* And his own hypothesis, asked: *"it could be
+ * because songs are starting up really fast now that they are starting from my phone's local storage
+ * after being downloaded so the spectrum attaching can't keep up."*
+ *
+ * §24 of `docs/verification.md` located the defect in the **decision**, not in the race the two
+ * earlier rounds closed. The engine asked whether this track's tap had *answered* by reading
+ * `frame.frames`, and that counter is the tap's own for the life of the app **process**
+ * (`NaviliteSpectrum.swift:605`, reset by nothing — `detach()` and `unprepare()` both leave it). So
+ * on any track after the first one that ever produced a frame, a tap that has produced **nothing**
+ * for the item playing read as *"this item's tap has answered — the audio is digitally silent"*
+ * twelve polls (≈ 0.4 s) in, and the chip went to *native audio* while the attach was still in
+ * flight. The tap is on the item; the frame it has not produced yet is the whole point, and the
+ * verdict was reached *because* the attach had not landed.
+ *
+ * What this test drives, on the fake bridge, is his case end to end: a **downloaded track started
+ * from the phone's own storage** (`file://`), the tap's process-lifetime counter already non-zero,
+ * and then a change — and a burst of changes — onto an item whose tap is on it and has produced
+ * nothing. The assertion is the owner's, taken at **every** read while the track plays: the engine
+ * must not state that this track cannot have a spectrum. `record.spectrum.framesQuietUrls` is the
+ * tap standing still on an item it is attached to; clearing it is the tap's first frame for that
+ * item, which is the only thing allowed to end the window.
+ */
+test('a track change never turns the chip to "native audio" while the new item’s tap is still to give its first frame (v1.9.24)', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  /** How long `predicate` took to hold, in ms, or null if it never did inside the budget. */
+  const until = async (predicate: () => boolean, budgetMs: number): Promise<number | null> => {
+    const started = Date.now();
+    for (;;) {
+      if (predicate()) return Date.now() - started;
+      if (Date.now() - started > budgetMs) return null;
+      await settle(5);
+    }
+  };
+  try {
+    const record = recording();
+    record.spectrum.framesQuietUrls = [LOCAL_TRACK_2.url];
+    const engine = nativeEngine(record);
+    engines.push(engine);
+
+    /* ---- 1. the downloaded track the owner starts from his phone, spectrum live ---- */
+    await engine.play(LOCAL_TRACK);
+    await settle(300);
+    const first = engine.status();
+    assert.equal(first.state, 'playing', 'the downloaded track is playing');
+    assert.equal(first.spectrum, true, 'and its spectrum is live');
+    const lifetimeFrames = record.spectrum.frames;
+    assert.ok(
+      lifetimeFrames > 0,
+      `the tap's own counter is now non-zero for the rest of the app process (${lifetimeFrames} frames) — which is what makes the next track's reading wrong`,
+    );
+    say(
+      `1. a downloaded track: spectrum ${first.spectrum}, the tap's process-lifetime counter at ${lifetimeFrames}`,
+    );
+
+    /* ---- 2. the change: the new item's tap is on it and has produced nothing for it ---- */
+    await engine.play(LOCAL_TRACK_2);
+    const changedAt = Date.now();
+    let playingReads = 0;
+    let atTheOldVerdict = '';
+    for (let index = 0; index < 26; index += 1) {
+      await settle(40);
+      const status = engine.status();
+      const at = Date.now() - changedAt;
+      const line = `${String(at).padStart(5)} ms · ${status.state} · spectrum ${status.spectrum} · arming ${status.spectrumArming} · tap frames ${record.spectrum.frames} — ${status.modeReason}`;
+      if (at >= 411 && at < 480) atTheOldVerdict = line;
+      if (status.state !== 'playing') continue;
+      playingReads += 1;
+      assert.equal(
+        status.spectrumArming,
+        true,
+        `the chip's third word while the new item's tap has produced nothing (${line})`,
+      );
+      assert.doesNotMatch(
+        status.modeReason,
+        /digital silence/,
+        `the engine must not call this item's audio silent from frames it has not produced (${line})`,
+      );
+    }
+    assert.ok(playingReads >= 20, `the window was watched while playing (${playingReads} reads)`);
+    say(`2. the change onto a quiet tap — ${atTheOldVerdict}`);
+    say(`   and ${playingReads} reads through the first second, every one of them "spectrum…"`);
+
+    /* ---- 3. the tap's first frame for the new item: the only thing that ends the window ---- */
+    record.spectrum.framesQuietUrls = [];
+    const healed = await until(() => engine.status().spectrum === true, 400);
+    assert.ok(healed !== null, 'the new item’s first frame is what ends the window, not a deadline');
+    const live = engine.status();
+    say(`3. the new item's first frame: live ${healed} ms later, arming ${live.spectrumArming}`);
+
+    /* ---- 4. the burst he describes: two changes inside the attach's own latency ---- */
+    record.spectrum.framesQuietUrls = [LOCAL_TRACK_3.url];
+    void engine.play(LOCAL_TRACK_3);
+    await settle(250);
+    // …and the item the burst lands on is one whose tap has produced nothing either.
+    record.spectrum.framesQuietUrls = [LOCAL_TRACK_2.url];
+    await engine.play(LOCAL_TRACK_2);
+    const burstAt = Date.now();
+    let burstReads = 0;
+    for (let index = 0; index < 25; index += 1) {
+      await settle(40);
+      const status = engine.status();
+      if (status.state !== 'playing') continue;
+      burstReads += 1;
+      assert.ok(
+        status.spectrum || status.spectrumArming,
+        `after two changes 250 ms apart the chip is on "native audio" (${Date.now() - burstAt} ms after the second: spectrum ${status.spectrum}, arming ${status.spectrumArming} — ${status.modeReason})`,
+      );
+    }
+    assert.ok(burstReads >= 20, `the burst was watched while playing (${burstReads} reads)`);
+    say(`4. the burst: ${burstReads} reads while playing, "native audio" on none of them`);
+    record.spectrum.framesQuietUrls = [];
+    const burstHealed = await until(() => engine.status().spectrum === true, 400);
+    assert.ok(burstHealed !== null, 'and the burst’s track is fed by its own first frame too');
+
+    /* ---- 5. the two states the engine used to describe with one false sentence ---- */
+    record.spectrum.itemIsCurrent = false;
+    record.spectrum.attached = false;
+    await settle(80);
+    const nothingAttached = engine.status();
+    say(`5. no tap on this item: arming ${nothingAttached.spectrumArming} — ${nothingAttached.modeReason}`);
+    assert.equal(
+      nothingAttached.spectrumArming,
+      true,
+      'nothing is attached to this item and the engine is asking for one: the chip says the spectrum is coming, not that it is over',
+    );
+    assert.match(
+      nothingAttached.modeReason,
+      /nothing is attached/,
+      'and the reason line names the state it is in — "no tap at all" is not "the tap is on an item the player has moved off"',
+    );
+    assert.doesNotMatch(nothingAttached.modeReason, /moved off/, 'which is the sentence that was false in this state');
+    record.spectrum.itemIsCurrent = true;
+    delete record.spectrum.attached;
   } finally {
     fakes.restore();
     await stopAll(engines);

@@ -2505,3 +2505,124 @@ twice.
    tap is on. On the phone: `NaviliteSpectrum`'s own `installs`/`verifies` counters (in `bands()`, `:435-436`) and
    the reason line stay readable at every change, and the chip's third word is the only one allowed between the
    transition and the tap's first frame.
+
+## 25. the spectrum's word for "there will be no bars here" was spent by a clock — it is a fact about this item now (2026-10-16, unreleased)
+
+Card `t_bec7b1bd`, implementing the diagnosis §24 (`t_183f4708`, commit `0af06b0`). The owner, on the installed
+build (v1.9.22 / v1.9.23):
+
+> *"the spectrum still doesn't work most of the time when i go to different tracks, it defaults to native audio and
+> turns spectrum off. … it could be because songs are starting up really fast now that they are starting from my
+> phone's local storage after being downloaded so the spectrum attaching can't keep up. sometimes it appears the
+> attach then immediately detach."*
+
+His "downloaded songs" hypothesis is the *trigger* and not a second cause: a `file://` start and a streamed one
+reach the same engine, the same `bridge.load` and the same `startSpectrum` call with the same latency shape
+(§24.2, §24.5). **No version is bumped, no IPA/APK is built, the `CHANGELOG.md` release heading is untouched** —
+this is the fix, its check, and a commit; the release is its own card, after review.
+
+### 25.1 The defect, in one paragraph
+
+The engine's answer to *"can this track have a spectrum?"* was a verdict spent by a **clock**, and one of its six
+inputs was not about the track. `pollSpectrum` asked whether the tap had *answered for this item* by reading
+`frame.frames` (`src/player/engine.ts:2749`) — the tap's own counter for the life of the app **process**
+(`NaviliteSpectrum.swift:605`; `detach()` and `unprepare()` reset nothing, `src/player/native.ts:144` documents it
+as *"since it started"*) — so on every track after the first one that ever produced a frame, a tap that had
+produced **nothing** for the item playing was judged to have answered *digital silence* twelve polls (≈ 0.4 s) in,
+and the chip printed *native audio*. It was reached *because* the attach had not landed yet, which is the exact
+inversion the brief forbids. Three further writers turned a **late or refused** attach into a capability claim out
+of elapsed time (§24.3 rows 2, 3 and 6: three orphan sightings at 1 s apart, three dead-poll rounds at 5 s apart,
+and one answered request plus a 5 s retry timer), and the engine described *"there is no tap at all"* with the
+sentence for *"the tap is on an item the player has moved off"* — the plugin has always sent `attached`
+(`NaviliteSpectrum.swift:422`) and the engine dropped it.
+
+### 25.2 What changed
+
+| file | why |
+| --- | --- |
+| `src/player/engine.ts` | the decision, once: **the chip's third word is only spent on a fact about the tap on the item playing now**. `tapFramesForItem` counts the tap's frames as deltas observed while the plugin says the tap is on the current item — the first such read is a baseline and a read that finds the tap elsewhere rewinds it, so it can only *under*-count and can never state another item's frames as this item's (`noteTapFrames`, `forgetTapFrames`, reset at `startNative` and `adoptNativeAdvance`); `answered` is `tapFramesForItem > 0`, so a tap that has produced nothing for this item keeps the third word; the orphan branch re-asks the plugin on the plugin's own evidence and *still keeps the third word*; the dead-poll branch re-checks rate-limited and keeps it; `attachSpectrum`'s `false`/rejection report the state on the reason line and no longer spend the word; `MAX_SPECTRUM_RECHECKS`, `SPECTRUM_SLOW_POLL_MS`, `slowSpectrumPoll` and `retrySpectrumOnce` (the 5 s timer) are deleted; `setSpectrumReason` writes the sentence once per distinct state; the invariant is stated where it is enforced (the `ZERO_POLLS_BEFORE_THEME` doc and `EngineStatus.spectrumArming`) |
+| `src/player/native.ts` | `NativeSpectrumFrame.attached` declared — the fact the plugin has always sent and the engine has always discarded, which is what lets `"no tap at all"` stop being described as `"the tap is on an item the player has moved off"` |
+| `test/engine-native.test.ts` | the fake models the owner's case in the two facts the plugin sends: `framesQuietUrls` is a tap **installed on the item that is playing and standing still** (the process counter non-zero from the previous track, `itemIsCurrent` true, `attached` true), and `attached` is now sent; one new test drives a downloaded (`file://`) start, the change onto a quiet tap, and then his burst of two changes 250 ms apart |
+
+### 25.3 The fail-before, and the same check after
+
+The new test first ran against the **engine as shipped in v1.9.23** (this tree's `src/player/engine.ts` before the
+change, kept at `src/player/engine.ts.bak-20261016-185201`), with the harness and the test unchanged:
+
+```
+$ node --test --test-name-pattern 'while the new item’s tap is still to give its first frame' test/engine-native.test.ts
+    1. a downloaded track: spectrum true, the tap's process-lifetime counter at 9
+✖ a track change never turns the chip to "native audio" while the new item’s tap is still to give its first frame (v1.9.24)
+  AssertionError: the chip's third word while the new item's tap has produced nothing
+    (  417 ms · playing · spectrum false · arming false · tap frames 9 — the native tap is reading digital silence — the audio itself is silent, so the bars are flat)
+ℹ tests 1 · pass 0 · fail 1 · duration_ms 1112.9
+```
+
+417 ms after a change onto a local file whose tap is on it and has produced nothing, the shipped engine states
+*digital silence* about a tap with **zero frames for this item** — the counter it read (`9`) is the previous
+track's, and the chip reads his *native audio*. The same command on the fix exits 0, and the whole file reports
+the timeline:
+
+```
+$ node --test test/engine-native.test.ts        # after
+    1. a downloaded track: spectrum true, the tap's process-lifetime counter at 9
+    2. the change onto a quiet tap —   462 ms · playing · spectrum false · arming true · tap frames 9 — native playback …
+       and 26 reads through the first second, every one of them "spectrum…"
+    3. the new item's first frame: live 18 ms later, arming false
+    4. the burst: 25 reads while playing, "native audio" on none of them
+    5. no tap on this item: arming true — nothing is attached to the item that is playing — asking the plugin to put a tap on it; the bars follow the audio
+ℹ tests 28 · pass 28 · fail 0 · duration_ms 24907.4
+```
+
+Read as the diagnosis reads it: the counter still stands at `9` (process-lifetime, unmoved for the new item), the
+verdict is gone, the word is the third one, and the *only* thing that ends it is the tap's own first frame for that
+item — 18 ms after the harness lets the tap produce one. His burst (two changes 250 ms apart, the second landing on
+a quiet tap) is read at every poll for a second and never prints *native audio*, and the two states the engine used
+to collapse into one false sentence are now two sentences.
+
+### 25.4 The suite, the invariant in the code, and what the change is not
+
+| check | reading |
+| --- | --- |
+| `npm run typecheck` | `tsc --noEmit` clean |
+| `npm run build` | `tsc --noEmit` + `vite build` clean → `dist/assets/index-9CPLwmFN.js` (197.45 kB, sha256 `6f1fde81…cef4`) |
+| `node --test test/engine-native.test.ts` | 28 tests, 28 pass, 0 fail in 24.9 s (27 before this card, +1) |
+| `npm test` | **256 tests, 256 pass, 0 fail, 0 skipped** in 35.8 s (255 before this card, +1) |
+
+The invariant §24.6 asks for is stated where it is enforced, in the engine:
+
+> *What may end the chip's third word while a native track is playing is a fact about the tap that is on the item
+> playing **now**: this item's own frames, or a build with no tap at all.* (`ZERO_POLLS_BEFORE_THEME`)
+
+An audit of the final file holds it: the remaining writers of `spectrumArming = false` are the build with no tap
+(`startConsumers`), a live frame for this item, this item's frames reading silent, and this item's frames frozen —
+no poll count, no elapsed millisecond, no timer. Nothing is masked to get there: the timed re-attach is deleted
+rather than retuned, no envelope or idle spectrum is synthesised, the chip's three words are unchanged (the fix is
+not a UI change that hides the state), the one-engine rule is untouched, and nothing detaches the tap.
+
+### 25.5 Not verified here, and not claimed
+
+1. **No phone and no simulator.** The reading above is the real `AudioEngine` driven through a bridge that models
+   the plugin's ordering and the two facts it sends; the native mixer is not exercised, so *whether the mix lands
+   on a `file://`-backed `AVPlayerItem`* and how long `AudibleSpectrumTap`'s first frame really takes on his phone
+   are still §24.8's answers, not this machine's. What is closed is the decision: a tap that has produced nothing
+   for the item no longer *causes* the fallback.
+2. **The Swift/ObjC half is untouched** (no file under `ios/` or `tools/` changed). §24.4's three detach sites —
+   `attach`'s own `detach()` prologue, the vendor slot unload, and the plugin's refusal of a slot with no loaded
+   item — are unchanged, and the v1.9.22 guards on them hold; a native change could not be verified here at all
+   (no simulator, no device), which is why this card fixed the layer it could read and run.
+3. **Two departures from §24, stated plainly.** (a) §24.7 rejects *"keeping it on 'spectrum…' indefinitely while
+   nothing is attached"*. This fix does keep the third word in that state — the engine cannot tell *"will never
+   attach"* from *"still attaching"* without a clock, and the alternative is the false capability claim the card
+   exists to remove; so the state is *named* on the reason line, the remedy is the plugin's own item-keyed answer,
+   and the only terminations left are the tap's answers about this item (silence, frozen, or no tap in the build).
+   If Sage judges that a never-attaching tap must eventually say *native audio*, that is a new input (a refusal
+   carrying the plugin's own reason for this item) and belongs on its own card, not in a timing budget.
+   (b) The 5 s slow poll is deleted, so the reads stay at 30 Hz for as long as a native track plays; the poll
+   already reads one frame at a time, and the trade is that a tap which recovers is drawn on the next frame
+   instead of up to five seconds later.
+4. **What the harness cannot see** is the same list as §24.5 plus one: the fake decides `frames` growth and
+   `attached`; a phone's plugin decides them from a real item. The falsification Sage should run is §25.3's first
+   command against a build that has the change — and on the owner's phone, one change of track with the reason
+   line open: the chip's third word until the tap's first frame, and *never* the sentence *"reading digital
+   silence"* about an item whose tap has produced nothing.

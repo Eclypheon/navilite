@@ -167,16 +167,22 @@ export interface EngineStatus {
   /** True only when the visualiser is being fed real frames right now. */
   spectrum: boolean;
   /**
-   * True while the tap is being installed on the track that is playing and has not answered for it
-   * yet (v1.9.6) — the window in which `spectrum` is false and the spectrum is not lost.
+   * True while a native track is playing and the engine has **no answer from the tap for this item
+   * yet** (v1.9.6, narrowed in v1.9.24) — the window in which `spectrum` is false and the spectrum
+   * is not lost.
    *
    * The chip needs three words, not two. `spectrum` is false for a fraction of a second at every
    * track change, until the track that was handed over to produces its first live frame, and calling
    * that window *native audio* is the owner's report word for word — the words this release exists to
-   * take off the screen. This flag is the fact that tells the two apart: the tap is installed on the
-   * item the player is playing and nothing has come back from it yet. It is false the moment the
-   * engine has an answer either way (a live frame, or one of the verdicts in `pollSpectrum`), so a
-   * screen reading "spectrum…" is always a tap the engine still expects to answer.
+   * take off the screen. This flag is the fact that tells the two apart: the tap is on the item the
+   * player is playing and has not answered for it yet.
+   *
+   * **v1.9.24 — and it may only be spent on such a fact, about this item.** The writers that ended it
+   * on a *clock* are gone (see `ZERO_POLLS_BEFORE_THEME`): what ends it now is this item's tap
+   * producing its own frames (live, silent or frozen — the answers a tap can give about this track),
+   * or a build with no tap at all. A tap that is late, refused, or still on the item the player has
+   * left keeps the third word, with `modeReason` naming that state, because the alternative is the
+   * capability claim the owner was reading at every track change.
    */
   spectrumArming: boolean;
   modeReason: string;
@@ -356,6 +362,23 @@ const ZERO_FRAMES_BEFORE_THEME = 18;
  * The same, in native-tap polls (every {@link SPECTRUM_POLL_MS}): 12 polls is ~0.4 s, and the tap
  * has its own frame counter — a tap that has produced *frames* that were silent is a different
  * statement from a tap that has produced nothing, and the mode note says which.
+ *
+ * **v1.9.24 — the input this is judged on is this item's frames, not the process's.** `frames` as
+ * the plugin sends it counts for the life of the app process, so on every track after the first
+ * one that ever produced a frame, a tap that has produced *nothing* for the item playing now used
+ * to be read as "this item is digitally silent" (see {@link AudioEngine.noteTapFrames}).
+ *
+ * **And the rule that replaced the budget that stood here.** This file used to bound its own
+ * patience (`MAX_SPECTRUM_RECHECKS = 3`, `SPECTRUM_SLOW_POLL_MS`) and spend that budget as a
+ * *verdict*: three failed re-checks, a 5 s slow poll, and the chip said *native audio* for the rest
+ * of the track. That is a capability claim made out of a clock, and it is the defect this release
+ * removes — a track whose audio can be analysed must not lose its bars because a stopwatch ran out.
+ *
+ * What may end the chip's third word while a native track is playing is a fact about the tap that
+ * is on the item playing **now**: this item's own frames, or a build with no tap at all. A tap that
+ * is late, refused or on an item the player has left is re-asked — on the player's own item,
+ * rate-limited — and the engine keeps saying the spectrum is coming, with the reason line naming
+ * the state it is in.
  */
 const ZERO_POLLS_BEFORE_THEME = 12;
 /**
@@ -412,15 +435,6 @@ const SPECTRUM_RECHECK_MS = 5000;
  */
 const SPECTRUM_NEAR_END_MS = 4000;
 /**
- * How many times a dead tap is checked against the player before the app gives up and says so.
- *
- * A tap that will not stay up is not worth a check every five seconds for the length of a track:
- * the third failure is reported, the bars go to the album-art theme, and nothing polls any more.
- * Note that giving up is now *only* a statement about the bars — v1.7.7 leaves the tap installed
- * either way, so the next track starts from a working tap rather than from a rebuilt one.
- */
-const MAX_SPECTRUM_RECHECKS = 3;
-/**
  * How close to the item's own end the clock has to sit to count as *pinned* there (v1.9.5).
  *
  * Much narrower than {@link NATIVE_END_SLACK_MS}: this is not "the last second of a track", it is
@@ -440,14 +454,17 @@ const PINNED_END_SLACK_MS = 250;
  */
 const PINNED_END_HOLD_MS = 2000;
 /**
- * How often the tap is looked at again once its own re-check budget is spent (v1.9.5).
+ * v1.9.24 — **the slow poll that stood here is deleted, with the budget that drove it.**
  *
- * The budget used to end the *polling*, so a tap that would not stay up was given up on for the
- * rest of the track and the bars never came back without a new track — the owner's *"just stays
- * there"*. The budget now only slows the checks down: the poll survives at this interval, and a
- * live frame anywhere later puts the bars back on its own.
+ * `SPECTRUM_SLOW_POLL_MS` (5 s) was the second half of `MAX_SPECTRUM_RECHECKS`: once three re-checks
+ * had failed, the reads slowed down and the chip said *native audio* for the rest of the track. The
+ * counts it was spent on were real facts — a tap on the wrong item, a tap reporting a player that is
+ * not playing — but spending them as a *capability* verdict is the defect this release removes, and
+ * a read that drops to one every five seconds is also five seconds of dark bars after a tap that
+ * recovers. Both states are now re-asked, on the player's own item, with the reads left where they
+ * are (one at a time, at {@link SPECTRUM_POLL_MS}) so a tap that comes back is drawn on the next
+ * frame rather than up to five seconds later.
  */
-const SPECTRUM_SLOW_POLL_MS = 5000;
 /**
  * How many tracks are warm on the player at once (v1.9.5): the previous song and the next two.
  *
@@ -549,14 +566,33 @@ export class AudioEngine {
   /** What the newest install request has answered, and whether it has answered at all (v1.9.22). */
   private spectrumInstall: { track: TrackRequest; serial: number; answered: boolean; ok: boolean } | null = null;
   private spectrumZeroPolls = 0;
+  /**
+   * **Frames the tap has produced for the item playing now (v1.9.24) — the per-item fact.**
+   *
+   * `NativeSpectrumFrame.frames` is the tap's own counter *since it started* (`NaviliteSpectrum`'s
+   * `frames += 1` in `analyze()`, reset by nothing: `detach()` and `unprepare()` both leave it), so
+   * it describes the app process's life rather than the track's. Reading it as "this item's tap has
+   * answered" is the defect this release fixes: from the second track onward a tap that has produced
+   * **nothing** for the new item is judged to have answered *digital silence* 12 polls in, and the
+   * chip goes to *native audio* while the attach is still in flight.
+   *
+   * This counter is that same stream of frames, **attributed to the item**: it counts only the
+   * growth observed while the plugin says the tap is on the item the player is playing
+   * (`itemIsCurrent`), it starts from zero for every start/adopt, and a read that finds the tap off
+   * this item (or with no tap at all) rewinds it — so frames produced under an ambiguity are never
+   * claimed as this item's answer. It can only ever under-count; it cannot make another item's
+   * frames look like this item's.
+   */
+  private tapFramesForItem = 0;
+  /** The raw counter at the last read that could be attributed to this item, or null to re-baseline. */
+  private tapFramesAtLastRead: number | null = null;
   private spectrumPolls = 0;
   private lastSpectrumRecheckAt = 0;
   /** The last native frame's fingerprint, and how many polls in a row have repeated it. */
   private lastNativeChecksum = -1;
   private identicalNativeFrames = 0;
-  /** Polls in a row where the tap said it was not playing, and how many re-checks that has cost. */
+  /** Polls in a row where the tap said it was not playing (v1.9.5) — re-checked, never a verdict. */
   private spectrumDeadPolls = 0;
-  private spectrumRechecks = 0;
   /** When the tap last produced a live frame (v1.9.5) — the watchdog's other half. */
   private lastLiveFrameAt = 0;
   /** Since when the clock has been sitting at the end of the item (v1.9.5), or null. */
@@ -1790,7 +1826,9 @@ export class AudioEngine {
     this.spectrumLive = false;
     this.spectrumArming = true;
     this.spectrumZeroPolls = 0;
-    this.spectrumRechecks = 0;
+    // v1.9.24 — the tap's frame count is per item: this track's tap has answered nothing yet, and
+    // the frames the *previous* item's tap produced are not this one's answer.
+    this.forgetTapFrames();
     this.orphanReattachedFor = null;
     this.positionReported = false;
     this.setNativePosition(0, false);
@@ -2251,9 +2289,18 @@ export class AudioEngine {
      * poll, whether the chip is allowed to say "native audio" about a tap it has not heard from yet.
      */
     this.spectrumZeroPolls = 0;
-    // A new track is a fresh budget for a tap that will not answer. (v1.7.7: a *budget*, not a
-    // rebuild — the tap on the previous item is left where it is and the new item gets its own.)
-    this.spectrumRechecks = 0;
+    /*
+     * v1.9.24 — **and the frames counted so far are not this item's answer.**
+     *
+     * The tap's own counter runs for the life of the app process (`NaviliteSpectrum`'s `frames += 1`
+     * is reset by nothing). Reading it as "this item's tap has answered" is what turned the chip to
+     * *native audio* 12 polls into every track after the first one — `forgetTapFrames` is that
+     * attribution, cleared here for the item that is starting (see `noteTapFrames`).
+     */
+    this.forgetTapFrames();
+    // v1.7.7's rule is kept — the tap on the previous item is left where it is and this item gets
+    // its own — but v1.9.24 removed the *budget* it was paired with: a tap that will not answer is
+    // re-asked, and a tap that has answered is judged on this item's frames alone.
     // v1.9.22 — and a fresh "has this track's tap been re-attached yet": the first orphan frame
     // this track produces is answered on the spot (see `pollSpectrum`).
     this.orphanReattachedFor = null;
@@ -2599,64 +2646,58 @@ export class AudioEngine {
     if (frame.itemIsCurrent === false) {
       this.nativeBands = null;
       this.spectrumDeadPolls = 0;
-      if (this.spectrumLive) {
-        this.spectrumLive = false;
-        this.modeReason = 'the tap is on the item the player has moved off — re-attaching it to the track that is playing';
-        this.emit();
-      }
       /*
-       * v1.9.7 — **and the chip's third word closes here too.** This branch used to return with
-       * `spectrumArming` still true and with the re-check counter untouched, so a tap that stayed on
-       * the item the player had left — a tap that never moves — left the engine saying "the spectrum
-       * is coming" for the whole track, with dead bars and no sentence anywhere. The re-checks are
-       * the budget that ends it, the same one the dead-tap branch and {@link MAX_SPECTRUM_RECHECKS}
-       * already use: once this branch has spent it, the tap has been given its chance and the chip
-       * may say *native audio*.
+       * Frames seen while the tap is off this item are not this item's answer: the next read that
+       * finds the tap back on it re-baselines instead of counting the gap (see `noteTapFrames`).
        */
+      this.forgetTapFrames();
       /*
-       * v1.9.22 — **the first orphan sighting for a track is answered at once.**
+       * **v1.9.24 — and this branch no longer spends the chip's third word.**
        *
-       * The plugin has said the tap is on an item the player has left. There are two ways to be in
-       * that state, and they need opposite answers:
+       * It used to. Three orphan sightings, one a second, and the reason line said *"the tap is on
+       * the item the player has moved off and would not re-attach"* — a capability claim made out of
+       * two momentary refusals, and half of what the owner reads as *"it defaults to native audio"*
+       * at a track change. The state is real and it is reported; the conclusion was not.
        *
-       *   - **the ordinary transition** — the tap is still on the outgoing item and the install the
-       *     new track just issued has not landed yet. Nothing is wrong, and the fix is to wait for
-       *     the request; a re-check here would double every load's requests.
-       *   - **a transition that landed while an attach was in flight** — the request the *previous*
-       *     track issued read the item it was on, waited for that item's track list (up to five
-       *     seconds in `NaviliteSpectrum.install`), and attached when the wait was over, by which
-       *     time the player was on the new item. Its `detach()` took the mix off the item that is
-       *     playing, and nothing in the plugin re-checks the request's generation or the player's
-       *     current item after that `await`.
+       * There are two ways into that state and the plugin's own `attached` separates them:
        *
-       * `spectrumInstall` is what tells them apart: an install that has *answered* for this track
-       * while the tap is on another item is the second case, and it is answered on the spot. The
-       * rate limit below stays for every repeat, which is what keeps a tap that will not stay up
-       * from being asked thirty times a second — and the chip is told the same thing
-       * (`spectrumArming`): the tap is being re-attached, which is the third word v1.9.6 gave it,
-       * rather than *native audio*.
+       *   - **no tap at all** (`attached === false`) — the request was refused (a named slot with no
+       *     loaded item is a real state for the length of a `fillSlot`, `src/player/native.ts:791`)
+       *     or has not landed yet. The remedy is another request, against *this* item.
+       *   - **the tap is on an item the player has left** (`attached === true`) — the ordinary
+       *     transition (the install the new track just issued is still in flight), or an install that
+       *     read the outgoing item before its `await` and attached to it after.
+       *
+       * Both are answered the same way: the plugin is asked again, no more often than
+       * {@link SPECTRUM_ORPHAN_RECHECK_MS} — and at once when an install for this track has already
+       * answered while the tap is elsewhere (v1.9.22) — while the chip keeps its third word.
+       * Nothing in this branch decides that this track cannot have a spectrum.
        */
+      this.spectrumLive = false;
+      // The tap is off the item that is playing, so the engine has no answer for that item and says
+      // so with the chip's third word — a request for this track is what the poll below issues.
+      this.spectrumArming = this.state === 'playing';
+      this.setSpectrumReason(
+        frame.attached !== false
+          ? 'the tap is on the item the player has moved off — re-attaching it to the track that is playing'
+          : 'nothing is attached to the item that is playing — asking the plugin to put a tap on it; the bars follow the audio',
+      );
       const trackId = this.track.id;
       const probe = this.spectrumInstall;
       const orphaned = probe !== null && probe.track === this.track && probe.answered;
       const firstSighting = orphaned && this.orphanReattachedFor !== trackId;
       if (firstSighting || this.clockNow() - this.lastSpectrumRecheckAt >= SPECTRUM_ORPHAN_RECHECK_MS) {
         this.orphanReattachedFor = trackId;
-        if (firstSighting) this.spectrumArming = this.state === 'playing';
-        this.spectrumRechecks += 1;
-        if (this.spectrumRechecks >= MAX_SPECTRUM_RECHECKS) {
-          this.spectrumRechecks = 0;
-          if (this.spectrumArming) {
-            this.spectrumArming = false;
-            this.modeReason =
-              'the tap is on the item the player has moved off and would not re-attach — the bars are on the album-art theme, and the audio is untouched';
-            this.emit();
-          }
-        }
         this.verifySpectrum();
       }
       return;
     }
+    /*
+     * The tap is on the item the player is playing, so the growth of the plugin's counter from here
+     * is **this item's** frames — the only input that may say whether this track's tap has answered
+     * (v1.9.24, see `noteTapFrames`).
+     */
+    this.noteTapFrames(frame);
     const playing = this.state === 'playing' && frame.playing;
     if (!playing) {
       /*
@@ -2670,13 +2711,20 @@ export class AudioEngine {
       }
       this.spectrumLive = false;
       /*
-       * The tap has gone quiet while the engine is playing. There is no silent copy to be torn down
-       * any more; the honest causes are a tap that was never installed on *this* item (the plugin
-       * replaced its item and the mix went with the old one) and a stream that is genuinely silent.
-       * So the tap is *verified* — one read of the plugin, which writes nothing when the item already
-       * carries this tap — rather than detached and rebuilt, which is what put an audible gap in the
-       * middle of a song. A tap that will not stay up is not re-checked for ever:
-       * {@link MAX_SPECTRUM_RECHECKS} checks, then the theme and one honest sentence.
+       * The tap has gone quiet while the engine is playing: the plugin is reporting a *player* that
+       * is not playing, on the item this app is playing. There is no silent copy to be torn down any
+       * more, so the honest causes are an item the plugin has replaced under the tap and a stream
+       * that is genuinely stopped — and both are answered by *verifying* the tap (one read of the
+       * plugin, which writes nothing at all when the item already carries it) rather than detaching
+       * and rebuilding it, which is what put an audible gap in the middle of a song.
+       *
+       * **v1.9.24 — and the budget that used to end this is gone.** Twelve polls, then the third
+       * failure, then the chip said *native audio* and the reads dropped to one every five seconds:
+       * a capability verdict made out of a clock, which is the defect this release removes. The
+       * re-checks continue for as long as the state does — rate-limited to one every
+       * {@link SPECTRUM_RECHECK_MS}, so a tap that will not stay up is still not asked thirty times a
+       * second — and the chip keeps saying the spectrum is coming, with the reason line naming what
+       * the plugin is reporting.
        */
       if (this.state !== 'playing') {
         this.spectrumDeadPolls = 0;
@@ -2685,30 +2733,9 @@ export class AudioEngine {
       this.spectrumDeadPolls += 1;
       if (this.spectrumDeadPolls < ZERO_POLLS_BEFORE_THEME) return;
       if (this.clockNow() - this.lastSpectrumRecheckAt < SPECTRUM_RECHECK_MS) return;
-      if (this.spectrumRechecks >= MAX_SPECTRUM_RECHECKS) {
-        /*
-         * **The budget slows the checks down; it does not end them (v1.9.5).**
-         *
-         * This used to call `disarmConsumers`, which clears the poll for good: the tap was given up
-         * on for the rest of the track and the bars never came back without a new one — the
-         * owner's *"just stays there"*, and the second half of the boundary failure. The poll now
-         * stays alive at {@link SPECTRUM_SLOW_POLL_MS} and the budget starts again, so a tap that
-         * comes back to life (or an item that gets replaced under a stale one) is noticed, and the
-         * bars return on their own.
-         */
-        this.spectrumDeadPolls = 0;
-        this.spectrumRechecks = 0;
-        if (this.spectrumLive) this.spectrumLive = false;
-        // v1.9.6 — the engine has given up on this item's bars, so the chip may say so: the window in
-        // which the tap was still being installed closes here, and the word is "native audio".
-        this.spectrumArming = false;
-        this.modeReason =
-          'the spectrum tap would not stay up on this stream — the bars are on the album-art theme, and the audio is untouched; the tap is still checked every few seconds and the bars come back on their own if it recovers';
-        this.slowSpectrumPoll();
-        this.emit();
-        return;
-      }
-      this.spectrumRechecks += 1;
+      this.setSpectrumReason(
+        'the plugin reports that the player it is tapping is not playing, while this app is playing this track — checking the tap again; the bars follow the audio',
+      );
       this.verifySpectrum();
       return;
     }
@@ -2719,8 +2746,6 @@ export class AudioEngine {
       // A live frame is what the watchdog waits for before it will call the end of a track by
       // itself (v1.9.5): the tap is measuring sound, so nothing here is over.
       this.lastLiveFrameAt = this.clockNow();
-      // A tap that has produced real frames has proved itself: the re-check budget starts again.
-      this.spectrumRechecks = 0;
       // And it has answered (v1.9.6): whatever the bars were doing a poll ago, this item's tap is
       // installed and reading sound, so the chip is back on "spectrum".
       this.spectrumArming = false;
@@ -2742,11 +2767,17 @@ export class AudioEngine {
        * one honest sentence (once, on the transition, not thirty times a second), and the chip stops
        * saying the spectrum is coming.
        *
-       * The exception is the tap that has produced *nothing at all* (`frames === 0`): that one has not
-       * answered, it is still being installed, and it keeps the chip's third word rather than being
-       * written off — which is exactly the boundary this release is about.
+       * **v1.9.24 — and "frames from a tap on the item the player is playing" is now what `answered`
+       * means.** It was `frame.frames > 0`, and that counter belongs to the app *process*
+       * (`NaviliteSpectrum.swift:605`, reset by nothing), so on every track after the first one that
+       * ever produced a frame this branch said *"the native tap is reading digital silence"* about a
+       * tap that had produced **nothing** for the item playing — 12 polls, ~0.4 s, in, while the
+       * attach was still in flight. That is the owner's *"it defaults to native audio"*, and it was
+       * chosen *because* the attach had not landed yet. `tapFramesForItem` counts this item's frames
+       * only (see `noteTapFrames`), so a tap that has answered nothing for this track keeps the chip's
+       * third word and the attach is allowed to arrive.
        */
-      const answered = frame.frames > 0;
+      const answered = this.tapFramesForItem > 0;
       if (this.spectrumZeroPolls >= ZERO_POLLS_BEFORE_THEME && (this.spectrumLive || (this.spectrumArming && answered))) {
         this.spectrumLive = false;
         this.spectrumArming = false;
@@ -2794,18 +2825,56 @@ export class AudioEngine {
   }
 
   /**
-   * Put the tap's re-checks on a slow clock rather than stopping them (v1.9.5).
+   * Count the tap's frames **for the item playing now** (v1.9.24).
    *
-   * The poll keeps running — a tap that recovers puts the bars back without a pause, a resume or a
-   * new track — but each poll now costs one read every {@link SPECTRUM_SLOW_POLL_MS} instead of
-   * thirty a second, because a tap that will not stay up must not be asked thirty times a second
-   * for the length of a track.
+   * `NativeSpectrumFrame.frames` is the tap's own counter *since it started* — `NaviliteSpectrum`'s
+   * `frames += 1` in `analyze()` — and nothing resets it, so it describes the life of the app process
+   * rather than the track. The engine's rule for whether this track's tap has *answered* needs a fact
+   * about the item, and this is it: the counter's growth while the plugin says the tap is on the item
+   * the player is playing.
+   *
+   * Two deliberate properties, because the alternative is another false verdict:
+   *
+   *   - **the first attributable read is a baseline, not a count.** Frames produced between the tap
+   *     landing and that read cannot be told apart from the previous item's, so they are not claimed;
+   *   - **a gap is not counted.** A read that finds the tap off this item (or with none at all)
+   *     rewinds the baseline (`forgetTapFrames`), so frames belonging to an ambiguity are dropped
+   *     rather than attributed. The count can therefore only *under*-count — which delays the honest
+   *     sentence by at most one poll, and can never state another item's frames as this one's.
+   *
+   * It is never reset by a clock: only by a new item, or by the tap leaving this one.
    */
-  private slowSpectrumPoll(): void {
-    if (this.spectrumPoll === null) return;
-    clearInterval(this.spectrumPoll);
-    this.spectrumPoll = setInterval(() => void this.pollSpectrum(), SPECTRUM_SLOW_POLL_MS);
-    this.lastSpectrumRecheckAt = this.clockNow();
+  private noteTapFrames(frame: NativeSpectrumFrame): void {
+    if (this.tapFramesAtLastRead === null) {
+      this.tapFramesAtLastRead = frame.frames;
+      return;
+    }
+    this.tapFramesForItem += Math.max(0, frame.frames - this.tapFramesAtLastRead);
+    this.tapFramesAtLastRead = frame.frames;
+  }
+
+  /**
+   * Forget the frames seen so far: a new item is starting, or the tap is no longer on this one.
+   *
+   * Called at every start and adoption (the item is new) and from the orphan branch of
+   * {@link pollSpectrum} (the tap is somewhere else, so the growth in between describes neither item).
+   */
+  private forgetTapFrames(): void {
+    this.tapFramesForItem = 0;
+    this.tapFramesAtLastRead = null;
+  }
+
+  /**
+   * Say why the bars are what they are, once per distinct sentence (v1.9.24).
+   *
+   * The poll runs at {@link SPECTRUM_POLL_MS}, and several of the states it reports persist for the
+   * length of a transition or a track — so a sentence written straight from the poll would repaint
+   * the screen thirty times a second with the same words. Same output, one write.
+   */
+  private setSpectrumReason(reason: string): void {
+    if (this.modeReason === reason) return;
+    this.modeReason = reason;
+    this.emit();
   }
 
   /**
@@ -2870,6 +2939,16 @@ export class AudioEngine {
    * request, on the track the listener is hearing; the serial is what keeps the answer with the
    * request that owns it. The newest request's own answer is kept on {@link spectrumInstall}, where
    * {@link confirmSpectrum} reads it.
+   *
+   * v1.9.24 — **and a `false` is no longer a verdict.** It used to clear `spectrumArming` and start a
+   * 5 s timer (`retrySpectrumOnce`), i.e. it stated *native audio* about a track, out of one answered
+   * request, and then asked again on a clock. Both halves are the defect this release removes: the
+   * ways the plugin refuses are transient by construction — a named slot with no loaded item is a
+   * real state for the length of a `fillSlot` (`src/player/native.ts:791`), and a request a newer one
+   * overtook says nothing about this track at all — so the answer is reported on the reason line and
+   * the *poll* does the asking: a tap that is not on this item is an orphan sighting, and the orphan
+   * branch of {@link pollSpectrum} re-verifies on the plugin's own evidence, rate-limited, for as long
+   * as the state lasts. Nothing here decides that this track cannot have a spectrum.
    */
   private attachSpectrum(track: TrackRequest): void {
     const bridge = this.native;
@@ -2882,19 +2961,17 @@ export class AudioEngine {
         if (!this.settleSpectrumInstall(serial, started === true)) return;
         if (this.track !== track || this.backend !== 'native') return;
         if (started) return;
-        this.spectrumArming = false;
-        this.modeReason = 'the native spectrum tap did not start, so the bars are on the album-art theme';
-        this.emit();
-        this.retrySpectrumOnce(track, 'the install answered that it did not start');
+        this.setSpectrumReason(
+          'the plugin has no tap on the item that is playing yet — it answered that this request did not start, so the engine keeps asking while the bars follow the audio',
+        );
       })
       .catch((error: unknown) => {
         if (!this.settleSpectrumInstall(serial, false)) return;
         if (this.track !== track) return;
         this.spectrumLive = false;
-        this.spectrumArming = false;
-        this.modeReason = `the native spectrum tap failed (${error instanceof Error ? error.message : String(error)})`;
-        this.emit();
-        this.retrySpectrumOnce(track, 'the install rejected');
+        this.setSpectrumReason(
+          `the plugin did not put a tap on the item that is playing (${error instanceof Error ? error.message : String(error)}) — the engine keeps asking while the bars follow the audio`,
+        );
       });
   }
 
@@ -2934,29 +3011,15 @@ export class AudioEngine {
   }
 
   /**
-   * One retry for an install that did not take (v1.9.5).
+   * One retry for an install that did not take is **deleted** (v1.9.24).
    *
-   * The install for a load or an adoption is a single fire-and-forget promise, and until this
-   * release nothing asked again: an answer of `false`, or a rejection, meant the bars stayed on the
-   * album-art theme for the whole track with one sentence in `modeReason` that no screen showed.
-   * The recheck budget in `pollSpectrum` only reaches a tap that is *polling*, and an orphaned tap
-   * (`itemIsCurrent: false`) is the one case that reports anything at all, so a tap that never got
-   * attached had no retry anywhere. One check, {@link SPECTRUM_RECHECK_MS} later, on the item that
-   * is still the current one — a read unless the plugin has genuinely replaced it, so it cannot
-   * make a sound.
+   * It was a `setTimeout` of {@link SPECTRUM_RECHECK_MS} per failed install, and it existed because
+   * the recheck budget in `pollSpectrum` only reached a tap that was *polling* while an orphaned tap
+   * was the one case that reported anything. The retry is the poll's now, on the plugin's own
+   * evidence: an item with no tap on it reads `itemIsCurrent: false`, the orphan branch of
+   * {@link pollSpectrum} sees it and re-verifies, rate-limited — which is the same ask, keyed to the
+   * item rather than to a timer, and it is the shape §24.6.2 of the diagnosis requires.
    */
-  private retrySpectrumOnce(track: TrackRequest, why: string): void {
-    const timer = setTimeout(() => {
-      if (this.track !== track || this.backend !== 'native' || this.state !== 'playing') return;
-      // v1.9.6 — the tap has already answered once (it did not start), so the chip is not left
-      // waiting for it while the check is queued: the engine says the bars are on the theme, and the
-      // retry only ever moves them back if it works.
-      this.spectrumArming = false;
-      this.modeReason = `the native spectrum tap did not start (${why}) — checked again a few seconds later`;
-      this.verifySpectrum();
-    }, SPECTRUM_RECHECK_MS);
-    if (typeof timer === 'object' && typeof timer.unref === 'function') timer.unref();
-  }
 
   /**
    * Line the tap up with the position the audible player reports.
