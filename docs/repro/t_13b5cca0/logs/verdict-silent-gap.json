@@ -1,0 +1,140 @@
+{
+  "fixture": "silent-gap",
+  "fixtureStructure": [
+    {
+      "name": "loud opening chord",
+      "from": 0,
+      "to": 5,
+      "kind": "chord"
+    },
+    {
+      "name": "quiet but NONZERO (control)",
+      "from": 5,
+      "to": 9,
+      "kind": "chirp"
+    },
+    {
+      "name": "TRUE DIGITAL SILENCE",
+      "from": 9,
+      "to": 14,
+      "kind": "zero"
+    },
+    {
+      "name": "loud closing chord",
+      "from": 14,
+      "to": 22,
+      "kind": "chord"
+    }
+  ],
+  "fixtureFile": "/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/fixture-silent-gap.wav",
+  "fixtureSeconds": 22,
+  "fixtureZeroSamples": 220500,
+  "fixtureZeroSeconds": 5,
+  "chrome": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/155.0.8059.84",
+    "revision": "@5869fe313571d75152b77813cf0a4ee26a4e6df0",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "jsVersion": "15.5.35.25"
+  },
+  "chromePath": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "chromeArgs": [
+    "--headless=new",
+    "--mute-audio",
+    "--remote-debugging-port=0",
+    "--user-data-dir=/var/folders/g9/9qypb1yx20n84zkxn3pj6h800000gn/T/navilite-silent-probe-7I0XXl",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-gpu",
+    "--hide-scrollbars",
+    "--autoplay-policy=no-user-gesture-required",
+    "about:blank"
+  ],
+  "reads": 219,
+  "meterIntervalMs": 100,
+  "zeroFramesBeforeTheme": 18,
+  "firstAllZeroReadMs": 9102,
+  "firstAllZeroPositionMs": 9053,
+  "lastAllZeroReadMs": 14003,
+  "lastAllZeroPositionMs": 13955,
+  "allZeroReadsInLongestRun": 50,
+  "allZeroReadsWithZeroPcm": 49,
+  "allZeroStretchMs": 4901,
+  "allZeroStretchSecondsOfItem": 4.902,
+  "analyserAtFirstAllZeroRead": {
+    "bins": 1024,
+    "maxByte": 0,
+    "sumBytes": 0,
+    "nonzeroBins": 0,
+    "rmsByte": 0,
+    "fftSize": 2048,
+    "smoothingTimeConstant": 0,
+    "minDecibels": -95,
+    "maxDecibels": -30,
+    "contextState": "running",
+    "contextSampleRate": 48000
+  },
+  "elementAtFirstAllZeroRead": {
+    "currentTime": 9.05288,
+    "duration": 22,
+    "paused": false,
+    "ended": false,
+    "volume": 1,
+    "muted": false,
+    "readyState": 4,
+    "src": "/rest/stream.view?u=navidrome&t=10fc123937172a8d570106f66bd40455&s=a4a0efc1913d547a&v=1.16.1&c=Navilite&f=json&id=album-ja-1-track-1"
+  },
+  "fileAtFirstAllZeroRead": {
+    "segment": "TRUE DIGITAL SILENCE",
+    "kind": "zero",
+    "pcmPeak": 0,
+    "pcmRms": 0,
+    "pcmNonzeroSamples": 0,
+    "pcmAllZero": true,
+    "windowSamples": 2048
+  },
+  "themeAtMs": 10903,
+  "themeAtPositionMs": 10855,
+  "themeReason": "the analyser returned silence — a tainted cross-origin stream gives zeroes with no error",
+  "leftThemeAtMs": 14202,
+  "wordTransitions": [
+    {
+      "word": "spectrum…",
+      "chip": "loading…",
+      "at": 4,
+      "positionMs": 0,
+      "state": "playing",
+      "tone": "arming",
+      "reason": "nothing playing yet"
+    },
+    {
+      "word": "spectrum",
+      "chip": "spectrum",
+      "at": 202,
+      "positionMs": 154,
+      "state": "playing",
+      "tone": "live",
+      "reason": "real spectrum — AnalyserNode reading the decoded stream as it plays"
+    },
+    {
+      "word": "theme",
+      "chip": "theme",
+      "at": 10903,
+      "positionMs": 10855,
+      "state": "playing",
+      "tone": "fallback",
+      "reason": "the analyser returned silence — a tainted cross-origin stream gives zeroes with no error"
+    },
+    {
+      "word": "spectrum",
+      "chip": "spectrum",
+      "at": 14202,
+      "positionMs": 14153,
+      "state": "playing",
+      "tone": "live",
+      "reason": "real spectrum — AnalyserNode reading the decoded stream as it plays"
+    }
+  ],
+  "logPath": "/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-silent-gap.log",
+  "jsonlPath": "/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-silent-gap.jsonl"
+}

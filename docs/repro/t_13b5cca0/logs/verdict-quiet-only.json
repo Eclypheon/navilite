@@ -1,0 +1,110 @@
+{
+  "fixture": "quiet-only",
+  "fixtureStructure": [
+    {
+      "name": "loud opening chord",
+      "from": 0,
+      "to": 5,
+      "kind": "chord"
+    },
+    {
+      "name": "quiet but NONZERO (control)",
+      "from": 5,
+      "to": 22,
+      "kind": "chirp"
+    }
+  ],
+  "fixtureFile": "/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/fixture-quiet-only.wav",
+  "fixtureSeconds": 22,
+  "fixtureZeroSamples": 0,
+  "fixtureZeroSeconds": 0,
+  "chrome": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/155.0.8059.84",
+    "revision": "@5869fe313571d75152b77813cf0a4ee26a4e6df0",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+    "jsVersion": "15.5.35.25"
+  },
+  "chromePath": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "chromeArgs": [
+    "--headless=new",
+    "--mute-audio",
+    "--remote-debugging-port=0",
+    "--user-data-dir=/var/folders/g9/9qypb1yx20n84zkxn3pj6h800000gn/T/navilite-silent-probe-BP5BA1",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-gpu",
+    "--hide-scrollbars",
+    "--autoplay-policy=no-user-gesture-required",
+    "about:blank"
+  ],
+  "reads": 219,
+  "meterIntervalMs": 100,
+  "zeroFramesBeforeTheme": 18,
+  "firstAllZeroReadMs": 3,
+  "firstAllZeroPositionMs": 0,
+  "lastAllZeroReadMs": 3,
+  "lastAllZeroPositionMs": 0,
+  "allZeroReadsInLongestRun": 1,
+  "allZeroReadsWithZeroPcm": 0,
+  "allZeroStretchMs": 0,
+  "allZeroStretchSecondsOfItem": 0,
+  "analyserAtFirstAllZeroRead": {
+    "bins": 1024,
+    "maxByte": 0,
+    "sumBytes": 0,
+    "nonzeroBins": 0,
+    "rmsByte": 0,
+    "fftSize": 2048,
+    "smoothingTimeConstant": 0,
+    "minDecibels": -95,
+    "maxDecibels": -30,
+    "contextState": "running",
+    "contextSampleRate": 48000
+  },
+  "elementAtFirstAllZeroRead": {
+    "currentTime": 0,
+    "duration": null,
+    "paused": false,
+    "ended": false,
+    "volume": 1,
+    "muted": false,
+    "readyState": 0,
+    "src": "/rest/stream.view?u=navidrome&t=58c1c7a16b5034bcaa2fce9933b7b38f&s=74c6dfa660e0b541&v=1.16.1&c=Navilite&f=json&id=album-ja-1-track-1"
+  },
+  "fileAtFirstAllZeroRead": {
+    "segment": "loud opening chord",
+    "kind": "chord",
+    "pcmPeak": 16520,
+    "pcmRms": 7410.3,
+    "pcmNonzeroSamples": 2046,
+    "pcmAllZero": false,
+    "windowSamples": 2048
+  },
+  "themeAtMs": null,
+  "themeAtPositionMs": null,
+  "themeReason": null,
+  "leftThemeAtMs": null,
+  "wordTransitions": [
+    {
+      "word": "spectrum…",
+      "chip": "loading…",
+      "at": 3,
+      "positionMs": 0,
+      "state": "playing",
+      "tone": "arming",
+      "reason": "nothing playing yet"
+    },
+    {
+      "word": "spectrum",
+      "chip": "spectrum",
+      "at": 202,
+      "positionMs": 163,
+      "state": "playing",
+      "tone": "live",
+      "reason": "real spectrum — AnalyserNode reading the decoded stream as it plays"
+    }
+  ],
+  "logPath": "/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-quiet-only.log",
+  "jsonlPath": "/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-quiet-only.jsonl"
+}

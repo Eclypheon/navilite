@@ -1,0 +1,159 @@
+# Cold repro — the web path's capability word `theme` from 1.8 s of all-zero frames
+
+Kanban card `t_13b5cca0` (child of `t_8b46c884`). **No product code was changed by this card**
+(`git status`: the only new path is `docs/repro/`). This is evidence, not a fix.
+
+## The claim this reproduces
+
+On the **web** path the chip's capability word `theme` is reachable from
+`ZERO_FRAMES_BEFORE_THEME` (= **18**, `src/player/engine.ts:510`) analyser frames of silence at the
+meter's own cadence (`METER_INTERVAL_MS` = **100**, `src/player/engine.ts:637`) — i.e. from
+**1.8 s of all-zero analyser frames while the transport is playing**, with no distinction between
+*"this build/item cannot be measured"* and *"this item's samples are real and this passage of them is
+genuinely silent"*.
+
+## Repro — cold, in order
+
+```bash
+cd /Users/neokester/Projects/navilite
+git rev-parse HEAD                 # 9271ab0e7a66dfcc97fd49c1e88d998c6da8abd6  (= b40ec02 + docs only)
+npm run build                      # tsc --noEmit && vite build  → dist/, BUILD_ID stamped 9271ab0
+grep "BUILD_ID = " dist/sw.js      # const BUILD_ID = '9271ab0';
+node docs/repro/t_13b5cca0/silent-passage-probe.mjs --fixture silent-gap    # the subject
+node docs/repro/t_13b5cca0/silent-passage-probe.mjs --fixture quiet-only    # the control
+```
+
+The harness prints its trace and writes `logs/trace-<fixture>.log`, `logs/trace-<fixture>.jsonl`
+(every read, one JSON object per line), `logs/verdict-<fixture>.json` and the served fixture
+`logs/fixture-<fixture>.wav`. `--fixture-only` renders the fixture and exits without a browser.
+
+What it does: renders a 22 s WAV, starts the repo's own mock library (`tools/mock-subsonic.mjs`,
+`--stress`, `--dist dist`), fronts it on one origin (the app *and* the API, so the stream is
+same-origin and the analyser is untainted), answers `/rest/stream.view` with the fixture, drives the
+app in Chrome, plays `album-ja-1-track-1` through the app's own controls, and reads once per 100 ms
+until the item ends.
+
+### Versions and the exact browser invocation
+
+| | |
+| --- | --- |
+| commit under test | `9271ab0e7a66dfcc97fd49c1e88d998c6da8abd6` (`9271ab0`) |
+| shipped-code delta vs the release commit | none — `git log b40ec02..HEAD -- src public index.html vite.config.ts capacitor.config.ts ios/App/App package.json` is empty |
+| build | `npm run build` → `tsc --noEmit && vite build` (vite 8.3.4), `dist/sw.js` stamped `BUILD_ID = '9271ab0'` |
+| dist hashes | `docs/repro/t_13b5cca0/logs/build-info.txt` |
+| browser | `Chrome/155.0.8059.84` (`@5869fe313571d75152b77813cf0a4ee26a4e6df0`), `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`, headless |
+| node | v26.11.1 · macOS 15.7.4 (24G517) |
+| chrome argv | `--headless=new --mute-audio --remote-debugging-port=0 --user-data-dir=<tmp> --no-first-run --no-default-browser-check --disable-gpu --hide-scrollbars --autoplay-policy=no-user-gesture-required about:blank` |
+
+### The repro is silent (standing rule)
+
+Chrome is launched **`--headless=new --mute-audio`**, no window, and the whole run is ~40 s. Muting
+is at the output mixer, so it does not touch the graph or the data: the run proves that by keeping the
+element **playing** (not paused) with the context `running` and the analyser reading real frames
+before and after the passage (*"the transport at that read: state playing, element paused false,
+position 9.053 s, context running"*). No device, no simulator, no audible output. The flag is
+recorded in each `verdict-*.json` rather than asserted in prose.
+
+## The subject run (`--fixture silent-gap`)
+
+The fixture is a song with an honest silent passage — the zeros are the file's own PCM, not a muted
+element:
+
+```
+0–5 s   loud opening chord (the mock's own chord shape, tools/audio.mjs)
+5–9 s   quiet but NONZERO — a single partial sweeping 180→620 Hz at 0.02 amplitude (~-34 dBFS)
+9–14 s  TRUE DIGITAL SILENCE — 220,500 samples that are exactly 0 (5.000 s)
+14–22 s loud closing chord
+```
+
+The word, as the engine and the chip wore it (from `logs/trace-silent-gap.log`):
+
+```
++     5 ms  word "spectrum…"  chip "loading…"   (the arming window: playing, analyser has no frame yet)
++   202 ms  word "spectrum"   chip "spectrum"   real spectrum — AnalyserNode reading the decoded stream as it plays
++ 10903 ms  word "theme"      chip "theme"      tone fallback
+              reason: the analyser returned silence — a tainted cross-origin stream gives zeroes with no error
++ 14202 ms  word "spectrum"   chip "spectrum"   (real samples resumed)
+```
+
+The measured all-zero stretch and the flip (from `logs/verdict-silent-gap.json`):
+
+- longest unbroken run of all-zero analyser reads: **50 reads, +9102 ms → +14003 ms (4901 ms)**;
+- playback position at its ends: **9053 ms → 13955 ms = 4.902 s of the playing item**;
+- 49 of those 50 reads had the file's own 2048-sample window **exactly zero** (the 50th straddles the
+  boundary); the fixture's PCM at the run's first read: peak 0, RMS 0, 0 of 2048 samples nonzero;
+- the analyser's own bytes at that read: **maxByte 0, nonzeroBins 0 of 1024, RMS 0.0**;
+- the transport at that read: **playing**, element `paused: false`, `currentTime 9.053 s`,
+  `volume 1`, `muted false`, context `running` (48 kHz);
+- the word reached `theme` at **+10903 ms — 1801 ms after the first all-zero read**, i.e. 18 meter
+  frames × 100 ms = the 1800 ms `ZERO_FRAMES_BEFORE_THEME` names;
+- and it left `theme` at **+14202 ms**, on the first read after real samples came back
+  (`analyser maxByte 255`), with the same element and the same graph.
+
+While the word read `theme`, the **engine's own reason line** was
+*"the analyser returned silence — a tainted cross-origin stream gives zeroes with no error"* — the
+capability claim, made about an item whose samples the same browser had measured at 255 a moment
+before and measured again at 255 a moment later.
+
+## The control run (`--fixture quiet-only`)
+
+Same harness, same app, same cadence, same time window; the fixture has **0 samples that are exactly
+0** (the quiet passage runs 5 → 22 s). Across 9.06–13.9 s — the exact seconds in which the subject run
+read `theme` — every read had `maxByte` 181–186, `nonzeroBins` 5–6, and the word stayed `spectrum`:
+
+```
+    92    9100   9.06  quiet but NONZERO (control)   655     182      6   10.4  spectrum  spectrum  playing  true  false running
+    ...
+    (through 13.9 s and on to the end of the item)
+```
+
+Word sequence for the whole control run: `spectrum…` (the first two reads, no frame yet) → `spectrum`
+for the remaining 217 reads. `"theme"` never appears (`themeAtMs: null` in
+`logs/verdict-quiet-only.json`).
+
+Read together, the two runs separate the three things that a single trace could confuse:
+
+| | the subject run | the control run |
+| --- | --- | --- |
+| quiet but nonzero passage | `spectrum` (maxByte 181–186) | `spectrum` (maxByte 181–186) |
+| ≥1.8 s of true zero frames | **`theme`** at 1801 ms into it | not present |
+| no frame yet (first ~150 ms of the item) | `spectrum…`, chip `loading…` | `spectrum…`, chip `loading…` |
+| after real samples resume | `spectrum` again | — |
+
+So the word is not "capability dead", and it is not a dead read trace: it is driven by the samples —
+and an honest silence spends the capability word.
+
+## Files (all paths absolute, in the repo; sha256 recorded in `build-info.txt`)
+
+| path | what |
+| --- | --- |
+| `/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/silent-passage-probe.mjs` | the harness (evidence tooling; nothing shipped imports it) |
+| `/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-silent-gap.log` | the subject trace, human-readable (219 reads + the word sequence + the measured stretch) |
+| `/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-silent-gap.jsonl` | the same reads, raw, one JSON object per read |
+| `/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/verdict-silent-gap.json` | the subject run's summary: word transitions, the zero stretch, versions, chrome argv |
+| `/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-quiet-only.log` + `.jsonl` + `verdict-quiet-only.json` | the control run, same three files |
+| `/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/stdout-<fixture>.txt` | the harness's own stdout for each run |
+| `/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/fixture-<fixture>.wav` | the audio actually served (listen to it: the middle 5 s of `silent-gap` is digital silence) |
+| `/Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/build-info.txt` | commit, build command, every dist hash, versions, log hashes |
+
+Every read in the JSONL carries: wall ms and in-page `performance.now()`, playback position, the
+engine's `word`/`tone`/`state`/`backend`/`spectrum`/`spectrumArming`/`modeReason`, the chip's text,
+the element's `currentTime`/`duration`/`paused`/`ended`/`volume`/`muted`/`readyState`/src, the live
+analyser's `maxByte`/`sumBytes`/`nonzeroBins`/`rmsByte`/`fftSize`/`minDecibels`/`maxDecibels`/
+`contextState`, and the fixture's PCM at that position (`pcmPeak`/`pcmRms`/`pcmNonzeroSamples`/
+`pcmAllZero`/segment).
+
+## What this card does NOT claim
+
+- **The fix.** Nothing was changed; the word still goes amber on an honest silence at this commit.
+- **The device.** This is the web path in Chrome on this Mac. Not his installed IPA, not a simulator,
+  no native path — the native half is `t_c8cc01c6` (in v1.9.27) and is not touched here.
+- **Real-world songs.** The fixture is synthetic (the mock's own chord shape + a sweeping quiet
+  partial + a true-zero passage); a real song's silent passage decodes to the same zeros — that is
+  the mechanism, but no real track was played.
+- **The cross-origin/tainted case.** Deliberately not exercised: a stream the browser will not hand
+  over is the one case where `theme` is *true*, and it is already covered by
+  `test/chip-word-browser.test.ts`'s second run.
+- **Audibility of anything.** The harness cannot read the OS mixer; it records the `--mute-audio`
+  launch instead, and every read in the same run shows the element playing with the context running,
+  so the evidence is unaffected by the mute.

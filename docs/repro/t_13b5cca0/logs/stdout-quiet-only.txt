@@ -1,0 +1,252 @@
+# Cold repro — the web path's capability word from 1.8 s of all-zero frames
+fixture: quiet-only   ["0-5s loud opening chord","5-22s quiet but NONZERO (control)"]
+fixture file: /Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/fixture-quiet-only.wav
+fixture: 22 s, 970200 frames/channel, 0 samples that are exactly 0 (0.000 s of true digital silence)
+chrome: Chrome/155.0.8059.84 (@5869fe313571d75152b77813cf0a4ee26a4e6df0) — /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+chrome argv: --headless=new --mute-audio --remote-debugging-port=0 --user-data-dir=/var/folders/g9/9qypb1yx20n84zkxn3pj6h800000gn/T/navilite-silent-probe-BP5BA1 --no-first-run --no-default-browser-check --disable-gpu --hide-scrollbars --autoplay-policy=no-user-gesture-required about:blank
+app: dist/ built from the working tree; served by the mock through the front at http://127.0.0.1:51367
+
+reads: 219 at ~100 ms
+
+## the word, as the engine and the chip wore it
+  +     3 ms  pos  0.00 s  word "spectrum…"  chip "loading…"  tone arming  state playing
+            reason: nothing playing yet
+  +   202 ms  pos  0.16 s  word "spectrum"  chip "spectrum"  tone live  state playing
+            reason: real spectrum — AnalyserNode reading the decoded stream as it plays
+
+## the all-zero stretch the harness measured on the live analyser
+  longest unbroken run of all-zero reads:      1 reads, +3 ms → +3 ms (0 ms)
+  playback position at its ends:               0 ms → 0 ms (0.000 s of playing item)
+  reads inside it whose file window is exactly zero: 0 of 1 (segment: loud opening chord)
+  the file's own PCM at the run's start read:  peak 16520, RMS 7410.3, 2046 of 2048 samples nonzero
+  the analyser's own bytes at that read:       maxByte 0, nonzeroBins 0 of 1024, RMS 0.0
+  the transport at that read:                  state playing, element paused false, position 0.000 s, context running, meter cadence 100 ms × ZERO_FRAMES_BEFORE_THEME 18 = 1800 ms
+
+  the word never reached "theme" in this run
+
+## the trace (one line per read)
+    #   +ms   pos(s)  segment                          filePCM   maxByte  nzBins  rms    word       chip       state    spectrum  arm  ctx
+     1       3   0.00  loud opening chord                16520       0      0    0.0  spectrum…  loading…   playing  false    true  running
+     2     101   0.06  loud opening chord                18702     255     28   27.4  spectrum…  spectrum…  playing  false    true  running
+     3     202   0.16  loud opening chord                19282     255     31   28.0  spectrum   spectrum   playing  true     false running
+     4     303   0.26  loud opening chord                15627     255     28   27.5  spectrum   spectrum   playing  true     false running
+     5     404   0.36  loud opening chord                 9935     251     24   26.0  spectrum   spectrum   playing  true     false running
+     6     503   0.47  loud opening chord                 9907     241     25   24.8  spectrum   spectrum   playing  true     false running
+     7     603   0.56  loud opening chord                15079     251     26   26.0  spectrum   spectrum   playing  true     false running
+     8     703   0.67  loud opening chord                19138     255     28   27.5  spectrum   spectrum   playing  true     false running
+     9     803   0.77  loud opening chord                18944     255     29   27.9  spectrum   spectrum   playing  true     false running
+    10     902   0.86  loud opening chord                15067     255     28   27.5  spectrum   spectrum   playing  true     false running
+    11    1001   0.96  loud opening chord                 9836     250     26   25.9  spectrum   spectrum   playing  true     false running
+    12    1103   1.06  loud opening chord                10322     242     23   24.8  spectrum   spectrum   playing  true     false running
+    13    1203   1.16  loud opening chord                15733     253     26   26.3  spectrum   spectrum   playing  true     false running
+    14    1303   1.26  loud opening chord                19281     255     28   27.7  spectrum   spectrum   playing  true     false running
+    15    1403   1.36  loud opening chord                18890     255     31   28.0  spectrum   spectrum   playing  true     false running
+    16    1503   1.46  loud opening chord                14292     255     28   27.3  spectrum   spectrum   playing  true     false running
+    17    1601   1.56  loud opening chord                 9425     248     24   25.7  spectrum   spectrum   playing  true     false running
+    18    1702   1.66  loud opening chord                10519     242     24   24.9  spectrum   spectrum   playing  true     false running
+    19    1802   1.76  loud opening chord                16360     254     27   26.5  spectrum   spectrum   playing  true     false running
+    20    1902   1.86  loud opening chord                19350     255     29   27.7  spectrum   spectrum   playing  true     false running
+    21    2001   1.96  loud opening chord                18575     255     29   27.9  spectrum   spectrum   playing  true     false running
+    22    2102   2.06  loud opening chord                13713     255     28   27.2  spectrum   spectrum   playing  true     false running
+    23    2203   2.16  loud opening chord                 9084     246     26   25.5  spectrum   spectrum   playing  true     false running
+    24    2303   2.26  loud opening chord                11526     243     25   25.0  spectrum   spectrum   playing  true     false running
+    25    2401   2.36  loud opening chord                16586     255     26   26.7  spectrum   spectrum   playing  true     false running
+    26    2503   2.46  loud opening chord                19345     255     30   27.8  spectrum   spectrum   playing  true     false running
+    27    2602   2.56  loud opening chord                18127     255     30   27.9  spectrum   spectrum   playing  true     false running
+    28    2702   2.66  loud opening chord                12935     255     27   27.0  spectrum   spectrum   playing  true     false running
+    29    2801   2.76  loud opening chord                 8789     245     23   25.2  spectrum   spectrum   playing  true     false running
+    30    2901   2.86  loud opening chord                12062     244     24   25.1  spectrum   spectrum   playing  true     false running
+    31    3004   2.96  loud opening chord                17489     255     28   26.9  spectrum   spectrum   playing  true     false running
+    32    3104   3.06  loud opening chord                19352     255     30   27.8  spectrum   spectrum   playing  true     false running
+    33    3202   3.16  loud opening chord                17732     255     29   27.8  spectrum   spectrum   playing  true     false running
+    34    3301   3.26  loud opening chord                12374     255     28   26.9  spectrum   spectrum   playing  true     false running
+    35    3403   3.36  loud opening chord                 8636     244     26   25.1  spectrum   spectrum   playing  true     false running
+    36    3503   3.46  loud opening chord                12714     245     25   25.3  spectrum   spectrum   playing  true     false running
+    37    3603   3.56  loud opening chord                17974     255     27   27.0  spectrum   spectrum   playing  true     false running
+    38    3700   3.66  loud opening chord                19363     255     29   27.9  spectrum   spectrum   playing  true     false running
+    39    3802   3.76  loud opening chord                17217     255     30   27.8  spectrum   spectrum   playing  true     false running
+    40    3902   3.86  loud opening chord                11736     255     26   26.6  spectrum   spectrum   playing  true     false running
+    41    4003   3.96  loud opening chord                 8946     242     22   24.9  spectrum   spectrum   playing  true     false running
+    42    4103   4.06  loud opening chord                13481     247     26   25.5  spectrum   spectrum   playing  true     false running
+    43    4202   4.16  loud opening chord                18395     255     28   27.2  spectrum   spectrum   playing  true     false running
+    44    4302   4.26  loud opening chord                19367     255     30   27.9  spectrum   spectrum   playing  true     false running
+    45    4403   4.36  loud opening chord                16563     255     28   27.7  spectrum   spectrum   playing  true     false running
+    46    4503   4.46  loud opening chord                11045     254     27   26.4  spectrum   spectrum   playing  true     false running
+    47    4602   4.56  loud opening chord                 9251     242     25   24.9  spectrum   spectrum   playing  true     false running
+    48    4702   4.66  loud opening chord                14155     248     26   25.7  spectrum   spectrum   playing  true     false running
+    49    4802   4.76  loud opening chord                18776     255     27   27.3  spectrum   spectrum   playing  true     false running
+    50    4903   4.87  loud opening chord                19241     255     30   28.0  spectrum   spectrum   playing  true     false running
+    51    5003   4.96  loud opening chord                15947     255     28   27.7  spectrum   spectrum   playing  true     false running
+    52    5102   5.06  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    53    5203   5.16  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    54    5303   5.26  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    55    5402   5.36  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    56    5502   5.46  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+    57    5602   5.56  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+    58    5702   5.66  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    59    5802   5.76  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    60    5903   5.86  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    61    6001   5.96  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+    62    6102   6.06  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+    63    6203   6.16  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+    64    6302   6.26  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    65    6403   6.36  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    66    6503   6.46  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    67    6601   6.56  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+    68    6702   6.66  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+    69    6802   6.76  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+    70    6903   6.87  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    71    7002   6.96  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    72    7100   7.06  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    73    7203   7.17  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+    74    7303   7.26  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+    75    7403   7.36  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+    76    7502   7.46  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    77    7603   7.56  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    78    7703   7.66  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    79    7803   7.76  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+    80    7902   7.86  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+    81    8002   7.96  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+    82    8101   8.06  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    83    8203   8.16  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    84    8303   8.26  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    85    8403   8.36  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+    86    8503   8.46  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+    87    8603   8.56  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+    88    8701   8.66  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    89    8803   8.76  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    90    8903   8.87  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    91    9004   8.96  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+    92    9100   9.06  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+    93    9201   9.16  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    94    9303   9.26  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    95    9402   9.36  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+    96    9503   9.46  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+    97    9602   9.56  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+    98    9703   9.66  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+    99    9801   9.76  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   100    9902   9.86  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   101   10003   9.96  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   102   10103  10.06  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   103   10203  10.16  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   104   10303  10.26  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   105   10403  10.36  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   106   10503  10.46  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   107   10601  10.56  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   108   10703  10.66  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   109   10801  10.76  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   110   10903  10.87  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   111   11003  10.96  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   112   11103  11.06  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   113   11202  11.16  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   114   11302  11.26  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   115   11402  11.36  quiet but NONZERO (control)         655     181      6   10.4  spectrum   spectrum   playing  true     false running
+   116   11503  11.46  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   117   11602  11.56  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   118   11702  11.66  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   119   11802  11.76  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   120   11903  11.86  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   121   12002  11.96  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   122   12102  12.06  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   123   12203  12.16  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   124   12303  12.26  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   125   12401  12.36  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   126   12502  12.46  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   127   12600  12.56  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   128   12703  12.66  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   129   12866  12.83  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   130   12902  12.86  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   131   13026  12.99  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   132   13102  13.06  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   133   13202  13.16  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   134   13303  13.27  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   135   13403  13.36  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   136   13503  13.46  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   137   13602  13.56  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   138   13702  13.66  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   139   13803  13.76  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   140   13902  13.86  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   141   14003  13.96  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   142   14102  14.06  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   143   14202  14.16  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   144   14302  14.26  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   145   14403  14.36  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   146   14502  14.46  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   147   14602  14.56  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   148   14702  14.66  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   149   14803  14.76  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   150   14902  14.86  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   151   15002  14.96  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   152   15103  15.06  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   153   15201  15.16  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   154   15301  15.26  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   155   15401  15.36  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   156   15502  15.46  quiet but NONZERO (control)         655     181      6   10.4  spectrum   spectrum   playing  true     false running
+   157   15603  15.56  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   158   15703  15.66  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   159   15803  15.76  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   160   15902  15.86  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   161   16003  15.96  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   162   16102  16.06  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   163   16203  16.16  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   164   16303  16.26  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   165   16403  16.36  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   166   16502  16.46  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   167   16601  16.56  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   168   16702  16.66  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   169   16804  16.77  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   170   16901  16.86  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   171   17003  16.96  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   172   17103  17.06  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   173   17203  17.16  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   174   17303  17.26  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   175   17403  17.36  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   176   17502  17.46  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   177   17603  17.57  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   178   17702  17.66  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   179   17801  17.76  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   180   17903  17.86  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   181   18003  17.96  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   182   18103  18.06  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   183   18202  18.16  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   184   18303  18.26  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   185   18401  18.36  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   186   18503  18.46  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   187   18603  18.56  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   188   18702  18.66  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   189   18803  18.76  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   190   18903  18.86  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   191   19001  18.96  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   192   19103  19.06  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   193   19203  19.16  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   194   19301  19.26  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   195   19403  19.36  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   196   19501  19.46  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   197   19603  19.57  quiet but NONZERO (control)         655     181      6   10.4  spectrum   spectrum   playing  true     false running
+   198   19703  19.66  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   199   19800  19.76  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   200   19903  19.86  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   201   20003  19.96  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   202   20103  20.06  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   203   20202  20.16  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   204   20303  20.26  quiet but NONZERO (control)         655     184      6   10.4  spectrum   spectrum   playing  true     false running
+   205   20402  20.36  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   206   20502  20.46  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   207   20602  20.56  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   208   20703  20.66  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   209   20803  20.76  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   210   20903  20.86  quiet but NONZERO (control)         655     184      5   10.4  spectrum   spectrum   playing  true     false running
+   211   21003  20.96  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   212   21101  21.06  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   213   21203  21.16  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   214   21302  21.26  quiet but NONZERO (control)         655     183      6   10.4  spectrum   spectrum   playing  true     false running
+   215   21403  21.36  quiet but NONZERO (control)         655     182      6   10.4  spectrum   spectrum   playing  true     false running
+   216   21503  21.46  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+   217   21603  21.56  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   218   21702  21.66  quiet but NONZERO (control)         655     186      5   10.5  spectrum   spectrum   playing  true     false running
+   219   21803  21.76  quiet but NONZERO (control)         655     185      5   10.5  spectrum   spectrum   playing  true     false running
+
+wrote /Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-quiet-only.log
+wrote /Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/trace-quiet-only.jsonl
+wrote /Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/verdict-quiet-only.json
+wrote /Users/neokester/Projects/navilite/docs/repro/t_13b5cca0/logs/fixture-quiet-only.wav

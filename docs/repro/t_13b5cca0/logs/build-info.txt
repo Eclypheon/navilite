@@ -1,0 +1,62 @@
+# Build and run information for the cold repro (kanban t_13b5cca0)
+#
+# Every line below is a value printed by the command named beside it, not a guess.
+
+commit_under_test        = 9271ab0e7a66dfcc97fd49c1e88d998c6da8abd6          (git rev-parse HEAD — short 9271ab0)
+branch                   = main (HEAD == origin/main at the time of the run)
+working_tree_at_run      = clean except the new docs/repro/ path added by this card
+shipped_paths_since_b40ec02 = (none)   # git log --oneline b40ec02..HEAD -- src public index.html vite.config.ts capacitor.config.ts ios/App/App package.json
+                                       # i.e. the code under test is the shipped v1.9.27 code (b40ec02) with docs-only commits on top
+v1.9.27_delivery         = sent       # ~/.hermes/scripts/state/navilite-deliver.json: "Navilite-1.9.27-unsigned.ipa": "sent"
+
+build_command            = npm run build          (tsc --noEmit && vite build)
+build_toolchain          = vite v8.3.4, 44 modules transformed, built in 68 ms
+dist_sw_build_id         = 9271ab0                # grep "BUILD_ID = " dist/sw.js  →  const BUILD_ID = '9271ab0';
+dist_sha256 =
+  f5edbed283a9ceaa31f0a272ca9f6177773255d68b0d41facc9762f683bfbbc6  dist/assets/base-BjmtzVdu.js
+  8ccc718810d6cd292d4c7a87e641305dd7f3bba89229f2a4f6f999dc2cc7635c  dist/assets/esm-B4zyz82m.js
+  02df01d73c3982c4fc4183efa753aabd3e405691626be939113f03d96dde10b7  dist/assets/esm-COzjbbfU.js
+  95c7757f3d6052a60a312cd7d1343d850a48ffae3c44d167c12db94a6ea24b66  dist/assets/index-C2jLU_k3.js
+  ac4b85a50758aca6cdcbd95a3a701703a1c7822acb7a451c3ecf1313473c8ca0  dist/assets/index-QjmzHs0A.css
+  0c29cd54e327230e1a95bbbbd2ba3f3cf0896ba30ff3bd54f6ce8cfa19b8e64f  dist/assets/native-D0fucyVa.js
+  d31cd70248c33ca576488384149a2c7144aa51bbcf0651aacf19f5439b2a16bd  dist/assets/web-B84SncK4.js
+  9078f58f90751fbaa085c56002f543d11707e7e3f749b216a4d1860facb69263  dist/assets/web-BKEosLDU.js
+  d5488cb14da452c23fd0c559247ce9a5565a528f4a1dbe9822c460ef44a4cb9f  dist/favicon.svg
+  720f890336cc07290e064c4a5fc9b1cd1c77db96e37361a624603b532bb50262  dist/icon-192.png
+  be12646b714c99c2f89635073bd02daa6ff83a799f6eac9e85dc108a63471468  dist/icon-512.png
+  41b369ee730154e448b6215886d1e33f40d70ec8b810672f18c9333f44dca777  dist/icon-maskable-512.png
+  df06f78bb07921b76b3cfae3b80d28ebe7fcb51d126f884231b3124190a84e78  dist/index.html
+  b39cc702b03739029107994a71d60cde57f0cf790184adef84f732af48d006c9  dist/manifest.webmanifest
+  e789d55b593195bc54b32898e6d15488785bde1ea74fe76fb2f418c6f251d98e  dist/sw.js
+
+browser                  = Google Chrome 155.0.8059.84 (@5869fe313571d75152b77813cf0a4ee26a4e6df0)
+browser_path             = /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+browser_user_agent       = Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36
+browser_argv             = --headless=new --mute-audio --remote-debugging-port=0 --user-data-dir=<fresh temp profile> --no-first-run --no-default-browser-check --disable-gpu --hide-scrollbars --autoplay-policy=no-user-gesture-required about:blank
+node                     = v26.11.1
+os                       = macOS 15.7.4 (24G517)
+
+engine constants under test (src/player/engine.ts):
+  510  const ZERO_FRAMES_BEFORE_THEME = 18;
+  636  const FROZEN_FRAMES_BEFORE_THEME = 10;
+  637  const METER_INTERVAL_MS = 100;          # 18 x 100 ms = 1800 ms
+
+harness_sha256 =
+  7cdefac3aa9c2f0de3038681b0ba593d2610205d39462dc2253c04265f167076  docs/repro/t_13b5cca0/silent-passage-probe.mjs
+  c1df2f0b629ccf63a6c36ab068f77c69ddca40275a683673470e31c67abaa3d9  docs/repro/t_13b5cca0/REPRO.md
+
+log_sha256 =
+  da044f4a6be581d9a97b493b1b50d621f2fec5df6ac4c0ff1958a65db206596d  logs/fixture-silent-gap.wav
+  e1edd998f8afa844fea64680561c31c7d55a24af7e07a38b627dd43c0738df1a  logs/fixture-quiet-only.wav
+  0411b0e42cea02443b35487d878a0a2ec39ab9479e94523d4814f47f8f47dbbf  logs/trace-silent-gap.log
+  05e16b9735dee99ac05f8a65765dcc93767b6dc2222d559851e28ca6802b8f93  logs/trace-silent-gap.jsonl
+  5b1ac53dda9640ec467c22e2bf9f618bbe76052977bb27543acc8ad58a99a8bf  logs/verdict-silent-gap.json
+  7ef757e44e8b81d43a1721287d8b59d7029ef4654fcf816867e6829cdf8b3cd1  logs/stdout-silent-gap.txt
+  dfd4c2e75778ee8286994c9c4d8047156fb60eac07eb3cdcc414153fc53ac995  logs/trace-quiet-only.log
+  7bb94db8af4178315234c89d0d515ab5a40c7f380c7f08de2a77e31cebb13915  logs/trace-quiet-only.jsonl
+  410f54c987a2c9f5ff612d8c906ec3b68c4ae344d7d865e1ea64facfaafd365b  logs/verdict-quiet-only.json
+  0bca34dbd1001edeff00efbc88ded6a1858032403fce0438f2dd7784234c4a48  logs/stdout-quiet-only.txt
+
+runs (each: one complete cold run of the harness above, in the order below):
+  silent-gap  → 219 reads at ~100 ms; word sequence spectrum… / spectrum / theme / spectrum
+  quiet-only  → 219 reads at ~100 ms; word sequence spectrum… / spectrum   (theme never reached)
