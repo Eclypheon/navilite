@@ -477,4 +477,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The app is tidier behind the scenes: the code it is built from was split into more, smaller files, so changes to it are quicker and cheaper to make. Nothing you see or hear changed.',
       ],
     },
+    {
+      version: '2.0-beta.2',
+      date: '2026-10-17',
+      items: [
+        'A song no longer changes length under you. The track that is 3:30 stays 3:30 after you seek, and at the end: it used to read 70:01 the moment you dragged the time bar, because the phone\'s own guess at the length of an Opus file was believed over the length the song itself carries. Every Opus track in your library was affected that way.',
+        'The song after it plays by itself again. At the end of one of those tracks the app took the end for the music stopping on its own, so the queue stayed where it was instead of moving on. The next song now follows on.',
+      ],
+    },
   ];

@@ -1040,7 +1040,7 @@ The design is `docs/design-v2.0-beta.md`. This entry records the owner's decisio
 10. **Released as v2.0-beta.** The word set and the regions above are what ships: item 2 is `279cfce` and items 3-4 are `6305608`, landed on `main` unreleased on 2026-10-17 with the refactor slices around them (`9e74ca7`, `3c054d4`, `30ead77`, `deafea9`, `f10ec06`, `3ba040c`, and the P3/P4 probe `5efc3ac`). The cut is card `t_b97b252b` — the version bump, the "What's new" entry, the tag `v2.0-beta` and the artifact in one commit. What the cut does **not** touch: `CHANGELOG.md`'s earlier headings, `docs/verification.md` §30-§32 (history), and §515.4 / §833.3, which stay as written and are superseded by this entry rather than edited.
 11. **One correction the cut made to this design's own drafted words.** §6's optional housekeeping bullet claimed *"the two giant files everything else had to be read through are now a handful of small ones"* — **false, and it does not ship as written**: after the mandatory slices `src/ui/app.ts` is **2,250 lines** and `src/player/engine.ts` is **3,448**, both still the two largest files in `src/`, and the split only claims what happened — seven modules came out of them (`player-bar.ts` 351, `context.ts` 112, `now-screen.ts` 429, `shell.ts` 522, `engine-contract.ts` 358, `engine-helpers.ts` 55, `warm-pool.ts` 110). The bullet that ships says the code was split into more, smaller files and promises nothing about the two big ones being gone. Nothing else about §3.3 changes: from this release the arming window is still invisible **in the word** (colour `arming` + the chip's `spectrumArming` tooltip only), which is the narrowing §3.3 itself states.
 
-## The duration the app trusts: the library's number, not the transport's estimate, 2026-10-17 (card `t_644f6085` — unreleased)
+## The duration the app trusts: the library's number, not the transport's estimate, 2026-10-17 (card `t_644f6085` — released as v2.0.0-beta.2)
 
 His report, his words: *"The song Tank! initially appears to be 3:30 long but when it ends or i try to seek on
 it it suddenly becomes 70:01 long — not sure how this error even came about."*
@@ -1089,9 +1089,12 @@ it it suddenly becomes 70:01 long — not sure how this error even came about."*
    browser is decoding (Chrome reads 210.3475 s for this same file, exactly) and it is what the element's own
    end is judged against. Calling that "less trustworthy than the metadata" would be false, and v1.9.5's
    reason for preferring the player's number (the advertised length of a re-encode) still holds on that path.
-6. **Unreleased, as the card requires**: no version bump, no tag, no artifact. Proof on the harness that owns
+6. **Released as v2.0.0-beta.2** (card `t_a7f2fc72`): the version bump, the "What's new" entry, the tag `v2.0-beta.2` and the artifact in one commit. The only unreleased commit on `main` when the cut was made was this fix itself (`4101a32`), so nothing else is in that cut. Proof on the harness that owns
    these numbers (`test/engine-native.test.ts`, 3 tests added; `npm test` 266/266, `npm run typecheck` and
    `npm run build` clean): with the transport reporting 4201.84 s for a 210.3475 s track the bar's number stays
    **3:30** (`pluginState` still carrying the phone's `4201.8`), a seek that answers 4201840 ms does not bring
    it in either, and **the end of that track is still reported to the queue** — the machine rests on `ended`
-   rather than on an interruption.
+   rather than on an interruption. **Fail-before, re-run at this cut**: putting the pre-fix `engine.ts` (the
+   file at `9484e12`) back with these three tests in place fails exactly those two — 34/36, `4201840` against the
+   expected `210348` and "the end of the track is reported to the queue" `false` — while all 33 tests that predate
+   the fix pass in both worlds (`docs/verification.md` §33).
