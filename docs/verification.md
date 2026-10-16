@@ -3786,3 +3786,185 @@ the byte-for-byte read), plus `commit-msg.txt` and the two chunks read out of th
 The `npm test` and `typecheck` counts are quoted from their own console output, which was not redirected to a
 file in this directory.
 
+## 33. v2.0.0-beta.2 — the release that carries the duration fix (2026-10-17)
+
+The owner asked for the *70:01* fix **in the version he is installing now, not in a later release** (he has
+`Navilite-2.0.0-beta-unsigned.ipa`, 2.0.0 build 50, tag `v2.0-beta`, on his phone). This is a rebuild of that same
+beta train carrying the duration fix and nothing else. The sweep for this cut, run rather than assumed:
+
+```
+$ git log --oneline v2.0-beta..4101a32        # everything unreleased on main, before the cut
+4101a32 fix(unreleased): the duration the app shows is the library's, never the transport's estimate (t_644f6085)
+```
+
+**One commit was unreleased and verified, and it is the fix.** `t_644f6085` verified it on its own execution
+(`DECISIONS.md` — the duration the app trusts), and it is what this cut stamps. Nothing else is in it: no feature,
+no refactor, no opportunistic fix.
+
+**No production code changed in this cut.** The diff of `03eb486` is eight files, all version bookkeeping:
+`package.json` + the lockfile root (`2.0.0-beta` → `2.0.0-beta.2`), `android/app/build.gradle`
+(`versionCode 49 → 50`, `versionName 2.0.0-beta.2`), `project.pbxproj` (`CURRENT_PROJECT_VERSION 50 → 51`,
+`MARKETING_VERSION` — both places), `src/ui/changelog.ts` + `CHANGELOG.md` (the same two items, same order),
+`test/changelog.test.ts` (the release check's version list) and `DECISIONS.md` (the duration entry marked
+*released as v2.0.0-beta.2*, with the fail-before re-run recorded). **`src/` is byte-for-byte `4101a32`**: not one
+line of player code is touched by the cut that ships it.
+
+**The version reads `2.0.0-beta.2` in the package and `2.0-beta.2` in the list he reads**, the same split
+`v2.0-beta` used (`2.0.0-beta` in `package.json`, `2.0-beta` in the changelog and the tag). Two deliberate
+divergences, both recorded rather than silent:
+
+1. **`MARKETING_VERSION` is non-numeric this time** (`2.0.0-beta.2`, where `v2.0-beta` used `2.0.0` on
+   `docs/design-v2.0-beta.md`:442's claim that *"Xcode's marketing version must be numeric"*). That claim was
+   never measured, and this cut had to be able to read the release's own version back out of the IPA
+   (`docs/VERSIONING.md` §4): **Xcode accepted it and built it** — `** BUILD SUCCEEDED **` with
+   `-validate-for-store` in the log, and the plist reads it back in §33.3. The installer consequence is stated in
+   §33.4.4 rather than hidden.
+2. **The artifact carries the name the card requires, not the name the build script derives.**
+   `tools/build-ios-ipa.sh` writes `Navilite-2.0.0-beta.2-unsigned.ipa` (from `package.json`); it was moved to the
+   exact path `artifacts/Navilite-2.0.0-beta-2-unsigned.ipa` so the delivery guard, which keys on path and sha,
+   cannot mistake it for the beta he already has. The bytes are the build's bytes — nothing was rebuilt, edited or
+   renamed inside the archive (§33.3.4), and no other `.ipa` was written by this cut.
+
+### 33.1 What was run, and the counts for this cut
+
+```
+$ node --test test/engine-native.test.ts    # the fail-before run, pre-fix engine.ts — §33.2: 36 tests, 34 pass, 2 fail
+$ npm test                                  # 266 tests, 266 pass, 0 fail, 0 cancelled, 0 skipped, todo 0, 40.0 s
+$ npm run typecheck                         # tsc --noEmit — prints nothing
+$ npm run build                             # one vite build — the dist/ the suite ran against
+$ npm run ipa:unsigned                      # one vite build + cap sync ios + one xcodebuild → §33.3
+$ npm run build                             # a fresh vite build of 03eb486, for §33.3.2's byte-for-byte
+```
+
+**Three `vite` builds, one `xcodebuild`, one `npm test`, one `typecheck`, and the engine suite run once on the
+pre-fix engine and once inside `npm test`.** Each harness ran once for this cut; the runs are the record, not a
+loop. No new verification scaffolding was written: the harness that owns these numbers is the one `t_644f6085`
+added its three tests to, and it is what §33.2 measures the fix with.
+
+### 33.2 Fail-before: the fix, shown failing without it
+
+The card's own rule for this cut — *"the exact failure mode we cannot afford is a build that claims the fix and
+does not carry it"* — is answered twice: here on the source, and in §33.3 on the shipped bytes. The fix was put
+back to the engine it replaced (**`src/player/engine.ts` at `9484e12`, `-5 +50` lines**) with the current suite in
+place, and the suite was run:
+
+```
+$ git show 9484e12:src/player/engine.ts > src/player/engine.ts
+$ node --test test/engine-native.test.ts
+✖ a transport that measures an Opus track at twenty times its length does not become the duration the app shows
+✖ the end of an Opus track is heard even though the transport says the item is twenty times longer
+ℹ tests 36   ℹ pass 34   ℹ fail 2
+    actual: 4201840,  expected: 210348         # the bar read 70:01 for a 3:30 track
+    actual: false,    expected: true           # "the end of the track is reported to the queue"
+```
+
+**34/36, and the two failures are exactly the two tests that describe his report** — the number flipping, and the
+end of an Opus track never reaching the queue. All **33 tests that predate the fix pass in both worlds**, so the
+fail-before is the fix's own contract and not a broken tree. `engine.ts` was then restored from the working copy;
+`git status --porcelain -- src/player/engine.ts` is empty, and the copy is on disk as
+`runs-beta2/engine.ts.fixed`.
+
+### 33.3 The artifact is the proof
+
+**Order of operations.** The release body was committed first (`03eb486`, with an empty `git status` — the
+`docs/VERSIONING.md` §6 rule), the IPA was built from that commit, the version was read back out of the IPA's own
+`Info.plist`, and only then was the annotated tag placed — on that same commit — and pushed. Nothing about the
+commit, the tree or the bytes changed between the build and the tag.
+
+```
+$ unzip -p artifacts/Navilite-2.0.0-beta-2-unsigned.ipa Payload/App.app/Info.plist | plutil -p - 
+  "CFBundleIdentifier" => "app.navilite"
+  "CFBundleShortVersionString" => "2.0.0-beta.2"
+  "CFBundleVersion" => "51"
+  "UIBackgroundModes" => [ "audio" ]
+```
+
+**33.3.1 The version and the build, read out of the artifact itself** — `docs/VERSIONING.md` §4 — are
+**2.0.0-beta.2** and **51**, against the beta he has on his phone (2.0.0, 50). The app's About line still shows
+the build id (the git short SHA, `03eb486`), not the semver: on iOS the version exists only in the built
+`Info.plist`, which is why the read above is the claim.
+
+**33.3.2 The shipped bundle is exactly what this commit builds.** The chunk inside the IPA
+(`Payload/App.app/public/assets/index-DhVR4Rnw.js`) and a fresh `npm run build` of `03eb486`:
+
+```
+$ sha256(ipa)   = 72482cf4be964411375df0d1df2ec07ffc78984bda934daeb890aad44a40d2a2  (207.05 kB)
+$ sha256(fresh) = 72482cf4be964411375df0d1df2ec07ffc78984bda934daeb890aad44a40d2a2
+$ cmp ipa-index.js dist/assets/index-DhVR4Rnw.js     # silent — identical byte for byte
+```
+
+The bundle also holds **one** `index-*.js` and no older hashed chunk from a previous build (the script drops
+`App.app` first precisely because `zip` never drops a member), and the same is true of `dist/` — the build id the
+service worker is stamped with is this commit.
+
+**33.3.3 The fix's own words, in the shipped bytes, against the beta he has as the control.** Minification erases
+identifier names, so what is counted is the code's own prose — the three strings the fix added where it reads and
+judges the number — plus the changelog line he will read, in the *new* IPA's chunk and in the `v2.0-beta` IPA's:
+
+| in the chunk | `index-ugOtIRG3.js` (v2.0-beta, on his phone) | `index-DhVR4Rnw.js` (this cut) |
+| --- | --- | --- |
+| `estimate about a container its transport never read` (`durationMs`) | 0 | 1 |
+| `the track's is the number shown, the player's is an` (the reason line) | 0 | 1 |
+| `the player measures this item at` (the reason line) | 0 | 1 |
+| `A song no longer changes length under you` (the entry he reads) | 0 | 1 |
+| `70:01` (his number, in that entry) | 0 | 1 |
+
+The control chunk is `d00d79d2…`, read out of the IPA he has; the new one is `72482cf4…`, identical to the fresh
+build. **The build that claims the fix carries it.**
+
+**33.3.4 The artifact itself.**
+
+```
+artifacts/Navilite-2.0.0-beta-2-unsigned.ipa
+sha256 80703763abbe43f98587bca7ff0d52293776f468f7e9b643844b19297a3b1491
+1,032,643 bytes · unsigned on purpose (docs/ios-sideload.md)
+```
+
+**The tag and the commit.** `git tag v2.0-beta.2` (annotated, *"v2.0.0-beta.2 — a 3:30 Opus song stays 3:30, and
+the end of it moves the queue on"*) is on **`03eb486`**, the commit the IPA was built from; `main = origin/main =
+03eb486`; the tag is contained in `main` (`git merge-base --is-ancestor v2.0-beta.2^{commit} main`) and
+`git branch --contains v2.0-beta.2` prints `main` and nothing else; `git status --porcelain` was empty after both
+builds. Nothing in the delivery guard's `SHIPPED_PATHS` moved after the release commit:
+
+```
+$ git log --oneline 03eb486..HEAD -- src public index.html vite.config.ts capacitor.config.ts ios/App/App package.json
+                          # (no output — this record is the only commit after the build, and it is docs only)
+```
+
+### 33.4 Not verified here, and not claimed
+
+1. **His phone.** There is no device and no simulator boot in this cut: the fix is proved on the harness that owns
+   these numbers (§33.2) and on the bytes that ship (§33.3). That the bar on his build reads `3:30` after a seek
+   on `Tank!` and goes on to the next track at the end of it is a claim about the same code, and the one seek and
+   one track-end on the installed build is what settles it — the verification card's job, not this one's.
+2. **The transport-level measurements are quoted, not re-measured here.** §1-§2 of the duration entry
+   (4201.84 s for a 210.3475 s `Tank!.opus`, 296.08 s and 190.14 s for the other two Opus files, MP3/FLAC within
+   30 ms) were taken by `t_644f6085` on this machine through the vendored transport; this cut re-ran none of that
+   probe, and claims none of it as its own reading.
+3. **Android.** No APK is built for this cut. `versionCode 50` / `versionName 2.0.0-beta.2` are set so the next
+   APK carries them (`docs/VERSIONING.md` §3 does not require an APK for the parity), and nothing here is
+   evidence about the APK.
+4. **`2.0.0-beta.2` as an `Info.plist` version string — measured for the build, flagged for the installer.** Xcode
+   built and validated it (§33.3.1). iOS's own install/upgrade decision is `CFBundleVersion`, which moves
+   **50 → 51**, so the phone is being offered a newer build of the same app id. **A sideloader that compares the
+   *marketing* string order, however, reads `2.0.0-beta.2` as below the `2.0.0` already on his phone** (semver
+   semantics), and one that refuses downgrades on that basis would refuse this install. Nothing in this cut can
+   settle which sideloader he uses; if it refuses, the same commit with `MARKETING_VERSION = 2.0.0` (numeric, as
+   `v2.0-beta` shipped) is a one-line change and a rebuild, and the version identity then lives in the changelog,
+   the tag and `package.json` alone.
+5. **The two residuals the earlier entries left open are untouched and not claimed closed.** The web path's `el.duration` is still deliberately not gated (§5 of the duration entry), and the native patch still sets
+   `AVURLAssetPreferPreciseDurationAndTimingKey: false` — re-enabling it is a full-file read before playback,
+   which is the regression the fix's own card forbade.
+6. **This record is not the delivery.** No `.greenlit` marker was written and nothing was handed over: Sage's
+   verification card is gated on this one, its SHIP writes the marker, and the orchestrator hands the IPA over.
+   The artifact sits in `artifacts/` with no marker beside it.
+
+Raw runs (this machine's agent scratch,
+`/Users/neokester/.hermes/profiles/nerd/cache/scratch/runs-beta2/`): `evidence.sh` (the fail-before and the three
+release-body commands as one script), `fail-before-engine-native.txt` (the 34/36 with both failures),
+`engine.ts.fixed` (the working copy the pre-fix revert was restored from), `npm-test.txt`, `typecheck.txt`,
+`build.txt`, `commit-msg.txt`, `ipa-build.txt` (the `xcodebuild` log and the script's own version/build read),
+`artifact-check.sh` and `artifact-check.txt` (the plist read-back, the two chunk hashes and the marker table),
+`build-c.txt` (the fresh build of `03eb486`), `ipa-index.js` (the chunk out of the IPA) and `control/` (the chunk
+out of the `v2.0-beta` IPA).
+
