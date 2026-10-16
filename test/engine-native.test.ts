@@ -190,6 +190,51 @@ interface SpectrumState {
    */
   itemFrames: number;
   /**
+   * v1.9.26 — **the tap's own frame cadence, in reads**: a healthy tap handing over a frame once
+   * every N polls rather than once per poll.
+   *
+   * The v1.9.25 rule was written on the premise that a healthy tap produces a frame per 33 ms read,
+   * and that premise is not a fact about any tap: the plugin's frame production is quantized to the
+   * PCM buffer AVFoundation hands the tap (`drainAndAnalyze` resets `sinceLastFrame` per callback
+   * rather than subtracting the hop, `NaviliteSpectrum.swift:678`), reported on real hardware as
+   * 4096 frames — ~11 frames/s against 30 reads/s, so two reads in three would blank the bars on a
+   * tap that is measuring perfectly. This field is how a test states that cadence; `1` (a frame per
+   * read) is the only cadence the suite could state before it existed, and `framePeriodMs` below has
+   * to match it the way a real tap's `maxFrames` bounds its own buffer.
+   */
+  itemFramesEvery?: number;
+  /**
+   * v1.9.26 — **the tap's own frame period for this item, in ms**, as the plugin declares it at
+   * `prepare` (`maxFrames` / the sample rate, floored by the tap's own FFT hop).
+   *
+   * This is the fact the drawing rule now rests on, and the fake has to publish it because the
+   * engine's rule is a comparison of two *plugin* numbers and nothing else: this item's last frame
+   * may be drawn while it is at most one tap period stale, and a tap that has stood still longer
+   * than its own period is named and not drawn. Default 33 — one poll, i.e. the cadence a fake that
+   * produces a frame per read has always had.
+   */
+  framePeriodMs?: number;
+  /**
+   * v1.9.26 — how many `spectrumFrame` reads this item's analysis has answered, and how long ago it
+   * produced its last frame.
+   *
+   * The age is the plugin's own account (`itemFrameAgeMs`), stated in the polls the engine makes:
+   * `readsSinceProduced × 33 ms`, the poll period the engine is built on. It is derived from the
+   * cadence the test states rather than from the wall clock on purpose — the rule under test compares
+   * two plugin facts, and a fake whose age wobbled with `setInterval` jitter under a loaded test
+   * runner would move the boundary (`age <= period`) for reasons that have nothing to do with it.
+   * `-1` (never produced) is what the engine reads for a tap that has produced nothing for this item.
+   */
+  frameReads: number;
+  readsSinceProduced: number;
+  /**
+   * v1.9.26 — the frame this item's analysis produced last: what the plugin hands over unchanged on a
+   * read in which it produced nothing. `bands`/`live` are a **last-value register**, so this is what
+   * the bars hold between two frames — and what the v1.9.25 rule blanked on.
+   */
+  registerBands: number[] | null;
+  registerLive: boolean;
+  /**
    * v1.9.24 — what the plugin answers to "is the tap on an item **at all**?" (`attached`,
    * `NaviliteSpectrum.swift:422`: `item != nil`), when a test wants to state it directly. Defaults
    * to the binding the fake is holding: the tapped item in `plugin` mode, "a request has started" in
@@ -217,6 +262,18 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
     const action = async (name: string): Promise<void> => {
       record.calls.push(name);
       await wait(ROUND_TRIP_MS);
+    };
+    /*
+     * v1.9.26 — a new install is a new analysis: its own frame count, its own cadence clock and its
+     * own register. The plugin's `SpectrumAnalysis` is created per install (`NaviliteSpectrum.swift`),
+     * so all three start here rather than at the process's first frame.
+     */
+    const beginAnalysis = (): void => {
+      record.spectrum.itemFrames = 0;
+      record.spectrum.frameReads = 0;
+      record.spectrum.readsSinceProduced = 0;
+      record.spectrum.registerBands = null;
+      record.spectrum.registerLive = false;
     };
     record.calls.push('configure');
     return {
@@ -316,7 +373,7 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
           if (record.spectrum.startedUrl !== url) {
             record.spectrum.installs += 1;
             // v1.9.25 — a new install is a new analysis: the item's own frame count starts at zero.
-            record.spectrum.itemFrames = 0;
+            beginAnalysis();
           }
           record.spectrum.started = true;
           record.spectrum.startedUrl = url;
@@ -347,7 +404,7 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         if (record.spectrum.tappedUrl !== read) {
           record.spectrum.installs += 1;
           // v1.9.25 — and the analysis of the item this install lands on is new: its own count is zero.
-          record.spectrum.itemFrames = 0;
+          beginAnalysis();
         }
         record.spectrum.tappedUrl = read;
         record.spectrum.itemIsCurrent = read !== null && read === record.playingUrl;
@@ -387,10 +444,32 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
          */
         const stale =
           record.playingUrl !== null && (record.spectrum.staleRegisterUrls ?? []).includes(record.playingUrl);
-        const produced = record.tapProducing && !quiet && !stale;
+        /*
+         * v1.9.26 — **the tap's own cadence.** The plugin produces a frame when its own PCM buffer
+         * says so, not once per read (`drainAndAnalyze` is driven by the tap's callbacks), so a tap
+         * that is measuring perfectly answers `itemFramesEvery` reads out of `N` with the same frame
+         * it produced last. The reads in between are the state the v1.9.25 rule blanked on.
+         */
+        record.spectrum.frameReads += 1;
+        const every = Math.max(1, record.spectrum.itemFramesEvery ?? 1);
+        const period = record.spectrum.framePeriodMs ?? 33;
+        /*
+         * The age of the register, per read: a tap that declares a period of `period` ms for itself and
+         * produces once every `every` reads of it is that much older on each read that it does not
+         * produce. Both numbers are the fake's own statement of the tap's pace, and nothing else here
+         * is a clock — the wall clock under a loaded test runner is jitter, and the rule under test
+         * compares two plugin numbers, not the runner's scheduler.
+         */
+        const perReadMs = period / every;
+        const due = (record.spectrum.frameReads - 1) % every === 0;
+        const healthy = record.tapProducing && !quiet && !stale;
+        const produced = healthy && due;
         if (produced) {
           record.spectrum.frames += 1;
           record.spectrum.itemFrames += 1;
+          record.spectrum.readsSinceProduced = 0;
+        } else {
+          record.spectrum.readsSinceProduced += 1;
         }
         const bound = record.spectrum.plugin === true;
         // The tap on an item the player has left measures nothing: no frames, and not current.
@@ -400,19 +479,33 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         const silent =
           !stale &&
           (!produced || quiet || (bound && !itemIsCurrent) || record.spectrum.bands.every((value) => value === 0));
+        const fresh = silent
+          ? record.spectrum.bands.map(() => 0)
+          : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
+        if (produced) {
+          // The register now holds this item's own frame — what every read in between hands over
+          // unchanged (v1.9.26). Nothing else writes it: a tap that has stopped leaves its last frame
+          // standing, which is the same fact the engine reads from the age below.
+          record.spectrum.registerBands = fresh.slice();
+          record.spectrum.registerLive = !silent;
+        }
+        const held = healthy && !produced && record.spectrum.registerBands !== null;
+        const register = record.spectrum.registerBands;
         const bands = stale
           ? // The register's own frame, unchanged from the last one its FFT produced: the same values
             // on every read, which is what makes a skip out of a loud passage the state the owner sees
             // (`live` stays true and nothing ever reads zero).
             record.spectrum.bands.slice()
-          : silent
-            ? record.spectrum.bands.map(() => 0)
-            : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
+          : register !== null && held
+            ? register.slice()
+            : produced
+              ? fresh
+              : record.spectrum.bands.map(() => 0);
         if (!produced) {
           // Nothing was measured, so there is no frame to be silent: `silentFrames` counts frames.
         } else if (!silent) record.spectrum.silentFrames = 0;
         else record.spectrum.silentFrames += 1;
-        record.spectrum.live = stale ? true : !silent;
+        record.spectrum.live = stale ? true : held ? record.spectrum.registerLive : produced ? !silent : false;
         return {
           bands,
           bandCount: bands.length,
@@ -421,6 +514,18 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
           // v1.9.25 — the plugin's own count for the item its tap is on: zero at the install, moved
           // only while that item's analysis measures, and standing still for a tap that has stopped.
           itemFrames: record.spectrum.itemFrames,
+          /*
+           * v1.9.26 — **the tap's own pace**, beside that counter: the period it declared for itself
+           * at `prepare` (a real plugin's `maxFrames` over the sample rate, floored by its own FFT hop)
+           * and the age of the frame it is holding. A tap that produced a frame this read reports age
+           * 0; one that is between frames reports how old its register has become, in the same scope
+           * as the poll it is being read on: a tap that produces once every `every` reads and declares
+           * a period of `framePeriodMs` for itself ages by `framePeriodMs / every` per read, which is
+           * the whole of what "this item's counter has stood still, and for how long" means here.
+           * `-1` is a tap that has produced nothing at all for this item.
+           */
+          itemFramePeriodMs: period,
+          itemFrameAgeMs: register === null ? -1 : Math.round(record.spectrum.readsSinceProduced * perReadMs),
           silentFrames: record.spectrum.silentFrames,
           positionMs: record.truth.positionMs,
           playing: record.spectrum.playing && record.truth.playing,
@@ -596,6 +701,14 @@ function recording(overrides: Partial<Recording> = {}): Recording {
       installs: 0,
       frames: 0,
       itemFrames: 0,
+      // v1.9.26 — the tap's own pace: a frame per read (33 ms, one poll), which is the cadence every
+      // test in this file states unless it sets these two together on purpose.
+      itemFramesEvery: 1,
+      framePeriodMs: 33,
+      frameReads: 0,
+      readsSinceProduced: 0,
+      registerBands: null,
+      registerLive: false,
       silentFrames: 0,
       // A plausible loud frame: most bands carrying energy, none of them pinned.
       bands: Array.from({ length: 64 }, (_, index) => 40 + ((index * 37) % 120)),
@@ -2032,7 +2145,10 @@ test('a track change never turns the chip to "native audio" while the new item�
  *      engine drew it, and ten identical reads later the frozen rule spent the chip's third word on it
  *      (*the native tap kept returning the same frame*) — which is the *native audio* he reads while
  *      the bars are flat. A frame may only be drawn, and only spend the chip, when the counter moved:
- *      `itemFrames`, the plugin's own count for the item its tap is on (v1.9.25).
+ *      `itemFrames`, the plugin's own count for the item its tap is on (v1.9.25). (v1.9.26 adds the one
+ *      case that rule was too strict about — this item's *own* last frame, held while it is no older
+ *      than the period its own tap declared; see the test below. Everything this step asserts is
+ *      unchanged by it: a register that never moved for this item is still never drawn.)
  *   2. **The hand-over was not the item's own.** One `AudibleSpectrumTap` per process held the timer
  *      and the FFT for *every* item, while `prepare`/`unprepare` are per item — so the outgoing item's
  *      teardown landing after the incoming item's `prepare` left the track playing now with no
@@ -2128,9 +2244,22 @@ test('a skip out of a loud passage never draws, or spends the chip, on a frame t
     say(`3. this item's own frames: live ${live} ms later — installs ${tap.installs}/verifies ${tap.verifies}, tapped ${tap.tapped} (audible ${tap.audible}), ${tap.framesForItem} frames/item`);
 
     /* ---- 4. the teardown that lands *after* this item measured: the tap stops, and what it holds is
-       flat — the whole-track state he reported, not a window ---- */
+       flat — the whole-track state he reported, not a window. The last frame it produced *is* this
+       item's, so the amended rule (§516.1) holds it for one tap period and no longer: the grace is
+       the tap's own number, not a poll count. ---- */
     const measuredBefore = record.spectrum.itemFrames;
     record.spectrum.framesQuietUrls = [LOCAL_TRACK_2.url];
+    /*
+     * One period, on the tap's own terms: this fake's tap declares `framePeriodMs` of 33 ms (one read)
+     * and produces a frame per read, so the register it leaves behind is this item's own for exactly
+     * one read after the last produced one, and stands still too long on the next. Nothing here waits
+     * on a wall clock: the age is the plugin's (`itemFrameAgeMs`), as it is in the engine's rule.
+     */
+    const darkAt = await until(() => engine.readSpectrum() === null && engine.status().spectrum === false, 400);
+    assert.ok(
+      darkAt !== null,
+      'the frame this item’s tap last produced is held for its own frame period and then not drawn',
+    );
     let deadReads = 0;
     let deadReason = '';
     for (let index = 0; index < 22; index += 1) {
@@ -2146,11 +2275,20 @@ test('a skip out of a loud passage never draws, or spends the chip, on a frame t
         /digital silence/,
         'a tap that stopped is not audio that is silent: the frames stood still, the audio did not',
       );
+      assert.doesNotMatch(
+        status.modeReason,
+        /same frame/,
+        'and the frozen rule is not spent on a register that stopped: it is not a tap stuck on one buffer',
+      );
     }
     assert.ok(deadReads >= 15, `the state was watched while playing (${deadReads} reads)`);
     assert.equal(record.spectrum.itemFrames, measuredBefore, 'the item’s own counter stood still throughout');
-    assert.match(deadReason, /has produced no frame since the last read/, 'and the reason line says which of the two it is');
-    say(`4. the tap that stopped after measuring this item — ${deadReads} reads: ${deadReason}`);
+    assert.match(
+      deadReason,
+      /longer ago than its own frame period/,
+      'and the reason line names the state *and* the pace it is judged on',
+    );
+    say(`4. the tap that stopped after measuring this item — dark ${darkAt} ms after it stopped, ${deadReads} reads: ${deadReason}`);
 
     /* ---- 5. and it is the same item that comes back ---- */
     record.spectrum.framesQuietUrls = [];
@@ -2176,6 +2314,172 @@ test('a skip out of a loud passage never draws, or spends the chip, on a frame t
     const adoptedLive = await until(() => engine.status().spectrum === true, 500);
     assert.ok(adoptedLive !== null, 'the adopted item’s own frames are what the bars are');
     say(`6. the adopt path: arming through a register it did not produce, live ${adoptedLive} ms after its own frames`);
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.9.26 — **the case the v1.9.25 rule could not survive, and the reason `2e1eb9d` came back: a
+ * healthy tap that is polled faster than it produces.**
+ *
+ * Sage's SEND BACK (`t_48f5660b`), in one sentence: the rule blanked the bars whenever `itemFrames`
+ * had not moved since the previous read (the branch above `nativeBands` → `spectrumLive = false` →
+ * `readSpectrum()` null → every bar on the release envelope, ~28 % a poll, and the chip flapping
+ * between *spectrum* and *spectrum…*) — and nothing established that a healthy tap advances its
+ * counter once per 33 ms read. It does not. The plugin's frame production is quantized to the PCM
+ * buffer AVFoundation hands the tap: `drainAndAnalyze` resets `sinceLastFrame` per callback instead
+ * of subtracting the hop (`NaviliteSpectrum.swift:678`), `maxFrames` from `prepare` was discarded
+ * (`:811`), and 4096-frame buffers are ~11 frames/s against 30 reads/s. Two reads in three blanked
+ * the bars **on the cases that work today** — the quiet skip and the cold start — which is what made
+ * it a SEND BACK rather than a nitpick.
+ *
+ * What the amended rule (§516.1) rests on instead is the tap's own pace, published beside its own
+ * counter: `itemFramePeriodMs`, the period the tap declared for itself at `prepare`, and
+ * `itemFrameAgeMs`, how old the frame it is holding is — both the plugin's numbers, neither an engine
+ * constant, a poll count, a `setTimeout` nor any other clock. This test states the failing cadence:
+ * `itemFramesEvery = 3` with a declared period of 93 ms, which is the 4096-frame buffer at 44.1 kHz
+ * (`4096 / 44100 = 92.9 ms`) against a 33 ms poll. It then asserts the three things the defective
+ * rule broke — something is drawn on every read, the engine stays live, and the chip never leaves
+ * *spectrum* — at both entry points a transition has (a start, and the boundary's adoption).
+ *
+ * **Fail-before**, run with this test and this fake against `2e1eb9d` (the SEND BACK'd commit): the
+ * second and third read of every three blank the bars — `readSpectrum()` returns null, `status.spectrum`
+ * is false and the chip is back on *spectrum…*, with the reason line reading *"the tap on the item that
+ * is playing has produced no frame since the last read"* — because that rule read the counter's
+ * movement and nothing else. **Pass-after**: every read draws this item's own last frame, the engine
+ * stays live, and the chip stays on *spectrum*.
+ *
+ * What a stub cannot clear: the tap's real pace on his phone. 93 ms is the number the diagnosis rests
+ * on, and `status.tap.framePeriodMs`/`frameAgeMs` (the banner's line, `src/ui/app.ts`) are now printed
+ * from the plugin's own declaration — his phone is what says whether it is 4096, 2048 or 1024.
+ */
+test('a healthy tap polled faster than it produces keeps the bars live and the chip on "spectrum" (v1.9.26)', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  /** How long `predicate` took to hold, in ms, or null if it never did inside the budget. */
+  const until = async (predicate: () => boolean, budgetMs: number): Promise<number | null> => {
+    const started = Date.now();
+    for (;;) {
+      if (predicate()) return Date.now() - started;
+      if (Date.now() - started > budgetMs) return null;
+      await settle(5);
+    }
+  };
+  try {
+    const record = recording();
+    record.spectrum.plugin = true;
+    /*
+     * The cadence, stated once for the whole test: a frame every three reads, and the period the tap
+     * declares for itself. Both are the tap's own numbers, and they have to agree — a period shorter
+     * than the cadence is a tap whose declared pace contradicts what it does.
+     */
+    record.spectrum.itemFramesEvery = 3;
+    record.spectrum.framePeriodMs = 93;
+    const engine = nativeEngine(record);
+    engines.push(engine);
+
+    /* ---- 1. a plain start, watched while the tap is between its own frames ---- */
+    await engine.play(LOCAL_TRACK);
+    const startedAt = await until(() => engine.status().spectrum === true, 600);
+    assert.ok(startedAt !== null, 'this item’s own first frame is what makes the bars live');
+
+    let reads = 0;
+    let stillReads = 0;
+    let darkReads = 0;
+    let armedReads = 0;
+    let previous = record.spectrum.itemFrames;
+    for (let index = 0; index < 30; index += 1) {
+      await settle(40);
+      const status = engine.status();
+      if (status.state !== 'playing') continue;
+      reads += 1;
+      if (record.spectrum.itemFrames === previous) stillReads += 1;
+      previous = record.spectrum.itemFrames;
+      const frame = engine.readSpectrum();
+      if (frame === null) darkReads += 1;
+      else {
+        assert.ok(
+          frame.some((value) => value > 0),
+          `read ${reads}: this item's own last frame is drawn, and it is not a zeroed one (${status.modeReason})`,
+        );
+      }
+      if (status.spectrumArming) armedReads += 1;
+      assert.notEqual(
+        frame,
+        null,
+        `read ${reads}: this item's tap has produced ${record.spectrum.itemFrames} frames for it and its register is ${status.tap.frameAgeMs ?? 'not published'} ms old against a declared period of ${status.tap.framePeriodMs ?? 'not published'} ms — a tap between its own frames is not a reason to blank the bars, and that is the whole of the SEND BACK (${status.modeReason})`,
+      );
+      assert.equal(
+        status.spectrum,
+        true,
+        `read ${reads}: the engine is still live, on this item's own frames (${status.modeReason})`,
+      );
+      assert.equal(
+        status.spectrumArming,
+        false,
+        `read ${reads}: the chip says "spectrum" — never "spectrum…" and never his "native audio" (${status.modeReason})`,
+      );
+      assert.doesNotMatch(
+        status.modeReason,
+        /produced no frame|not produced by this item|same frame/,
+        `read ${reads}: nothing about this item's tap has changed (${status.modeReason})`,
+      );
+    }
+    assert.ok(reads >= 20, `the window was watched while playing (${reads} reads)`);
+    assert.ok(
+      stillReads >= 8,
+      `the counter really did stand still on reads this test watched (${stillReads} of ${reads}) — without that this test states no slow cadence at all`,
+    );
+    assert.equal(darkReads, 0, 'not one read blanked the bars');
+    assert.equal(armedReads, 0, 'and the chip never went back to "spectrum…"');
+    /*
+     * And the pace the rule was judged on is the tap's own: the number the plugin declared, carried by
+     * the status to the banner (`src/ui/app.ts`), which is where his phone answers what a real tap's
+     * `maxFrames` is. Nothing in the engine picks this number.
+     */
+    assert.equal(
+      engine.status().tap.framePeriodMs,
+      93,
+      'the pace the rule is judged on is the tap’s own declaration, and the status carries it to the screen',
+    );
+    say(
+      `1. a frame every three reads: ${reads} reads, ${stillReads} of them with this item's counter standing still, ${darkReads} dark`,
+    );
+
+    /* ---- 2. the same cadence through the other entry point a transition has: the boundary's
+       adoption, which resets the per-item state without passing through `startNative` ---- */
+    record.playingUrl = LOCAL_TRACK_3.url;
+    engine.adoptNativeAdvance(LOCAL_TRACK_3);
+    const adoptedAt = await until(() => engine.status().spectrum === true, 600);
+    assert.ok(adoptedAt !== null, 'the adopted item’s own frames are what the bars are');
+
+    let adoptedReads = 0;
+    let adoptedStill = 0;
+    let adoptedDark = 0;
+    let adoptedPrevious = record.spectrum.itemFrames;
+    for (let index = 0; index < 20; index += 1) {
+      await settle(40);
+      const status = engine.status();
+      if (status.state !== 'playing') continue;
+      adoptedReads += 1;
+      if (record.spectrum.itemFrames === adoptedPrevious) adoptedStill += 1;
+      adoptedPrevious = record.spectrum.itemFrames;
+      if (engine.readSpectrum() === null) adoptedDark += 1;
+      assert.equal(
+        status.spectrumArming,
+        false,
+        `adopted track, read ${adoptedReads}: the chip says "spectrum" through the adoption too (${status.modeReason})`,
+      );
+    }
+    assert.ok(adoptedReads >= 12, `the adopted track was watched while playing (${adoptedReads} reads)`);
+    assert.ok(
+      adoptedStill >= 4,
+      `the counter stood still on reads of the adopted track as well (${adoptedStill} of ${adoptedReads})`,
+    );
+    assert.equal(adoptedDark, 0, 'and its bars never blanked between its own frames either');
+    say(`2. the adopt path on the same cadence: ${adoptedReads} reads, ${adoptedStill} still, ${adoptedDark} dark`);
   } finally {
     fakes.restore();
     await stopAll(engines);

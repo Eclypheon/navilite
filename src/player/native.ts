@@ -160,6 +160,36 @@ export interface NativeSpectrumFrame {
    * process-lifetime counter's growth.
    */
   itemFrames?: number;
+  /**
+   * The period **this item's own tap declared for itself**, in ms (v1.9.26) — the pace its frames
+   * arrive at, and the fact the drawing rule is judged on.
+   *
+   * The plugin keeps `maxFrames` from `prepare` (it used to discard it, `NaviliteSpectrum.swift:811`),
+   * divides it by the processing format's sample rate and floors the result at the tap's own FFT hop
+   * (`NaviliteSpectrum.SpectrumAnalysis.framePeriodMs`): `maxFrames` is the tap's own statement of the
+   * largest buffer AVFoundation will hand it, so that ratio bounds how long it can legitimately go
+   * without producing a frame, and the hop is the floor below which no second frame can exist.
+   *
+   * It exists because the v1.9.25 rule rested on an assumption nothing had measured — that a healthy
+   * tap produces one frame per 33 ms read. It does not: frame production is quantized to the tap's PCM
+   * buffer, and 4096-frame buffers are ~11 frames/s against 30 reads/s, so *two reads in three* would
+   * have blanked the bars of a tap that was measuring perfectly. Optional, so a bridge whose plugin
+   * predates it reads as "not known" and the v1.9.25 rule (only frames this item's tap produced since
+   * the last read) stands rather than being assumed away.
+   */
+  itemFramePeriodMs?: number;
+  /**
+   * How old **this item's own last frame** is, in ms (v1.9.26): the plugin's own answer, taken on the
+   * monotonic clock of the analysis that produced it, and `-1` for an analysis that has produced
+   * nothing for its item yet.
+   *
+   * This is the other half of the pace: drawn while `itemFrameAgeMs <= itemFramePeriodMs` (this item's
+   * register, one window of its own tap old), named and not drawn past it. Both numbers are the
+   * plugin's, about the item its tap is on, so the engine's rule compares two facts rather than a
+   * clock of its own — no constant, no poll count, no timer. With `itemFrames === 0` it reads `-1`,
+   * which is the loud-skip state that must stay undrawn.
+   */
+  itemFrameAgeMs?: number;
   /** Of those, how many were digital silence — what a *flat* audio signal looks like. */
   silentFrames: number;
   positionMs: number;

@@ -553,14 +553,42 @@ the start and then go to zero and remain there the whole track"*, *"while it's f
 when i skip out of a loud passage … on a cold start the spectrum always works"* — what the fix establishes, and the
 one half of it only his phone runs.
 
-1. **A frame is drawn, and may spend the chip's third word, only if this item's tap produced it since the last
-   read** (`src/player/engine.ts`: `noteTapFrames` and the branch above `nativeBands` in `pollSpectrum`).
-   `bands`/`live` are a **last-value register** — the last frame the FFT ever produced, zeroed only in `detach` —
-   so on a track whose own analysis is gone the plugin hands over the *previous* item's last frame, non-zero and
-   `live`. The frozen rule (`checksum !== 0 && checksum === lastNativeChecksum`, `FROZEN_FRAMES_BEFORE_THEME`) was
-   the writer of what he reads: ten identical reads of that register, ~330 ms in, and the chip went to *native
-   audio* with the bars flat. It now only ever sees frames that moved, so it catches the live-but-stuck tap it was
-   written for and nothing else; a register that simply stopped is a different state, with its own sentence (§3).
+1. **A frame is drawn, and may spend the chip's third word, only if this item's tap produced it — which is a
+   statement about that tap's own pace, not about a read** (`src/player/engine.ts`: `noteTapFrames`,
+   `holdsThisItemsOwnFrame` and the branch above `nativeBands` in `pollSpectrum`; amended by Sage's SEND BACK of
+   `2e1eb9d`, `t_48f5660b`). `bands`/`live` are a **last-value register** — the last frame the FFT ever produced,
+   zeroed only in `detach` — so on a track whose own analysis is gone the plugin hands over the *previous* item's
+   last frame, non-zero and `live`. The frozen rule (`checksum !== 0 && checksum === lastNativeChecksum`,
+   `FROZEN_FRAMES_BEFORE_THEME`) was the writer of what he reads: ten identical reads of that register, ~330 ms in,
+   and the chip went to *native audio* with the bars flat. It now only ever sees frames this item's tap produced, so
+   it catches the live-but-stuck tap it was written for and nothing else; a register that simply stopped is a
+   different state, with its own sentence (§3).
+   **What this point said when it was first written — *"only if this item's tap produced it since the last read"* —
+   rested on a premise nothing had measured: that a healthy tap advances its counter once per 33 ms read. It does
+   not.** Frame production is quantized to the PCM buffer AVFoundation hands the tap (`drainAndAnalyze` resets
+   `sinceLastFrame` per callback instead of subtracting the hop, `NaviliteSpectrum.swift:678`), the `maxFrames` a
+   tap declares at `prepare` was discarded (`:811`), and 4096-frame buffers are ~11 frames/s against 30 reads/s —
+   so two reads in three would have blanked the bars, and flapped the chip between *spectrum* and *spectrum…*, on a
+   tap that was measuring perfectly: the quiet skip and the cold start, i.e. exactly the cases that work today.
+   The plugin now **keeps that declaration** and publishes, for the item its tap is on, `itemFramePeriodMs`
+   (`maxFrames` over the sample rate, floored at the tap's own FFT hop — how long this tap can legitimately go
+   between two frames) and `itemFrameAgeMs` (how old the frame it is holding is, on the monotonic clock of the
+   analysis that produced it; `-1` before its first). The rule is that comparison and nothing else: a frame is
+   drawn when this item's tap produced it since the last read, **or** when it is this item's own last frame and no
+   older than its own period; past that the register is named and not drawn. No engine constant, no poll count, no
+   `setTimeout`, no *"give up after N s"* — §515.1's deleted shapes stay deleted — and both halves of the honesty
+   stay: `itemFrames === 0` (the register holding the previous item's frame: his loud skip) is still never drawn or
+   judged, and a held frame decides nothing — it does not feed the frozen rule, does not count toward the silence
+   verdict, does not refresh the pinned-end watchdog's live stamp and does not touch the chip, which keeps the third
+   word for a track whose tap has never answered (§515.4 stands). The two sentences §3 lists for the undrawn states
+   read, after this amendment, *"the frame the plugin is holding was not produced by this item's tap — the bars
+   follow the audio, and this track's own tap has yet to give one"* and — for a tap that *had* produced for this
+   item and stopped — *"this item's tap produced its last frame longer ago than its own frame period — nothing is
+   measuring this track now"*. The failing cadence is stated by the harness (`test/engine-native.test.ts`, the
+   v1.9.26 case: a frame every three reads with a declared 93 ms period, which is the 4096-frame buffer at
+   44.1 kHz, asserting `readSpectrum()` non-null, the engine live and the chip on *spectrum* on every read — it
+   fails on `2e1eb9d` on two reads in three). What only his phone can settle is the real number:
+   `status.tap.framePeriodMs` / `frameAgeMs` are printed on the screen's own line (`src/ui/app.ts`).
 2. **"Nothing has been measured for this item" is a plugin fact, not an inference.** `NativeSpectrumFrame.itemFrames`
    (new; `NaviliteSpectrum.snapshot`) is the analysis's own count for the item its tap is on: zero at the install,
    growing while that item is measured. The engine uses it when the plugin sends it and falls back to the growth of
@@ -568,10 +596,12 @@ one half of it only his phone runs.
    produces frames; a tap whose analysis is gone produces none — the distinction the engine could not read before,
    and the reason this defect looked like the owner's *"there isn't enough silence between the songs"*.
 3. **The state §515 left open is answered in §515's own terms.** A tap on the item playing now that has produced
-   nothing since the last read keeps the chip's third word (the same word §515.4 gives a tap that never answered),
+   nothing **for that item** keeps the chip's third word (the same word §515.4 gives a tap that never answered),
    the bars follow the audio, and the reason line names *which* register it is looking at — *the frame the plugin is
-   holding was not produced by this item's tap since the last read* (his loud skip: the register still looks live)
-   or *the tap on the item that is playing has produced no frame since the last read* (it is flat). No verdict is
+   holding was not produced by this item's tap* (his loud skip: the register still looks live)
+   or *the tap on the item that is playing has produced no frame for this track* (it is flat). (§516.1 as amended
+   rewords both of those to carry the pace, and adds the third state — a tap that produced for this item and has
+   now stood still longer than its own frame period; the states themselves are unchanged.) No verdict is
    spent, no re-attach is issued and no timer exists: a verify cannot restart a tap AVFoundation has stopped
    preparing, so asking would be a round trip that corrects nothing — the shape v1.9.24 deleted for `resync`.
 4. **And the cause is native, where §515.5 said nothing changed: it is not.** One `AudibleSpectrumTap` per process
@@ -590,7 +620,9 @@ one half of it only his phone runs.
    native player had just started itself.
 6. **The reason line carries the tap's own numbers now** (`EngineStatus.tap`: frames for this item, the plugin's
    two frame counters, its install/verify counts, and the slot the plugin says the tap is on against the slot the
-   bridge is playing). Three of those were already computed and dropped at the bridge; for a defect that has been
+   bridge is playing — plus, since the amendment above, the tap's own pace for the item, `framePeriodMs` and
+   `frameAgeMs`, which is the pair the drawing rule is a comparison of and the one number about a real tap that no
+   build has ever printed). Three of those were already computed and dropped at the bridge; for a defect that has been
    diagnosed from source three times, one reading of his is worth more than a fourth pass.
 7. **What is not claimed.** The native ordering cannot be reproduced in node. The harness states *"this item's tap
    has stopped producing for it"* — all the engine ever sees — and proves the engine's half of it

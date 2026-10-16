@@ -413,6 +413,12 @@ final class AudibleSpectrumTap {
     /// `frames` is still the process-lifetime count; `itemFrames` is that count **for this item**,
     /// which is the fact the engine decides from: a register that does not move is not a measurement
     /// of the item playing now.
+    ///
+    /// v1.9.26 — and so are **`itemFramePeriodMs` and `itemFrameAgeMs`**: the pace this item's own tap
+    /// declared at `prepare` and the age of the frame it is holding. They are published together
+    /// because they are only meaningful together: the engine draws this item's last frame while its age
+    /// is no longer than its own period, and names the state (drawing nothing) once it is older. Both
+    /// are this analysis's, so a frame from one item can never be judged against another item's pace.
     func snapshot() -> [String: Any] {
         lock.lock()
         let lifetime = lifetimeFrames
@@ -429,6 +435,11 @@ final class AudibleSpectrumTap {
             "frames": lifetime,
             // Frames **this item's** tap has produced (v1.9.25) — the per-item fact.
             "itemFrames": measurement?.frames ?? 0,
+            // The pace of **this item's** own tap, and the age of the frame it is holding (v1.9.26):
+            // the two numbers the engine's drawing rule is a comparison of. `maxFrames` over the sample
+            // rate, floored at one hop, and an age that is `-1` until this analysis produces a frame.
+            "itemFramePeriodMs": measurement?.framePeriodMs ?? 0,
+            "itemFrameAgeMs": measurement?.sinceLastFrameMs ?? -1,
             // Frames the FFT has produced from digital silence — what "flat" looks like when it is
             // the *audio* that is flat rather than the measurement that is broken.
             "silentFrames": measurement?.silentFrames ?? 0,
@@ -497,6 +508,23 @@ final class SpectrumAnalysis {
     private var lastFrameLive = false
     private var readable = true
     private var sampleRate: Double = 0
+    /// **The pace of this item's own tap, kept instead of discarded (v1.9.26).**
+    ///
+    /// `prepare` hands the tap's own declaration of the largest buffer it will ever be given
+    /// (`maxFrames`), and until this version the plugin threw it away — which is what let the engine's
+    /// drawing rule rest on an assumption nothing had measured, that a healthy tap produces a frame per
+    /// read. Frames are produced when the PCM ring has accumulated one hop, and the ring is filled per
+    /// *callback*, so the real rate is quantized to this number: `maxFrames / sampleRate` is how long
+    /// this tap can legitimately go between two frames, floored at one hop (below `hop` samples no
+    /// second frame can exist, however small the buffers are).
+    private var framePeriodMs: Double = 0
+    /// When this analysis produced its last frame, on the monotonic clock — 0 before its first (v1.9.26).
+    ///
+    /// The engine compares this against `framePeriodMs` to tell "this item's tap is between its own
+    /// frames" (draw what it holds) from "this item's tap has stopped" (name it, draw nothing). Both
+    /// numbers are properties of *this* item's analysis, which is why neither is a clock the engine
+    /// keeps or a count of polls it has made.
+    private var lastFrameUptime: Double = 0
 
     /// The frame as one value, read under the lock (v1.9.25).
     var published: PublishedFrame {
@@ -507,10 +535,23 @@ final class SpectrumAnalysis {
             frames: frames,
             silentFrames: silentFrames,
             readable: readable,
-            sampleRate: sampleRate
+            sampleRate: sampleRate,
+            // v1.9.26 — the pace, and the age of what is being held: read together, under the same
+            // lock, so a frame can never be reported against the period of another moment.
+            framePeriodMs: framePeriodMs,
+            sinceLastFrameMs: frames == 0 ? -1 : max(0, (SpectrumAnalysis.uptime() - lastFrameUptime) * 1000)
         )
         lock.unlock()
         return frame
+    }
+
+    /// The monotonic clock this analysis stamps its frames with, in seconds.
+    ///
+    /// Uptime rather than a date: it cannot go backwards (a clock change or an NTP correction must not
+    /// make a frame look younger or older than it is), and the age it produces is compared only with
+    /// this analysis's own period.
+    private static func uptime() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
     }
 
     /*
@@ -561,10 +602,24 @@ final class SpectrumAnalysis {
         self.owner = owner
     }
 
-    fileprivate func prepare(sampleRate: Double, format: AudioStreamBasicDescription) {
+    fileprivate func prepare(sampleRate: Double, format: AudioStreamBasicDescription, maxFrames: CMItemCount) {
         guard !retired else { return }
         self.sampleRate = sampleRate
         self.tapFormat = format
+        /*
+         * v1.9.26 — **the tap's own pace, kept.** `maxFrames` is this tap's own statement of the
+         * largest buffer it will ever be handed in one `process` call, and it is what quantizes frame
+         * production: the ring is filled per callback and a frame is produced when it holds a hop, so
+         * `maxFrames / sampleRate` is how long this item's tap can legitimately go between two frames.
+         * (The hop is the floor: with buffers smaller than a hop, frames still cannot come faster than
+         * one hop of audio, and a tap that declares a tiny `maxFrames` must not be judged against it.)
+         *
+         * Nothing else changed here; this number is published beside `itemFrames` and compared with the
+         * age of this analysis's own last frame, so the engine can tell a tap that is between its
+         * frames from one that has stopped without holding a clock of its own.
+         */
+        let declaredFrames = max(Double(maxFrames), Double(AudibleSpectrumTap.hop))
+        self.framePeriodMs = sampleRate > 0 ? declaredFrames / sampleRate * 1000 : 0
         /*
          * Everything the analysis needs is built here, on `analysisQueue`, and the timer that drains
          * the PCM ring is started with it. `prepare` is called by the tap before the first `process`,
@@ -735,6 +790,10 @@ final class SpectrumAnalysis {
         frames += 1
         if any { silentFrames = 0 } else { silentFrames += 1 }
         lastFrameLive = any
+        // v1.9.26 — and when: the age the engine compares with this analysis's own `framePeriodMs` is
+        // measured from here, so "this item's tap has produced nothing since" is a length of time about
+        // this item's own analysis rather than a count of the engine's polls.
+        lastFrameUptime = SpectrumAnalysis.uptime()
         lock.unlock()
         /*
          * And the same frame counted for the app process, which is what `frames` has always been:
@@ -793,6 +852,10 @@ struct PublishedFrame {
     var silentFrames: Int
     var readable: Bool
     var sampleRate: Double
+    /// The period this item's own tap declared for itself, in ms (v1.9.26) — see `framePeriodMs`.
+    var framePeriodMs: Double
+    /// How long ago this analysis produced its last frame, in ms — `-1` before its first (v1.9.26).
+    var sinceLastFrameMs: Double
 }
 
 /* --------------------------------------------------------------------- tap callbacks */
@@ -811,7 +874,13 @@ private func audibleSpectrumTapFinalize(tap: MTAudioProcessingTap) {
 private func audibleSpectrumTapPrepare(tap: MTAudioProcessingTap, maxFrames: CMItemCount, processingFormat: UnsafePointer<AudioStreamBasicDescription>) {
     let storage = MTAudioProcessingTapGetStorage(tap)
     let analysis = Unmanaged<SpectrumAnalysis>.fromOpaque(storage).takeUnretainedValue()
-    analysis.prepare(sampleRate: processingFormat.pointee.mSampleRate, format: processingFormat.pointee)
+    analysis.prepare(
+        sampleRate: processingFormat.pointee.mSampleRate,
+        format: processingFormat.pointee,
+        // v1.9.26 — the tap's own declaration of the largest buffer it will hand us. It used to be
+        // dropped here, which is how the engine came to be written against "a frame per read".
+        maxFrames: maxFrames
+    )
 }
 
 private func audibleSpectrumTapUnprepare(tap: MTAudioProcessingTap) {

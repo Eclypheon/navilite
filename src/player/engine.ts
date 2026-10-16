@@ -248,6 +248,19 @@ export interface EngineStatus {
     /** The slot the plugin says the tap is on, and the slot this bridge is playing. */
     tapped: string | null;
     audible: string | null;
+    /**
+     * The pace the drawing rule is judged on, as the plugin declares it for this item (v1.9.26):
+     * `maxFrames` from `prepare` over the sample rate, floored by the tap's own FFT hop — and how old
+     * the frame it is holding is, on the plugin's clock.
+     *
+     * This is the pair the SEND BACK of `2e1eb9d` was about: the rule blanked the bars whenever the
+     * counter had not moved since the previous read, which is true on two reads in three of a healthy
+     * tap if AVFoundation hands it 4096-frame buffers. Printed here because the *real* number is a
+     * fact about his phone and no build has ever shown it — and null on a bridge that does not publish
+     * the pace, which is the state the v1.9.25 rule still governs.
+     */
+    framePeriodMs: number | null;
+    frameAgeMs: number | null;
   };
 }
 
@@ -1302,6 +1315,11 @@ export class AudioEngine {
         verifies: frame?.verifies ?? null,
         tapped: evidence?.tapped ?? null,
         audible: evidence?.audible ?? null,
+        // The pace the drawing rule is judged on (v1.9.26): the tap's own declaration and the age of
+        // the frame it is holding, both read from the last frame — never a decision, always the phone's
+        // own numbers, and the pair his phone is the only place that can settle.
+        framePeriodMs: frame?.itemFramePeriodMs ?? null,
+        frameAgeMs: frame?.itemFrameAgeMs ?? null,
       },
     };
   }
@@ -2823,7 +2841,8 @@ export class AudioEngine {
     this.spectrumDeadPolls = 0;
     /*
      * **Nothing is drawn, and nothing is judged, from a frame this item's tap did not produce
-     * (v1.9.25).**
+     * (v1.9.25) — and this item's own last frame is drawn for as long as its own tap's period says
+     * it is still the measurement in hand (v1.9.26).**
      *
      * `bands` and `live` are a last-value register: the plugin publishes the last frame its FFT ever
      * produced and zeroes it only in `detach`, so on this path — tap on the item playing now, player
@@ -2835,15 +2854,36 @@ export class AudioEngine {
      * to jump up at the start and then go to zero and remain there"*, and, while the bars are flat,
      * the chip reading *native audio*.
      *
-     * The frame in hand is admitted only when the counter moved, and that single rule is what this
-     * whole branch rests on: the bars follow the audio (the visualiser's own release envelope, no
-     * synthetic frame), the chip keeps its third word (nothing here decides that this track cannot
-     * have a spectrum), and the reason line names which of the two states the tap is in — a register
-     * that still looks live, or a register that is flat. The frozen rule below therefore never sees a
-     * frame that did not move, which is the frame it was firing on.
+     * **And the counter's movement alone is not the test** (v1.9.26 — §516.1 amended, and the whole
+     * of Sage's SEND BACK of `2e1eb9d`). It was: *a frame may only be drawn if this item's tap
+     * produced it since the last read*, which silently assumed a healthy tap produces one frame per
+     * {@link SPECTRUM_POLL_MS} read. It does not — the plugin's frame production is quantized to the
+     * PCM buffer AVFoundation hands the tap (`drainAndAnalyze` resets `sinceLastFrame` per callback
+     * instead of subtracting the hop, `NaviliteSpectrum.swift:678`; `maxFrames` from `prepare` was
+     * discarded, `:811`), and 4096-frame buffers are ~11 frames/s against 30 reads/s. So the rule
+     * blanked the bars — and flapped the chip between *spectrum* and *spectrum…* — on two reads in
+     * three, **of a tap that was measuring perfectly**, which weakened exactly the cases that work
+     * today: a quiet skip and a cold start.
+     *
+     * The rule that stands instead rests on two facts the plugin publishes about **this item's own
+     * analysis** and on nothing else — no engine constant, no poll count, no timer, no "give up after
+     * N s" (`DECISIONS.md` §515.1 deleted that shape): the period that tap declared for itself
+     * (`itemFramePeriodMs`) and how old the frame it is holding is (`itemFrameAgeMs`). A frame is
+     * drawn when this item's tap produced it since the last read, **or** when it is this item's own
+     * last frame and is no older than that tap's own period. Past that the register is named and not
+     * drawn — the loud-skip state, and the tap that has stopped, are both still covered: a tap that
+     * has produced *nothing* for this item (`itemFrames === 0`) never reaches either half.
+     *
+     * What a held frame is not: evidence of anything. It is drawn and nothing else — it does not feed
+     * the frozen-frame rule (the same frame *not produced again* is not a tap stuck on one buffer, it
+     * is the same measurement in hand), it does not count toward the silence verdict (a poll the tap
+     * did not answer is not another 33 ms of digital silence), it does not refresh the pinned-end
+     * watchdog's live stamp (nothing new was measured) and it does not touch the chip (there is no new
+     * fact about this item's tap for the chip to say).
      */
     this.lastNativeFrame = frame;
-    if (!measured) {
+    const held = !measured && this.holdsThisItemsOwnFrame(frame);
+    if (!measured && !held) {
       this.spectrumLive = false;
       this.spectrumZeroPolls = 0;
       /*
@@ -2852,16 +2892,25 @@ export class AudioEngine {
        * coming*, which is a statement about this item's tap and nothing about whether this track can
        * have one. It goes back to *spectrum* on this item's next frame, and it is the word the owner
        * asked for in place of *native audio* while the bars are flat.
+       *
+       * The sentence names which register is being looked at, and — since v1.9.26 — the pace the
+       * judgement is made on: this item's tap has produced something and stood still longer than its
+       * own frame period (the register is this item's own, one period old and past it), or this item's
+       * tap has produced nothing at all for this track (the register is the previous item's, and it
+       * still looks live or it is flat).
        */
       this.spectrumArming = this.state === 'playing';
       this.setSpectrumReason(
-        frame.live
-          ? 'the frame the plugin is holding was not produced by this item’s tap since the last read — the bars follow the audio, and this track’s own tap has yet to give one'
-          : 'the tap on the item that is playing has produced no frame since the last read — nothing is being measured for this track, so the bars follow the audio while the engine keeps waiting on its tap',
+        this.tapFramesForItem > 0
+          ? 'this item’s tap produced its last frame longer ago than its own frame period — nothing is measuring this track now, so the bars follow the audio until its analysis produces another'
+          : frame.live
+            ? 'the frame the plugin is holding was not produced by this item’s tap — the bars follow the audio, and this track’s own tap has yet to give one'
+            : 'the tap on the item that is playing has produced no frame for this track — nothing is being measured, so the bars follow the audio while the engine keeps waiting on its tap',
       );
       return;
     }
     this.nativeBands = Uint8Array.from(frame.bands);
+    if (held) return;
     if (frame.live) {
       this.spectrumZeroPolls = 0;
       // A live frame is what the watchdog waits for before it will call the end of a track by
@@ -2953,11 +3002,48 @@ export class AudioEngine {
   }
 
   /**
+   * True when the frame in hand is **this item's own last measurement, still inside the tap's own
+   * frame period** (v1.9.26 — the premise §516.1 was amended for).
+   *
+   * `bands`/`live` are a last-value register, and on this item the register is not another item's: the
+   * plugin's `SpectrumAnalysis` is one per install, so while this item's analysis is between two
+   * frames, what it hands over is *this item's* last frame, one window old. The two facts that say so
+   * are both the plugin's, and this method reads them and nothing else:
+   *
+   *   - **`tapFramesForItem > 0`** — this item's tap has produced a frame for this item at some point
+   *     (see `noteTapFrames`). A register that has never moved *for this item* is the previous item's
+   *     frame, which is the loud skip, and it is deliberately not covered here.
+   *   - **`itemFramePeriodMs` / `itemFrameAgeMs`** — the period this item's tap declared for itself at
+   *     `prepare` (`maxFrames` over the sample rate, floored by the tap's own FFT hop:
+   *     `NaviliteSpectrum.SpectrumAnalysis.framePeriodMs`) and how old the frame it is holding is. A
+   *     frame no older than one of the tap's own periods is the measurement in hand; one older than
+   *     that is a tap that has stood still longer than its own pace — a state to name, not to draw.
+   *
+   * What the threshold is **not**: an engine constant, a count of polls, a `setTimeout`, or a "give up
+   * after N s" — the shapes `DECISIONS.md` §515.1 deleted, and the reason this is a comparison of two
+   * numbers the *plugin* publishes about the item it is tapping.
+   *
+   * A bridge that does not publish the pace reads as "not known" and the frame is not held: the
+   * v1.9.25 rule (only frames this item's tap produced since the last read) then stands, because a
+   * fact the engine cannot read is not a fact it may assume.
+   */
+  private holdsThisItemsOwnFrame(frame: NativeSpectrumFrame): boolean {
+    if (this.tapFramesForItem <= 0) return false;
+    const period = frame.itemFramePeriodMs;
+    const age = frame.itemFrameAgeMs;
+    if (typeof period !== 'number' || typeof age !== 'number') return false;
+    if (!(period > 0) || !(age >= 0)) return false;
+    return age <= period;
+  }
+
+  /**
    * Count the tap's frames **for the item playing now**, and say whether this read carries a frame
    * that item's tap actually produced (v1.9.24; the second half is v1.9.25).
    *
    * The rule the engine needs from this is one sentence long: *a frame may only be drawn, and may
-   * only spend the chip's third word, if this item's tap produced it since the last read.* A
+   * only spend the chip's third word, if this item's tap produced it since the last read* — plus, since
+   * v1.9.26, *unless it is this item's own last frame and is no older than that tap's own declared
+   * period* (see `holdsThisItemsOwnFrame`, and §516.1 as amended). A
    * last-value register is not a measurement of the item that is playing — and the register is
    * exactly what the plugin hands over: `bands`/`live` are the last frame *whose* tap ever analyzed,
    * zeroed only by `detach`. So the frame in hand is admitted on the counter moving, and there are

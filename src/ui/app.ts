@@ -3390,6 +3390,12 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
     `installs ${status.tap.installs ?? '—'}/verifies ${status.tap.verifies ?? '—'} · ` +
     `tapped ${status.tap.tapped ?? '—'} (audible ${status.tap.audible ?? '—'}) · ` +
     `plugin frames ${status.tap.pluginFrames ?? '—'} (${status.tap.pluginItemFrames ?? '—'} for this item) · ` +
+    /* v1.9.26 — **the tap's own pace**, the pair the drawing rule is judged on: the period the plugin
+     * declared for this item at `prepare` (`maxFrames` over the sample rate) and the age of the frame
+     * it is holding. The bars are drawn while the age is no longer than the period, so these two
+     * numbers *are* the rule — and the real period is a fact about his phone that no build has ever
+     * printed. Both `—` on a build whose plugin does not publish them. */
+    `tap pace ${status.tap.framePeriodMs ?? '—'} ms/frame (register ${status.tap.frameAgeMs ?? '—'} ms old) · ` +
     // v1.9.8 — the native player's own boundary: how many slots it will play by itself while the
     // app is away, how many tracks it has taken, and the sentence naming which state it is in.
     `native: ${status.nativeBoundary.armed} armed, ${status.nativeBoundary.advances} taken, ` +
