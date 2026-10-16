@@ -18,6 +18,12 @@
  * the run**, with the millisecond it changed at. That last list is the flashing he describes and
  * the one thing a code reading cannot produce.
  *
+ * One thing about the now-playing screen is measured rather than assumed, and it is why the
+ * assertion there is worded as it is: that screen draws an opaque overlay over the bar, so the bar's
+ * chip node is still in the DOM behind it and **nothing is visible to the owner there**. The probe
+ * reads what is painted at the chip's own centre (`elementFromPoint`) beside the node count, so the
+ * run says "one node, one field" — not "both surfaces show the word".
+ *
  * What a browser cannot show, said here rather than implied: this build's backend is `web`, so the
  * capability word this path reaches is `theme` (no WebAssembly-free Web Audio, or a stream the
  * browser will not hand over) — **not** the `native audio` in his screenshot, which belongs to the
@@ -82,7 +88,13 @@ interface Readings {
   resumed: Reading;
   midChange: Reading;
   afterChange: Reading;
-  nowScreen: Reading & { chips: string[] };
+  nowScreen: Reading & {
+    chips: string[];
+    /** The tag of whatever is painted at the bar's chip centre there — the overlay, measured. */
+    chipTopElement: string | null;
+    /** True when the chip itself is what is under the finger there. */
+    chipIsTopElement: boolean;
+  };
 }
 
 /** What the page hands back: the readings at each state, and every distinct word it wore. */
@@ -205,12 +217,24 @@ const PROBE = `(async () => {
   await sleep(300);
   out.pausedAfterNavigating = note('still paused, back on a playlist page');
 
-  // 5. The now-playing screen, still paused: every chip node on it, and what they read.
+  // 5. The now-playing screen, still paused: every chip node on it, what they read, and whether the
+  //    bar's chip is actually what is painted at its own centre there (the now overlay covers the bar).
   location.hash = '#/now';
   await sleep(400);
+  const paintedAtChipCentre = () => {
+    const n = node();
+    if (!n) return { top: null, isChip: false };
+    const box = n.getBoundingClientRect();
+    const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    const tag = top ? top.tagName + (top.className ? '.' + String(top.className).split(' ')[0] : '') : null;
+    return { top: tag, isChip: top === n || (top !== null && n.contains(top)) };
+  };
+  const nowPainted = paintedAtChipCentre();
   out.nowScreen = {
     ...note('the now-playing screen'),
     chips: Array.from(document.querySelectorAll('.mode-chip')).map((n) => n.textContent),
+    chipTopElement: nowPainted.top,
+    chipIsTopElement: nowPainted.isChip,
   };
 
   // 6. Back to the playlist page, resume, and read the whole of a track change.
@@ -307,6 +331,9 @@ test('the chip’s word on the screen he photographed: a paused track on a playl
     console.log(`      every distinct word the chip wore (${probed.words.length}):`);
     for (const w of probed.words) console.log(`        ${String(w.ms).padStart(6)} ms  "${w.onScreen}"   (${w.label}, state ${w.state})`);
     console.log(`      chip nodes on the now-playing screen: ${r.nowScreen.chips.length} ${JSON.stringify(r.nowScreen.chips)}`);
+    console.log(
+      `      on the now-playing screen the chip's own centre is painted by: ${r.nowScreen.chipTopElement} — the chip itself: ${r.nowScreen.chipIsTopElement}`,
+    );
 
     // The load: the app's own word, unchanged by this card.
     assert.equal(r.tap.onScreen, 'loading…', 'a tap whose stream is not here yet says so, in the same paint');
@@ -327,12 +354,23 @@ test('the chip’s word on the screen he photographed: a paused track on a playl
     assert.equal(r.pausedAfterNavigating.onScreen, 'paused', 'a playlist page away, it still is');
     assert.equal(r.pausedAfterNavigating.state, 'paused', 'and the machine is still paused');
 
-    // Every chip node on the now-playing screen agrees with the bar — they read one field.
-    assert.ok(r.nowScreen.chips.length > 0, 'the now-playing screen has the chip on it');
+    /*
+     * The now-playing screen — said as what this probe can read, not as "both surfaces show the word".
+     * The now overlay is opaque and paints over the bar, so the DOM finds one chip node there that the
+     * owner cannot see: `chips.length === 1` is a fact about the DOM, and the coverage below is measured
+     * rather than assumed. What is asserted is the invariant that survives it — one node, one field,
+     * therefore nothing can disagree — plus the measurement itself.
+     */
+    assert.equal(r.nowScreen.chips.length, 1, 'the now-playing screen carries the bar’s one chip node in the DOM');
     assert.deepEqual(
       [...new Set(r.nowScreen.chips.map((text: string) => text.split(' · ')[0]))],
       ['paused'],
-      'and every one of them reads the same word, from the same field',
+      'and that one node reads the word the same field gives the bar',
+    );
+    assert.equal(
+      r.nowScreen.chipIsTopElement,
+      false,
+      `the bar’s chip is not what is painted on the now-playing screen — the overlay covers it (top element at the chip’s centre: ${r.nowScreen.chipTopElement})`,
     );
 
     // And it is the engine's own word the chip prints — one source, not a second expression.

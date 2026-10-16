@@ -296,3 +296,8 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - Skipping out of a loud passage no longer leaves the bars flat. On the song you landed on, the bar could read "native audio" while music was plainly playing, and the spectrum stayed dark for the rest of the track — the app had stopped reading the song you were on. The bars now follow the song that is playing from the moment you land on it.
 - The spectrum is drawn only from the song you are hearing. What is on the screen is the shape of the song that is playing, never a leftover of the one you just left.
+
+## 1.9.26 — 2026-10-16
+
+- The bar no longer says "native audio" while the spectrum is working. With a song loaded and paused on the playlist pages, the little word on the player bar read "native audio" beside "spectrum off" — as if the app could not read that song at all — while the spectrum was fine and the only thing true about it was that nothing was playing. A paused song says "paused" there now.
+- Every word on that bar means one thing, and nothing else: "spectrum" while the bars are being fed by the song you are hearing, "spectrum…" while the phone is still setting that song's reading up, the transport's own word ("paused", "loading…") when the only reason nothing is being drawn is that nothing is playing, and "native audio" only on a build that genuinely cannot read the music that is playing — never as a stand-in for a pause.

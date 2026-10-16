@@ -631,7 +631,7 @@ one half of it only his phone runs.
    `prepare` on his phone, and that this item's analysis now survives it, is **unverified on device** until he
    skips out of a loud passage on the build that carries it.
 
-## The chip's word is a fact about the item in hand, never a capability reached by elimination, 2026-10-16 (card `t_9329e3b0` — unreleased)
+## The chip's word is a fact about the item in hand, never a capability reached by elimination, 2026-10-16 (card `t_9329e3b0` — released as v1.9.26)
 
 The owner, on the v1.9.24 build he had just installed, with a track loaded and **paused** on the playlist page for
 `Jap` (1:28 / 4:55). His screenshot: the mini-player's chip reads `NATIVE AUDIO`, and the debug line under it reads
@@ -678,16 +678,24 @@ The owner, on the v1.9.24 build he had just installed, with a track loaded and *
    `stopped` tone, which is neither a measurement (green/`live`) nor a fallback (amber/`fallback`), so a pause
    reads as information rather than as a failure. The chip's own comment that said *"`native audio` is what this
    chip says for every state that is not playing"* is corrected, and the README's sentence about *"the mode chip
-   on the player bar and the now-playing screen"* is corrected with it: **the bar's chip is the app's only one**
-   (the now-playing screen lost its own in v1.1, `2ed9ed7`), which is why "the two surfaces cannot disagree" is
-   satisfied by there being one field and one node.
+   on the player bar and the now-playing screen"* is corrected with it: **the bar's chip is the app's only one,
+   and the now-playing screen has no chip visible at all.** The screen lost its own in v1.1 (`2ed9ed7`) and
+   replaces the bar with a full-screen overlay that paints over the bar's: measured in Chrome at 393 x 852, with
+   a track playing, `section.now` is `0,0,393x852`, opaque, `z-index 10`, the chip node sits at `x295 y755
+   84x24`, and `document.elementFromPoint` at the chip's own centre returns the overlay — so a DOM-presence
+   query says *"the chip is on the now-playing screen"* about a node the owner cannot see. **"The two surfaces
+   cannot disagree" therefore reduces to one field and one VISIBLE node** (the bar's), and the browser harness's
+   now-screen check is worded as what it reads — one node, one field — with that coverage measured beside it
+   (`test/chip-word-browser.test.ts`; §29.2 of `docs/verification.md`).
 6. **What this does not change, stated because it looks like the same defect and is not.** On the *web* path, a
    **playing** item whose analyser has not yet produced its first frame wears `theme` for ~90 ms (the meter
    samples every 100 ms); that window is the pre-existing verdict timing of the web path — no transport state is
    involved, the owner's build is native, and the native equivalent is covered by `arming` (v1.9.6). The probe
    filters on the transport state for exactly this reason, and §28.5 says so rather than implying the run is
    clean of the word.
-7. **No version bump, no artifact, no tag.** The release is its own card, gated on review; this is the fix, its
-   two harnesses, and a commit. `CHANGELOG.md`'s release heading is untouched (the words he reads are written at
-   release time).
+7. **Released as v1.9.26.** The fix landed on `main` unreleased (`d769fd4`), and this entry said so at the time:
+   no version bump, no artifact, no tag, `CHANGELOG.md`'s release heading untouched. This cut (its own card,
+   `t_77e69a9b`, after Sage's SHIP on `t_1c2d1c51`) is what stamps and ships it — the version in the seven files
+   of `docs/VERSIONING.md` §3, the changelog entry in his terms in both copies, the IPA, and §29 of
+   `docs/verification.md`. The fix commit itself carried none of those; the code in it is unchanged by the cut.
 

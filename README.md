@@ -131,8 +131,11 @@ The mode chip on the player bar names what the visualiser is doing for the track
 theme **only** where the bars genuinely cannot run on that track, and the transport's own word
 (`paused`, `ended`, `loading…`) when nothing is playing — with the reason underneath it. The word is
 computed once, in the engine (`EngineStatus.visualiser`), and the bar prints it: one source, so no
-two surfaces can disagree about the mode. (The bar's chip is the app's only one — the now-playing
-screen lost its own in v1.1 and shows the same bar.) Two specific traps are handled explicitly,
+two surfaces can disagree about the mode. (The bar's chip is the app's only one, and the now-playing
+screen has no chip **visible** at all: it lost its own in v1.1 and replaces the bar with a
+full-screen overlay that paints over the bar's — the node stays in the DOM there, behind the
+overlay, so a query of the DOM for a chip on that screen is reading a node the owner cannot see.)
+Two specific traps are handled explicitly,
 because both were observed while building this:
 
 - the analyser's destination buffer is **cleared before every read** — a tainted analyser can
