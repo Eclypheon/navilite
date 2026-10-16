@@ -15,7 +15,7 @@ import { LyricsRoute, type SidecarSource } from '../api/sidecar.ts';
 import { sameSong, structuredToBody } from '../api/lyrics.ts';
 import type { Album, Artist, Playlist, PlaylistWithEntries, QueueContext, QueueItem, Song } from '../api/types.ts';
 import { DEFAULT_SERVER_URL, SERVER_URL_PLACEHOLDER } from '../config.ts';
-import { AudioEngine, type EngineStatus } from '../player/engine.ts';
+import { AudioEngine } from '../player/engine.ts';
 import { attachVisualizer } from '../player/visualizer.ts';
 import { DEFAULT_PALETTE, paletteFromArtwork, type Palette } from '../player/palette.ts';
 import { platformInfo, type PlatformInfo } from '../platform.ts';
@@ -33,6 +33,7 @@ import { CHANGELOG } from './changelog.ts';
 import { ICONS, cover, formatDuration, formatTime, h, icon, playIcon, replace, starIcon } from './dom.ts';
 import { createLyricsView, type LyricsView } from './lyrics.ts';
 import { createPager, type Pager } from './pager.ts';
+import { updatePlayerBar, updateRowHighlight } from './player-bar.ts';
 
 const PASSWORD_KEY = 'subsonic-password';
 const BUILD_ID = '__BUILD_ID__';
@@ -89,7 +90,7 @@ const PANE_LYRICS = 2;
 
 type NowMode = 'spectrum' | 'lyrics';
 
-interface Shell {
+export interface Shell {
   header: HTMLElement;
   /** The app's one scroll container; every view draws into `view` inside it. */
   viewScroll: HTMLElement;
@@ -161,7 +162,7 @@ interface Shell {
   pendingScroll: { route: string | null; top: number } | null;
 }
 
-interface AppContext {
+export interface AppContext {
   platform: PlatformInfo;
   settings: Settings;
   secrets: SecretStore;
@@ -3216,240 +3217,3 @@ function songRow(
   ]);
 }
 
-/**
- * The playing track is marked wherever it appears in a list. Cheap and to the point: one
- * class toggle per visible row, driven from the player-bar update that already runs.
- */
-function updateRowHighlight(ctx: AppContext, shell: Shell, status?: EngineStatus): void {
-  const current = ctx.queue?.currentSong?.id ?? null;
-  /*
-   * v1.9.0: while a tap is being answered, the row it landed on says so. The loading state has to
-   * be visible *in the paint the tap produces* — a tap that shows nothing for seconds reads as a
-   * dead screen — and `queue.isLoading` is true from that same synchronous paint until the engine
-   * has the stream.
-   *
-   * v1.9.7 — the status is *handed in* when the caller has one. `updatePlayerBar` is called with the
-   * status on every event the engine emits (a dozen a second while playing) and then asked the
-   * engine for the same object again here; the render paths that call this without one still read
-   * it for themselves, because they have no status to pass.
-   */
-  const loading = (ctx.queue?.isLoading ?? false) || (status ?? ctx.engine.status()).state === 'loading';
-  if (current === shell.highlighted && loading === shell.highlightedLoading) {
-    if (current !== null) markRows(ctx, current);
-    return;
-  }
-  for (const [id, rows] of ctx.rows) {
-    for (const row of rows) {
-      row.classList.toggle('playing', id === current);
-      row.classList.toggle('loading', id === current && loading);
-    }
-  }
-  shell.highlighted = current;
-  shell.highlightedLoading = loading;
-}
-
-function markRows(ctx: AppContext, id: string): void {
-  for (const row of ctx.rows.get(id) ?? []) row.classList.add('playing');
-}
-
-/* ------------------------------------------------------------- player bar */
-
-function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): void {
-  const song = ctx.queue?.currentSong ?? null;
-  const visible = song != null;
-  /*
-   * v1.9.0: the loading state is a thing the screen shows, not a thing that is inferred from a
-   * stalled transport. `queue.isLoading` is set by the tap's own synchronous paint, so the row,
-   * the bar and the now screen carry it from the instant of the tap until the engine has the
-   * stream. Nothing here waits on the network: this function reads state and writes classes.
-   */
-  const loading = (ctx.queue?.isLoading ?? false) || status.state === 'loading';
-  /**
-   * v1.9.0 — the cap, where the owner can see it.
-   *
-   * *"never silently cap quality"*: when the app is asking Navidrome for a smaller stream (because
-   * the link measured slow) the bar says so, next to the mode. On a fast link this is `null` and
-   * nothing is shown because nothing is capped — the original file plays.
-   */
-  const cap = ctx.queue?.streamKbps ?? null;
-  shell.playerBar.classList.toggle('loading', loading);
-  shell.nowOverlay.classList.toggle('loading', loading);
-  shell.playerBar.classList.toggle('hidden', !visible);
-  updateRowHighlight(ctx, shell, status);
-  if (!visible) return;
-
-  const coverUrl = ctx.library?.coverUrl(song.coverArt ?? song.albumId, 256) ?? null;
-  const durationMs = status.durationMs || (song.duration ?? 0) * 1000;
-  const positionMs = Math.min(status.positionMs, durationMs || status.positionMs);
-
-  if (shell.barCover.dataset.song !== song.id) {
-    shell.barCover.dataset.song = song.id;
-    replace(shell.barCover, cover(coverUrl, 'pb-art', song.album ?? song.title));
-    replace(shell.nowCover, cover(ctx.library?.coverUrl(song.coverArt ?? song.albumId, 512) ?? null, 'now-art', song.album ?? song.title));
-    shell.lyrics.show(shell.nowMode === 'lyrics' ? song : null);
-  }
-
-  shell.barTitle.textContent = song.title;
-  shell.barSubtitle.textContent = [song.artist, song.album].filter(Boolean).join(' · ');
-  shell.nowTitle.textContent = song.title;
-  shell.nowSubtitle.textContent = [song.artist, song.album].filter(Boolean).join(' · ');
-  shell.nowContext.textContent = contextLine(ctx.queue);
-
-  /*
-   * v1.9.7 — **the play glyph is rebuilt only when the playing-ness changed.**
-   *
-   * This runs on every status event, and while a track plays the player reports a dozen of those a
-   * second: two `replace()` calls (a `replaceChildren` and a fresh SVG each) to draw the same glyph
-   * again. The repeat button below already shows the pattern — the state is kept in `dataset` and the
-   * icon is rebuilt on the change, not on the event.
-   */
-  const playing = status.state === 'playing';
-  if (shell.barPlay.dataset.playing !== String(playing)) {
-    shell.barPlay.dataset.playing = String(playing);
-    replace(shell.barPlay, playIcon(playing));
-    replace(shell.nowPlay, playIcon(playing, 26));
-  }
-
-  // Shuffle and repeat are state, not icons that lie: pressed = on, and repeat cycles
-  // off → all → one with the icon following.
-  const shuffle = ctx.queue?.shuffle ?? false;
-  shell.nowShuffle.classList.toggle('on', shuffle);
-  shell.nowShuffle.setAttribute('aria-pressed', String(shuffle));
-  const repeat = ctx.queue?.repeat ?? 'off';
-  shell.nowRepeat.classList.toggle('on', repeat !== 'off');
-  shell.nowRepeat.setAttribute('aria-pressed', String(repeat !== 'off'));
-  shell.nowRepeat.setAttribute('aria-label', repeat === 'off' ? 'Repeat off' : repeat === 'all' ? 'Repeat all' : 'Repeat one');
-  if (shell.nowRepeat.dataset.mode !== repeat) {
-    shell.nowRepeat.dataset.mode = repeat;
-    replace(shell.nowRepeat, icon(repeat === 'one' ? ICONS.repeatOne : ICONS.repeat, 20));
-  }
-
-  if (shell.scrubbing && shell.scrubMs !== null) {
-    /*
-     * A finger is on a seek bar: the label is the *destination*, not the position (v1.7.2). Written
-     * here as well as on every move, so a status event that lands mid-drag cannot pull the number
-     * back out from under the thumb.
-     */
-    const text = formatTime(shell.scrubMs / 1000);
-    shell.barPosition.textContent = text;
-    shell.nowPosition.textContent = text;
-  } else if (!shell.scrubbing) {
-    const ratio = durationMs > 0 ? Math.min(1, positionMs / durationMs) : 0;
-    shell.barProgress.value = String(Math.round(ratio * 1000));
-    shell.nowProgress.value = String(Math.round(ratio * 1000));
-    shell.barPosition.textContent = formatTime(positionMs / 1000);
-    shell.nowPosition.textContent = formatTime(positionMs / 1000);
-  }
-  shell.barDuration.textContent = formatTime((durationMs || 0) / 1000);
-  shell.nowDuration.textContent = formatTime((durationMs || 0) / 1000);
-
-  /*
-   * v1.9.6 — **the chip's third word.** v1.9.26 — **and it is the engine's word now, not this
-   * file's.**
-   *
-   * This used to be built here, out of three fields:
-   *
-   *     status.spectrum ? 'spectrum' : status.spectrumArming ? 'spectrum…' : status.backend === 'native' ? 'native audio' : 'theme'
-   *
-   * — and that third branch is a capability claim reached **by elimination**. `spectrumArming` is
-   * only reported while a native track is *playing*, so every state that is not playing fell through
-   * to *native audio*, which is the word for *"the spectrum cannot run on the item playing now"*:
-   * `paused`, `ended`, `interrupted` and "between two tracks" all read it. The owner's screenshot on
-   * a playlist page (a track paused at 1:28 / 4:55, chip `NATIVE AUDIO`, line `paused · native ·
-   * spectrum off`) is that branch, and *"it keeps flashing to native audio"* is what it does at every
-   * pause and every change on those screens.
-   *
-   * So the word is one fact about the item in hand, computed once in the engine
-   * (`EngineStatus.visualiser`, `src/player/engine.ts`) from facts only the engine has — the state,
-   * the backend, whether the bars are being fed, whether the tap is being asked, and whether this
-   * build can measure this item at all. **This file prints it and nothing else**, so the bar and
-   * anything else that shows the mode read one source and cannot disagree. What each word means is
-   * documented where it is decided (`VisualiserWord`).
-   */
-  const chip = status.visualiser;
-  shell.barChip.textContent = loading ? 'loading…' : `${chip.word}${cap === null ? '' : ` · ${cap} kbps`}`;
-  /*
-   * The tone is the engine's too, and the loading word — the tap's own, and the one this file owns
-   * because its input (`queue.isLoading`, the synchronous paint of v1.9.0) is the queue's — wears the
-   * neutral `stopped` colour: a load is neither a measurement nor a fallback, and it has never been
-   * a failure.
-   */
-  shell.barChip.className = `mode-chip ${loading ? 'stopped' : chip.tone}${cap === null ? '' : ' capped'}`;
-
-  /*
-   * v1.9.5 — **the app says its own reason, on the screen.**
-   *
-   * The boundary failure this release exists for reproduces only on the owner's phone, and three
-   * rounds of diagnosis were made from source alone — which is why the chip's own evidence was
-   * never available: `native audio` was what this chip said for *every* state that is not playing
-   * (v1.9.26 moved the word into the engine, so it no longer says that), and `modeReason` has been
-   * written in seventeen places and read by no screen at all.
-   *
-   * So the line carries the whole account at once: the machine's state, the engine that is behind
-   * it, whether the spectrum is actually fed, what the *player* last said (its own state, its own
-   * reason, and where it thinks it is against its own duration), what the boundary's adoption did,
-   * and how many of the bridge's own events were discarded and why. Every one of those is a fact
-   * this app already had and never showed.
-   *
-   * It is shown whenever the state is not a healthy, playing, spectrum-fed track, so it costs the
-   * layout nothing in the case that is working and is on the screen in every case that is not. The
-   * chip's tooltip carries it always.
-   */
-  const detail =
-    `${status.state} · ${status.backend} · spectrum ${status.spectrum ? 'live' : 'off'} · ` +
-    `${status.pluginState === null ? 'player: nothing reported yet' : `player: ${status.pluginState}`} · ` +
-    `adopt: ${status.adoptOutcome} · warm: ${status.warmedIds.length} · ` +
-    /* v1.9.25 — **the tap's own numbers**, which no build has ever put on the screen: this item's
-     * frames, the plugin's two counters and the two slot names. The defect this line exists for is
-     * decided by exactly these — `frames/item` standing still while the audio plays is a tap that has
-     * stopped measuring, `tapped` ≠ `audible` is a tap on another player, and `frames/item` growing
-     * while the bars are flat is the drawing rather than the tap. The engine's sentence
-     * (`modeReason`) says what the app concluded; these say what the phone did. */
-    `tap: +${status.tap.framesForItem} frames/item · ` +
-    `installs ${status.tap.installs ?? '—'}/verifies ${status.tap.verifies ?? '—'} · ` +
-    `tapped ${status.tap.tapped ?? '—'} (audible ${status.tap.audible ?? '—'}) · ` +
-    `plugin frames ${status.tap.pluginFrames ?? '—'} (${status.tap.pluginItemFrames ?? '—'} for this item) · ` +
-    /* v1.9.26 — **the tap's own pace**, the pair the drawing rule is judged on: the period the plugin
-     * declared for this item at `prepare` (`maxFrames` over the sample rate) and the age of the frame
-     * it is holding. The bars are drawn while the age is no longer than the period, so these two
-     * numbers *are* the rule — and the real period is a fact about his phone that no build has ever
-     * printed. Both `—` on a build whose plugin does not publish them. */
-    `tap pace ${status.tap.framePeriodMs ?? '—'} ms/frame (register ${status.tap.frameAgeMs ?? '—'} ms old) · ` +
-    // v1.9.8 — the native player's own boundary: how many slots it will play by itself while the
-    // app is away, how many tracks it has taken, and the sentence naming which state it is in.
-    `native: ${status.nativeBoundary.armed} armed, ${status.nativeBoundary.advances} taken, ` +
-    `${status.nativeBoundary.failures} refused, ${status.nativeBoundary.ignored} ignored · ` +
-    `dropped: ${status.droppedEvents.inaudible} inaudible, ${status.droppedEvents.slotGrace} in a slot write · ${status.modeReason}`;
-  const abnormal = status.state !== 'playing' || !status.spectrum;
-  /*
-   * v1.9.7 — **both writes are made only when the sentence changed.**
-   *
-   * This function runs on every status event and the player emits a dozen of them a second, so a
-   * playing track rewrote the same tooltip and the same (hidden) reason line sixty times a minute.
-   * The string itself is assembled in memory and costs nothing; the *writes* are what cost — the
-   * tooltip is one attribute write and the reason line is a text mutation the moment it is visible,
-   * which is exactly the state the reason line exists for. Compared against what is already set, and
-   * assigned only on a difference.
-   */
-  if (shell.barChip.title !== detail) shell.barChip.title = detail;
-  const reason = abnormal ? detail : '';
-  if (shell.barReason.textContent !== reason) shell.barReason.textContent = reason;
-  /*
-   * v1.9.28 — **the reason line is not shown any more.** Showing it added a row to this grid, so
-   * the whole bottom container grew and shrank every time the spectrum was picked up or lost — the
-   * owner's report. The text and the chip's tooltip still carry the diagnostic; the bar keeps one size.
-   */
-
-  shell.lyrics.position(positionMs);
-}
-
-/** `Playing from {playlist} (x/y)` — x is the track's position in that playlist. */
-function contextLine(queue: PlaybackQueue | null): string {
-  if (!queue) return '';
-  const context = queue.queueContext;
-  const name = context?.name ?? 'your queue';
-  const total = queue.length;
-  const at = queue.songPosition;
-  if (total === 0 || at < 0) return `Playing from ${name}`;
-  return `Playing from ${name} (${at + 1}/${total})`;
-}
