@@ -105,7 +105,7 @@ interface NaviliteSpectrumPlugin {
    * asset it found — the prepared, silent slot included — and report `started: true` while tapping
    * a player nobody is hearing. See `ios/App/App/NaviliteSpectrum.swift`.
    */
-  start(options: { url: string; positionMs: number; assetId?: string }): Promise<{ started: boolean; sampleRate: number; bandCount: number }>;
+  start(options: { url: string; positionMs: number; assetId?: string }): Promise<{ started: boolean; sampleRate: number; bandCount: number; tapped?: string }>;
   stop(): Promise<{ stopped: boolean }>;
   bands(): Promise<NativeSpectrumFrame>;
   /**
@@ -141,8 +141,25 @@ export interface NativeSpectrumFrame {
   bandCount: number;
   /** True when the last frame carried energy: a real measurement of a real sound. */
   live: boolean;
-  /** FFT frames the tap has produced since it started. */
+  /**
+   * FFT frames the tap has produced **for the life of the app process** — the number it has always
+   * been (`NaviliteSpectrum`'s `frames += 1`, reset by nothing). Nothing decides anything from it any
+   * more (v1.9.25): it is reported, and `itemFrames` below is the fact about the item.
+   */
   frames: number;
+  /**
+   * FFT frames the tap has produced **for the item it is on now** (v1.9.25) — zero at the install,
+   * growing only while that item's analysis measures.
+   *
+   * `frames` cannot answer "has *this item's* tap answered?" (it counts the whole process's life),
+   * and inferring it from deltas needs a baseline and a rule for what a gap means. This is that answer
+   * as a plugin fact instead: an item's tap that has stopped measuring keeps this number standing
+   * still, while a tap measuring *silence* keeps growing it — which is the difference between "the
+   * audio is quiet" and "nothing is being measured" that the engine could not read before. Optional,
+   * so a bridge whose plugin predates it reads as "not known" and the engine falls back to the
+   * process-lifetime counter's growth.
+   */
+  itemFrames?: number;
   /** Of those, how many were digital silence — what a *flat* audio signal looks like. */
   silentFrames: number;
   positionMs: number;
@@ -165,6 +182,17 @@ export interface NativeSpectrumFrame {
    * and nothing is concluded from it.
    */
   itemIsCurrent?: boolean;
+  /**
+   * The lifecycle rule as the plugin's own numbers (v1.9.25, read for the first time): how many times
+   * a tap was *installed* on an item, and how many times a healthy one was only *verified*.
+   *
+   * The plugin has always sent both (`NaviliteSpectrum.bands()`), and the app has never shown them —
+   * and they are the two numbers that separate "the tap is on the wrong item" from "the tap is on the
+   * right item and measures nothing" without another round trip. Optional so an older plugin reads as
+   * "not known" rather than as zero of something.
+   */
+  installs?: number;
+  verifies?: number;
   readable: boolean;
   sampleRate: number;
 }
@@ -318,6 +346,17 @@ export interface NativeBridge {
   startSpectrum?(url: string, positionMs: number): Promise<boolean>;
   stopSpectrum?(): Promise<void>;
   spectrumFrame?(): Promise<NativeSpectrumFrame | null>;
+  /**
+   * Which slot the tap landed on, and which slot this bridge is playing (v1.9.25).
+   *
+   * `tapped` is the plugin's own answer to the install request — it resolves with the asset id it put
+   * (or kept) the tap on — and `audible` is the slot this bridge last made the audible one
+   * (`startSpectrum` names it in every request). Two strings the app has always held and never shown,
+   * and the pair that separates *"the tap is on another player"* from *"the tap is on this one and is
+   * measuring nothing"* — a distinction that otherwise costs another diagnosis round on the device.
+   * Optional, so a bridge without it reports nothing rather than a made-up identity.
+   */
+  spectrumEvidence?(): { tapped: string | null; audible: string | null };
   /** Whether this platform can produce the spectrum from the native player at all. */
   readonly hasNativeSpectrum: boolean;
   /**
@@ -614,6 +653,15 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
      */
     const SLOTS: readonly string[] = ['navilite-slot-0', 'navilite-slot-1', 'navilite-slot-2', 'navilite-slot-3'];
     let audibleId = SLOTS[0] ?? 'navilite-slot-0';
+    /**
+     * The slot the plugin last answered it had put (or kept) the tap on (v1.9.25).
+     *
+     * `NativeAudio`-side of the pair `spectrumEvidence` reports: the plugin's `start` resolves with
+     * `tapped`, and until this release the bridge dropped it on the floor (`started === true` was all
+     * it kept). It is not a decision — nothing in the engine acts on it — it is the one fact that
+     * says whether the tap is even looking at the slot the listener is hearing.
+     */
+    let spectrumTapped: string | null = null;
     /**
      * What each non-audible slot is holding warm: `slot -> { songId, url }`, in warming order.
      *
@@ -1447,6 +1495,12 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
            * a player nobody is hearing.
            */
           const result = await spectrum.start({ url, positionMs, assetId: audibleId });
+          /*
+           * The slot the plugin says it tapped (v1.9.25): kept for the reason line, never acted on.
+           * A request that came back `started: false` answers nothing, so the last *answer* stands —
+           * which is what the pair `tapped`/`audible` is read as.
+           */
+          if (result.started === true) spectrumTapped = typeof result.tapped === 'string' ? result.tapped : null;
           return result.started === true;
         } catch (error) {
           console.warn('[navilite] the native spectrum tap did not start', error);
@@ -1470,6 +1524,16 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         } catch {
           return null;
         }
+      },
+      /*
+       * Which slot the tap is on, and which slot is being heard (v1.9.25). Both are answers this
+       * bridge already holds — the plugin's own `tapped` from its last install, and the slot this
+       * bridge last made audible — and neither is acted on by anything: the reason line is where they
+       * are read, because *"the tap is on another player"* and *"the tap is on this one and measures
+       * nothing"* are the same flat bars on the screen.
+       */
+      spectrumEvidence() {
+        return { tapped: spectrumTapped, audible: audibleId };
       },
       listenRemoteCommands(handlers) {
         if (!remote) return () => undefined;

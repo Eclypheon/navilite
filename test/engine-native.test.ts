@@ -167,6 +167,29 @@ interface SpectrumState {
    */
   framesQuietUrls?: string[];
   /**
+   * v1.9.25 — **the streams whose register is a frame *their own* tap never produced.**
+   *
+   * This is the real plugin's shape, which the fake could not state until now: `bands`/`live` are a
+   * last-value register, written only by the FFT and zeroed only by `detach` — so when the incoming
+   * item's analysis is torn down by the outgoing item's `unprepare` (one `AudibleSpectrumTap` per
+   * process in v1.9.24, whose analysis state belonged to whichever item's callbacks reached it last),
+   * the plugin keeps handing over the *previous* item's last frame, non-zero and `live`, while nothing
+   * measures the item that is playing. A skip out of a loud passage is exactly this: the register
+   * never passes through zero, which is why the owner read it as *"there isn't enough silence between
+   * the songs"* — what there is not, is a zero frame to reset the frozen-frame comparator.
+   */
+  staleRegisterUrls?: string[];
+  /**
+   * v1.9.25 — frames the tap has produced for the item it is on **now**: the plugin's per-item count
+   * (`itemFrames`), zero at each install and moved only while that item's analysis measures.
+   *
+   * Where `frames` is the process's own count (so a tap that has produced nothing for the new item
+   * still reports the previous track's number), this one is the fact about the item — and the
+   * difference between a tap measuring *silence* (this grows, every band zero) and a tap that has
+   * stopped measuring at all (this stands still) is the distinction the engine could not read before.
+   */
+  itemFrames: number;
+  /**
    * v1.9.24 — what the plugin answers to "is the tap on an item **at all**?" (`attached`,
    * `NaviliteSpectrum.swift:422`: `item != nil`), when a test wants to state it directly. Defaults
    * to the binding the fake is holding: the tapped item in `plugin` mode, "a request has started" in
@@ -290,7 +313,11 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         record.calls.push(`startSpectrum@${Math.round(positionMs)}`);
         record.spectrum.startCalls += 1;
         if (!record.spectrum.plugin) {
-          if (record.spectrum.startedUrl !== url) record.spectrum.installs += 1;
+          if (record.spectrum.startedUrl !== url) {
+            record.spectrum.installs += 1;
+            // v1.9.25 — a new install is a new analysis: the item's own frame count starts at zero.
+            record.spectrum.itemFrames = 0;
+          }
           record.spectrum.started = true;
           record.spectrum.startedUrl = url;
           record.spectrum.startedAtMs = positionMs;
@@ -317,7 +344,11 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
         record.spectrum.playing = true;
         // The plugin's own rule: a request for the item the tap is already on is a *verify*, and
         // anything else is an install (this is `carriesOurTap`, with the item standing in for the URL).
-        if (record.spectrum.tappedUrl !== read) record.spectrum.installs += 1;
+        if (record.spectrum.tappedUrl !== read) {
+          record.spectrum.installs += 1;
+          // v1.9.25 — and the analysis of the item this install lands on is new: its own count is zero.
+          record.spectrum.itemFrames = 0;
+        }
         record.spectrum.tappedUrl = read;
         record.spectrum.itemIsCurrent = read !== null && read === record.playingUrl;
         return true;
@@ -325,6 +356,13 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
       async stopSpectrum() {
         record.spectrum.stopCalls += 1;
         record.spectrum.started = false;
+      },
+      /*
+       * v1.9.25 — which slot the plugin says the tap is on, and which slot this bridge is playing:
+       * the two names the reason line carries (`NativeBridge.spectrumEvidence`). Not a decision.
+       */
+      spectrumEvidence() {
+        return { tapped: record.spectrum.tappedUrl ?? null, audible: record.playingUrl };
       },
       async spectrumFrame() {
         /*
@@ -343,28 +381,46 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
          */
         const quiet =
           record.playingUrl !== null && (record.spectrum.framesQuietUrls ?? []).includes(record.playingUrl);
-        const produced = record.tapProducing && !quiet;
-        if (produced) record.spectrum.frames += 1;
+        /*
+         * v1.9.25 — the register that is not this item's measurement: the tap produced nothing for the
+         * item playing now and the plugin hands over the frame it last produced, unchanged and non-zero.
+         */
+        const stale =
+          record.playingUrl !== null && (record.spectrum.staleRegisterUrls ?? []).includes(record.playingUrl);
+        const produced = record.tapProducing && !quiet && !stale;
+        if (produced) {
+          record.spectrum.frames += 1;
+          record.spectrum.itemFrames += 1;
+        }
         const bound = record.spectrum.plugin === true;
         // The tap on an item the player has left measures nothing: no frames, and not current.
         const itemIsCurrent = bound
           ? record.spectrum.tappedUrl !== null && record.spectrum.tappedUrl === record.playingUrl
           : record.spectrum.itemIsCurrent;
         const silent =
-          !produced || quiet || (bound && !itemIsCurrent) || record.spectrum.bands.every((value) => value === 0);
-        const bands = silent
-          ? record.spectrum.bands.map(() => 0)
-          : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
+          !stale &&
+          (!produced || quiet || (bound && !itemIsCurrent) || record.spectrum.bands.every((value) => value === 0));
+        const bands = stale
+          ? // The register's own frame, unchanged from the last one its FFT produced: the same values
+            // on every read, which is what makes a skip out of a loud passage the state the owner sees
+            // (`live` stays true and nothing ever reads zero).
+            record.spectrum.bands.slice()
+          : silent
+            ? record.spectrum.bands.map(() => 0)
+            : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
         if (!produced) {
           // Nothing was measured, so there is no frame to be silent: `silentFrames` counts frames.
         } else if (!silent) record.spectrum.silentFrames = 0;
         else record.spectrum.silentFrames += 1;
-        record.spectrum.live = !silent;
+        record.spectrum.live = stale ? true : !silent;
         return {
           bands,
           bandCount: bands.length,
           live: record.spectrum.live,
           frames: record.spectrum.frames,
+          // v1.9.25 — the plugin's own count for the item its tap is on: zero at the install, moved
+          // only while that item's analysis measures, and standing still for a tap that has stopped.
+          itemFrames: record.spectrum.itemFrames,
           silentFrames: record.spectrum.silentFrames,
           positionMs: record.truth.positionMs,
           playing: record.spectrum.playing && record.truth.playing,
@@ -374,6 +430,11 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
           // The plugin's own answer to "is the tap on the item the player is on now?" — flipped to
           // false by the orphan test, and decided by the tap's own binding in `plugin` mode.
           itemIsCurrent,
+          // v1.9.25 — the lifecycle rule as the plugin's own numbers: a verify is a request for the
+          // item the tap is already on, and the plugin counts it as such (`NaviliteSpectrum.bands()`
+          // has always sent both; the screen has never shown either).
+          installs: record.spectrum.installs,
+          verifies: Math.max(0, record.spectrum.startCalls - record.spectrum.installs),
           readable: true,
           sampleRate: 44_100,
         };
@@ -534,6 +595,7 @@ function recording(overrides: Partial<Recording> = {}): Recording {
       stopCalls: 0,
       installs: 0,
       frames: 0,
+      itemFrames: 0,
       silentFrames: 0,
       // A plausible loud frame: most bands carrying energy, none of them pinned.
       bands: Array.from({ length: 64 }, (_, index) => 40 + ((index * 37) % 120)),
@@ -1947,6 +2009,173 @@ test('a track change never turns the chip to "native audio" while the new item�
     assert.doesNotMatch(nothingAttached.modeReason, /moved off/, 'which is the sentence that was false in this state');
     record.spectrum.itemIsCurrent = true;
     delete record.spectrum.attached;
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.9.25 — **the owner's report after installing v1.9.24, and the acceptance the fix is judged by.**
+ *
+ * He skipped out of a loud passage and the bars went dead for the whole track:
+ *
+ *     "the lines stay dead the whole track, the spectrum seems to jump up at the start and then go to
+ *      zero and remain there the whole track" — "while it's flat it says native audio … mostly when i
+ *      skip out of a loud passage … on a cold start the spectrum always works"
+ *
+ * Two mechanisms make that state, and both are driven here:
+ *
+ *   1. **A last-value register is not a measurement of the item playing now.** `bands`/`live` are the
+ *      last frame the FFT ever produced (zeroed only in `detach`), so on a track whose own analysis is
+ *      gone the plugin keeps handing over the *previous* item's last frame — non-zero and `live`. The
+ *      engine drew it, and ten identical reads later the frozen rule spent the chip's third word on it
+ *      (*the native tap kept returning the same frame*) — which is the *native audio* he reads while
+ *      the bars are flat. A frame may only be drawn, and only spend the chip, when the counter moved:
+ *      `itemFrames`, the plugin's own count for the item its tap is on (v1.9.25).
+ *   2. **The hand-over was not the item's own.** One `AudibleSpectrumTap` per process held the timer
+ *      and the FFT for *every* item, while `prepare`/`unprepare` are per item — so the outgoing item's
+ *      teardown landing after the incoming item's `prepare` left the track playing now with no
+ *      analysis at all, for the rest of its life. That is why *"on a cold start the spectrum always
+ *      works"*: with no outgoing item there is no race. The plugin now gives every install its own
+ *      analysis; this test drives the JS-visible half of that state the engine has to be honest
+ *      about, at both entry points a transition has (a start and the boundary's adoption).
+ *
+ * **What a stub cannot clear, and is therefore unverified on device:** the native ordering itself. The
+ * fake can state *"this item's tap has stopped producing for it"* — which is all the engine ever sees
+ * — but nothing in node can make AVFoundation deliver a teardown after a prepare; that is `ios/`, and
+ * only his phone runs it. What is proved here is the engine's half: no frame that this item's tap did
+ * not produce is ever drawn or judged, and the state it cannot measure is named rather than spent.
+ */
+test('a skip out of a loud passage never draws, or spends the chip, on a frame this item’s tap did not produce (v1.9.25)', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  /** How long `predicate` took to hold, in ms, or null if it never did inside the budget. */
+  const until = async (predicate: () => boolean, budgetMs: number): Promise<number | null> => {
+    const started = Date.now();
+    for (;;) {
+      if (predicate()) return Date.now() - started;
+      if (Date.now() - started > budgetMs) return null;
+      await settle(5);
+    }
+  };
+  try {
+    const record = recording();
+    /*
+     * The plugin's own install, as the v1.9.22 tests drive it: which item the tap is on is the
+     * *plugin's* answer (`tappedUrl`), which is what decides `itemIsCurrent` and what a re-attach
+     * does — a `start` for the item the tap is already on is a verify, not an install.
+     */
+    record.spectrum.plugin = true;
+    const engine = nativeEngine(record);
+    engines.push(engine);
+
+    /* ---- 1. a loud passage: the tap measures it, the register holds a real non-zero frame ---- */
+    await engine.play(LOCAL_TRACK);
+    await settle(300);
+    const loud = engine.status();
+    assert.equal(loud.state, 'playing', 'the first track plays');
+    assert.equal(loud.spectrum, true, 'and its tap measures it');
+    assert.ok(
+      (engine.readSpectrum() ?? []).some((value) => value > 0),
+      'the register holds a non-zero frame — which is the whole of what the next step is about',
+    );
+    say(`1. a loud passage: spectrum ${loud.spectrum}, ${record.spectrum.frames} frames from the tap, ${record.spectrum.itemFrames} of them this item’s`);
+
+    /* ---- 2. the skip with no silence in it: the incoming item’s tap produces nothing, the register
+       still holds the last frame, and no zero frame is ever observed ---- */
+    record.spectrum.staleRegisterUrls = [LOCAL_TRACK_2.url];
+    await engine.play(LOCAL_TRACK_2);
+    const skippedAt = Date.now();
+    let staleReads = 0;
+    let staleReason = '';
+    for (let index = 0; index < 26; index += 1) {
+      await settle(40);
+      const status = engine.status();
+      if (status.state !== 'playing') continue;
+      staleReads += 1;
+      if (!staleReason) staleReason = status.modeReason;
+      assert.equal(
+        engine.readSpectrum(),
+        null,
+        `${Date.now() - skippedAt} ms after the skip the register reads live ${record.spectrum.live} and is the previous item's frame — it is not this item's spectrum (${status.modeReason})`,
+      );
+      assert.equal(status.spectrum, false, `nothing is being measured for the item playing now (${status.modeReason})`);
+      assert.equal(
+        status.spectrumArming,
+        true,
+        `${Date.now() - skippedAt} ms after the skip the chip still says the spectrum is coming, not "native audio"`,
+      );
+      assert.doesNotMatch(
+        status.modeReason,
+        /same frame/,
+        `the frozen rule is not spent on a register that never moved (${status.modeReason})`,
+      );
+    }
+    assert.ok(staleReads >= 20, `the window was watched while playing (${staleReads} reads)`);
+    assert.match(staleReason, /not produced by this item/, 'and the reason line names the state it is in');
+    say(`2. the skip with no silence in it — ${staleReads} reads, never a frame drawn: ${staleReason}`);
+    const installsAtTheSkip = record.spectrum.installs;
+
+    /* ---- 3. this item's own frames: what brings the bars up, with no new track and no re-attach ---- */
+    record.spectrum.staleRegisterUrls = [];
+    const live = await until(() => engine.status().spectrum === true, 500);
+    assert.ok(live !== null, 'this item’s own first frame is what makes the bars live');
+    const tap = engine.status().tap;
+    assert.ok(tap.installs !== null && tap.installs >= 2, `the tap has been installed for this track (${tap.installs})`);
+    assert.equal(tap.tapped, tap.audible, 'and the plugin says the tap is on the slot this bridge is playing');
+    assert.ok(tap.framesForItem > 0, 'with this item’s own frames counted — what the reason line now prints');
+    say(`3. this item's own frames: live ${live} ms later — installs ${tap.installs}/verifies ${tap.verifies}, tapped ${tap.tapped} (audible ${tap.audible}), ${tap.framesForItem} frames/item`);
+
+    /* ---- 4. the teardown that lands *after* this item measured: the tap stops, and what it holds is
+       flat — the whole-track state he reported, not a window ---- */
+    const measuredBefore = record.spectrum.itemFrames;
+    record.spectrum.framesQuietUrls = [LOCAL_TRACK_2.url];
+    let deadReads = 0;
+    let deadReason = '';
+    for (let index = 0; index < 22; index += 1) {
+      await settle(40);
+      const status = engine.status();
+      if (status.state !== 'playing') continue;
+      deadReads += 1;
+      if (!deadReason) deadReason = status.modeReason;
+      assert.equal(engine.readSpectrum(), null, 'nothing is drawn while nothing measures');
+      assert.equal(status.spectrumArming, true, `the chip is still waiting on this item's tap (${status.modeReason})`);
+      assert.doesNotMatch(
+        status.modeReason,
+        /digital silence/,
+        'a tap that stopped is not audio that is silent: the frames stood still, the audio did not',
+      );
+    }
+    assert.ok(deadReads >= 15, `the state was watched while playing (${deadReads} reads)`);
+    assert.equal(record.spectrum.itemFrames, measuredBefore, 'the item’s own counter stood still throughout');
+    assert.match(deadReason, /has produced no frame since the last read/, 'and the reason line says which of the two it is');
+    say(`4. the tap that stopped after measuring this item — ${deadReads} reads: ${deadReason}`);
+
+    /* ---- 5. and it is the same item that comes back ---- */
+    record.spectrum.framesQuietUrls = [];
+    const back = await until(() => engine.status().spectrum === true, 500);
+    assert.ok(back !== null, 'the same item’s frames bring the bars back');
+    assert.equal(
+      record.spectrum.installs,
+      installsAtTheSkip,
+      'with nothing installed for it in between — the repair is the tap’s own, not a rebuild on a poll',
+    );
+    say(`5. the same item's frames again: live ${back} ms later, installs still ${record.spectrum.installs}`);
+
+    /* ---- 6. the boundary the native player takes by itself, entered the way the queue enters it ---- */
+    record.spectrum.staleRegisterUrls = [LOCAL_TRACK_3.url];
+    record.playingUrl = LOCAL_TRACK_3.url;
+    engine.adoptNativeAdvance(LOCAL_TRACK_3);
+    await settle(120);
+    const adopted = engine.status();
+    assert.equal(adopted.state, 'playing', 'the adopted track is the one playing');
+    assert.equal(engine.readSpectrum(), null, 'the register the previous item left is not drawn as this one either');
+    assert.equal(adopted.spectrumArming, true, 'and the chip waits on this item’s own tap here too');
+    record.spectrum.staleRegisterUrls = [];
+    const adoptedLive = await until(() => engine.status().spectrum === true, 500);
+    assert.ok(adoptedLive !== null, 'the adopted item’s own frames are what the bars are');
+    say(`6. the adopt path: arming through a register it did not produce, live ${adoptedLive} ms after its own frames`);
   } finally {
     fakes.restore();
     await stopAll(engines);

@@ -222,6 +222,33 @@ export interface EngineStatus {
    * states it is in — the clearing path for every one of them.
    */
   nativeBoundary: { armed: number; advances: number; failures: number; ignored: number; reason: string };
+  /**
+   * The tap's own numbers, for the reason line (v1.9.25).
+   *
+   * This defect has been diagnosed from source three times and reproduced on the owner's phone every
+   * time, and until now the app has never rendered a single fact about the tap itself: the chip says
+   * *spectrum…* or *native audio*, and the sentence behind it was written by the engine's own reading
+   * of a register. These are the four numbers that separate the states, all of them already computed
+   * somewhere — how many frames this item's tap has produced, how many frames the plugin has produced
+   * for that item, how often it installed versus verified a tap, and which slot it says the tap is on
+   * against the slot this bridge is playing. Nothing here is a decision; the screen is where they are
+   * read, and it is the only place the difference between *"the tap is on another player"* and *"the
+   * tap is on this one and measures nothing"* has ever been visible.
+   */
+  tap: {
+    /** Frames this item's tap has produced, as the engine could attribute them — see `noteTapFrames`. */
+    framesForItem: number;
+    /** The plugin's process-lifetime frame counter, as of the last frame read (null before any). */
+    pluginFrames: number | null;
+    /** The plugin's counter **for the item its tap is on** — what `framesForItem` reads when present. */
+    pluginItemFrames: number | null;
+    /** Taps *installed* and taps *verified*, as the plugin counts them (null if it does not say). */
+    installs: number | null;
+    verifies: number | null;
+    /** The slot the plugin says the tap is on, and the slot this bridge is playing. */
+    tapped: string | null;
+    audible: string | null;
+  };
 }
 
 /**
@@ -576,21 +603,36 @@ export class AudioEngine {
    * **nothing** for the new item is judged to have answered *digital silence* 12 polls in, and the
    * chip goes to *native audio* while the attach is still in flight.
    *
-   * This counter is that same stream of frames, **attributed to the item**: it counts only the
-   * growth observed while the plugin says the tap is on the item the player is playing
-   * (`itemIsCurrent`), it starts from zero for every start/adopt, and a read that finds the tap off
-   * this item (or with no tap at all) rewinds it — so frames produced under an ambiguity are never
-   * claimed as this item's answer. It can only ever under-count; it cannot make another item's
-   * frames look like this item's.
+   * **v1.9.25 — and the plugin now sends the count itself (`itemFrames`), so this is that number when
+   * the build has one** (see {@link noteTapFrames}): the same reading, taken from a counter that is
+   * per item by construction rather than inferred from deltas of a process-wide one. Either way it
+   * can only ever *under*-count; it cannot make another item's frames look like this item's.
    */
   private tapFramesForItem = 0;
-  /** The raw counter at the last read that could be attributed to this item, or null to re-baseline. */
+  /**
+   * The counter's value at the last read that could be attributed to this item, or null when there is
+   * no baseline yet (v1.9.24).
+   *
+   * Which counter it watches depends on the bridge (v1.9.25): the plugin's own per-item count when it
+   * sends one, and the process-lifetime counter otherwise — see {@link noteTapFrames}.
+   */
   private tapFramesAtLastRead: number | null = null;
   private spectrumPolls = 0;
   private lastSpectrumRecheckAt = 0;
   /** The last native frame's fingerprint, and how many polls in a row have repeated it. */
   private lastNativeChecksum = -1;
   private identicalNativeFrames = 0;
+  /**
+   * The last frame the poll read, kept so the reason line can print the **plugin's own numbers**
+   * (v1.9.25).
+   *
+   * The banner has carried a sentence about the app's own state since v1.9.5 and, for this defect,
+   * the facts that settle it are the plugin's: how many frames it has produced for this item, how
+   * many times it has installed a tap versus verified one, and which slot it says it is on. Three of
+   * those four were already computed and dropped on the floor at the bridge; this is where they are
+   * kept until {@link status} reads them. It is never a decision input.
+   */
+  private lastNativeFrame: NativeSpectrumFrame | null = null;
   /** Polls in a row where the tap said it was not playing (v1.9.5) — re-checked, never a verdict. */
   private spectrumDeadPolls = 0;
   /** When the tap last produced a live frame (v1.9.5) — the watchdog's other half. */
@@ -1207,6 +1249,8 @@ export class AudioEngine {
     const durationMs = this.durationMs();
     const positionMs = this.backend === 'native' ? this.nativeClock() : this.el.currentTime * 1000;
     const plugin = this.lastPluginState;
+    const evidence = this.native?.spectrumEvidence?.() ?? null;
+    const frame = this.lastNativeFrame;
     return {
       state: this.state,
       backend: this.backend,
@@ -1246,6 +1290,19 @@ export class AudioEngine {
       durationMs: Number.isFinite(durationMs) ? durationMs : 0,
       error: this.error,
       nativeAvailable: this.native !== null,
+      /*
+       * The tap's own numbers (v1.9.25) — see the field's own doc. Read here, never acted on: a
+       * `spectrumFrame` read would be a bridge round trip per status event, which is a dozen a second.
+       */
+      tap: {
+        framesForItem: this.tapFramesForItem,
+        pluginFrames: frame?.frames ?? null,
+        pluginItemFrames: frame?.itemFrames ?? null,
+        installs: frame?.installs ?? null,
+        verifies: frame?.verifies ?? null,
+        tapped: evidence?.tapped ?? null,
+        audible: evidence?.audible ?? null,
+      },
     };
   }
 
@@ -1829,6 +1886,16 @@ export class AudioEngine {
     // v1.9.24 — the tap's frame count is per item: this track's tap has answered nothing yet, and
     // the frames the *previous* item's tap produced are not this one's answer.
     this.forgetTapFrames();
+    /*
+     * v1.9.25 — **the frame the item that just ended left behind is not this one's measurement
+     * either.** The boundary takes the item over without passing through `startNative`, so the
+     * per-item drawing state has to be cleared here as well as there: the register holds the previous
+     * item's last frame, and the fingerprint and the run of identical frames that go with it would
+     * otherwise be judged against the track the native player has just started.
+     */
+    this.nativeBands = null;
+    this.lastNativeChecksum = -1;
+    this.identicalNativeFrames = 0;
     this.orphanReattachedFor = null;
     this.positionReported = false;
     this.setNativePosition(0, false);
@@ -2298,6 +2365,19 @@ export class AudioEngine {
      * attribution, cleared here for the item that is starting (see `noteTapFrames`).
      */
     this.forgetTapFrames();
+    /*
+     * v1.9.25 — **and the frame the item that just ended left behind is not evidence about this one.**
+     *
+     * `nativeBands`, the fingerprint it was compared by and the run of identical frames are per item
+     * for the same reason the tap's counter is: the frame in the register is the *previous* item's
+     * last measurement, and a run of them would be counted against the track starting now — which is
+     * how a frozen register came to spend the chip's third word on a track whose own tap had produced
+     * nothing. `startConsumers` resets these when it arms the poll, and a track change does not go
+     * through it (the poll is already running), so the reset belongs here too.
+     */
+    this.nativeBands = null;
+    this.lastNativeChecksum = -1;
+    this.identicalNativeFrames = 0;
     // v1.7.7's rule is kept — the tap on the previous item is left where it is and this item gets
     // its own — but v1.9.24 removed the *budget* it was paired with: a tap that will not answer is
     // re-asked, and a tap that has answered is judged on this item's frames alone.
@@ -2695,9 +2775,10 @@ export class AudioEngine {
     /*
      * The tap is on the item the player is playing, so the growth of the plugin's counter from here
      * is **this item's** frames — the only input that may say whether this track's tap has answered
-     * (v1.9.24, see `noteTapFrames`).
+     * (v1.9.24, see `noteTapFrames`), and the fact that decides whether the frame in hand is drawn at
+     * all (v1.9.25).
      */
-    this.noteTapFrames(frame);
+    const measured = this.noteTapFrames(frame);
     const playing = this.state === 'playing' && frame.playing;
     if (!playing) {
       /*
@@ -2740,6 +2821,46 @@ export class AudioEngine {
       return;
     }
     this.spectrumDeadPolls = 0;
+    /*
+     * **Nothing is drawn, and nothing is judged, from a frame this item's tap did not produce
+     * (v1.9.25).**
+     *
+     * `bands` and `live` are a last-value register: the plugin publishes the last frame its FFT ever
+     * produced and zeroes it only in `detach`, so on this path — tap on the item playing now, player
+     * playing — a register that has stopped moving is *not* a measurement of this item. It is either
+     * the previous item's last frame (the loud skip's shape: the incoming item's analysis was torn
+     * down by the outgoing item's `unprepare`, so `bands` still holds a non-zero frame with `live`
+     * true and nothing produces another one) or an all-silent frame from a tap that has since gone
+     * still. Both are the owner's report — *"the lines stay dead the whole track, the spectrum seems
+     * to jump up at the start and then go to zero and remain there"*, and, while the bars are flat,
+     * the chip reading *native audio*.
+     *
+     * The frame in hand is admitted only when the counter moved, and that single rule is what this
+     * whole branch rests on: the bars follow the audio (the visualiser's own release envelope, no
+     * synthetic frame), the chip keeps its third word (nothing here decides that this track cannot
+     * have a spectrum), and the reason line names which of the two states the tap is in — a register
+     * that still looks live, or a register that is flat. The frozen rule below therefore never sees a
+     * frame that did not move, which is the frame it was firing on.
+     */
+    this.lastNativeFrame = frame;
+    if (!measured) {
+      this.spectrumLive = false;
+      this.spectrumZeroPolls = 0;
+      /*
+       * **And the chip keeps its third word** — the same word §515.4 gives a tap that has never
+       * answered at all: a tap on the item playing now that is producing nothing is *the spectrum is
+       * coming*, which is a statement about this item's tap and nothing about whether this track can
+       * have one. It goes back to *spectrum* on this item's next frame, and it is the word the owner
+       * asked for in place of *native audio* while the bars are flat.
+       */
+      this.spectrumArming = this.state === 'playing';
+      this.setSpectrumReason(
+        frame.live
+          ? 'the frame the plugin is holding was not produced by this item’s tap since the last read — the bars follow the audio, and this track’s own tap has yet to give one'
+          : 'the tap on the item that is playing has produced no frame since the last read — nothing is being measured for this track, so the bars follow the audio while the engine keeps waiting on its tap',
+      );
+      return;
+    }
     this.nativeBands = Uint8Array.from(frame.bands);
     if (frame.live) {
       this.spectrumZeroPolls = 0;
@@ -2797,6 +2918,13 @@ export class AudioEngine {
      * when the player it is listening to has moved on — would otherwise be drawn as if it were the
      * new song, which is the owner's "it is not showing... it is showing the last song" family. An
      * identical, non-silent frame ten polls in a row is a frozen buffer, not an audio signal.
+     *
+     * v1.9.25 — **and it only ever sees frames this item's tap produced.** The branch above returns
+     * before this point when the counter did not move, so a register that simply stopped is not
+     * "frozen" here: it is `the tap has stopped producing`, which is a different state with a
+     * different sentence, and it no longer spends the chip's third word. What this rule still catches
+     * is the live-but-stuck tap it was written for — one that *is* producing frames, all of them the
+     * same.
      */
     const checksum = spectrumChecksum(frame.bands);
     const identical = checksum !== 0 && checksum === this.lastNativeChecksum;
@@ -2825,32 +2953,50 @@ export class AudioEngine {
   }
 
   /**
-   * Count the tap's frames **for the item playing now** (v1.9.24).
+   * Count the tap's frames **for the item playing now**, and say whether this read carries a frame
+   * that item's tap actually produced (v1.9.24; the second half is v1.9.25).
    *
-   * `NativeSpectrumFrame.frames` is the tap's own counter *since it started* — `NaviliteSpectrum`'s
-   * `frames += 1` in `analyze()` — and nothing resets it, so it describes the life of the app process
-   * rather than the track. The engine's rule for whether this track's tap has *answered* needs a fact
-   * about the item, and this is it: the counter's growth while the plugin says the tap is on the item
-   * the player is playing.
+   * The rule the engine needs from this is one sentence long: *a frame may only be drawn, and may
+   * only spend the chip's third word, if this item's tap produced it since the last read.* A
+   * last-value register is not a measurement of the item that is playing — and the register is
+   * exactly what the plugin hands over: `bands`/`live` are the last frame *whose* tap ever analyzed,
+   * zeroed only by `detach`. So the frame in hand is admitted on the counter moving, and there are
+   * two counters it can move on:
    *
-   * Two deliberate properties, because the alternative is another false verdict:
-   *
-   *   - **the first attributable read is a baseline, not a count.** Frames produced between the tap
-   *     landing and that read cannot be told apart from the previous item's, so they are not claimed;
-   *   - **a gap is not counted.** A read that finds the tap off this item (or with none at all)
-   *     rewinds the baseline (`forgetTapFrames`), so frames belonging to an ambiguity are dropped
-   *     rather than attributed. The count can therefore only *under*-count — which delays the honest
-   *     sentence by at most one poll, and can never state another item's frames as this one's.
+   *   - **`itemFrames`** — the plugin's own count **for the item its tap is on** (v1.9.25,
+   *     `NaviliteSpectrum.SpectrumAnalysis.frames`). It is zero at the install and grows only while
+   *     that item's analysis measures, so growth is the whole test: no baseline to get wrong and no
+   *     process-lifetime number to subtract. A tap measuring *silence* keeps growing it, and a tap
+   *     whose analysis is gone stands still — which is the difference the engine could not read
+   *     before, and the reason this defect looked like the owner's *"there isn't enough silence"*.
+   *   - **`frames`** — the tap's process-lifetime counter, for a bridge whose plugin predates
+   *     `itemFrames`. Its growth is only attributable while the plugin says the tap is on the item
+   *     the player is playing (the caller's `itemIsCurrent` gate), the first attributable read is a
+   *     *baseline* rather than a count (growth before it cannot be told apart from the previous
+   *     item's), and a read that finds the tap off this item rewinds the baseline
+   *     (`forgetTapFrames`). It can only ever under-count, and it cannot state another item's frames
+   *     as this one's.
    *
    * It is never reset by a clock: only by a new item, or by the tap leaving this one.
+   *
+   * @returns true when the counter moved — i.e. when the frame in hand is a measurement of this item
+   *   that the engine has not drawn yet.
    */
-  private noteTapFrames(frame: NativeSpectrumFrame): void {
+  private noteTapFrames(frame: NativeSpectrumFrame): boolean {
+    if (typeof frame.itemFrames === 'number') {
+      const moved = this.tapFramesAtLastRead === null ? frame.itemFrames > 0 : frame.itemFrames > this.tapFramesAtLastRead;
+      this.tapFramesForItem = frame.itemFrames;
+      this.tapFramesAtLastRead = frame.itemFrames;
+      return moved;
+    }
     if (this.tapFramesAtLastRead === null) {
       this.tapFramesAtLastRead = frame.frames;
-      return;
+      return false;
     }
+    const moved = frame.frames > this.tapFramesAtLastRead;
     this.tapFramesForItem += Math.max(0, frame.frames - this.tapFramesAtLastRead);
     this.tapFramesAtLastRead = frame.frames;
+    return moved;
   }
 
   /**

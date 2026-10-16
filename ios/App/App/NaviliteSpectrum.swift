@@ -128,6 +128,7 @@ final class AudibleSpectrumTap {
     /// (~23 ms of audio), so nothing waits for it: a window is ready on roughly every second tick.
     static let analysisIntervalMs = 10
 
+    /// Guards the counts this object keeps about itself — never a measurement (v1.9.25).
     private let lock = NSLock()
     private var item: AVPlayerItem?
     private weak var player: AVPlayer?
@@ -144,56 +145,34 @@ final class AudibleSpectrumTap {
     /// What the lifecycle rule has done so far — the numbers the card is judged on.
     var lifecycleCounts: (installs: Int, verifies: Int) { (installCount, verifyCount) }
 
-    // The analysis state, written on the tap's thread and read on the main thread.
-    private var bands = [UInt8](repeating: 0, count: AudibleSpectrumTap.bandCount)
-    private var frames = 0
-    private var silentFrames = 0
-    private var lastFrameLive = false
-
-    /*
-     * ------------------------------------------------------------------ the hand-off
+    /**
+     * **The measurement of one item, and of no other (v1.9.25).**
      *
-     * v1.8.0 — **nothing here runs on the audio render thread any more.**
+     * Until this release the analysis *was* this object: one PCM ring, one analysis timer and one FFT
+     * for every item in the process — while the callbacks that start and stop them (`prepare`,
+     * `unprepare`) belong to an **item** and arrive in an order AVFoundation chooses. An outgoing
+     * item's teardown landing after the incoming item's `prepare` therefore cancelled the timer and
+     * destroyed the FFT that the item *playing now* was being measured with, and neither half of the
+     * app could put it back: `prepare` had already been called for that item and is not called again,
+     * and the plugin's only answer to being asked is a verify of an item that already carries our tap
+     * (`attach`, below). The owner's own report of that state, after installing v1.9.24:
      *
-     * Until v1.8.0 the tap's `process` callback did the windowing, the 2048-point FFT, the band fold
-     * *and* took an `NSLock` — on the thread that is rendering the audio the user is hearing. vDSP is
-     * fast and a frame every ~23 ms is small, so it usually got away with it, but a render thread must
-     * never block on a lock the main thread can hold, and it must not allocate. Apple's own guidance
-     * for `MTAudioProcessingTap` is to copy the samples out and process elsewhere. So the callback now
-     * writes the PCM it is handed into a small preallocated ring and returns; a timer on a dedicated
-     * queue drains that ring and does the window, the FFT and the fold off the audio thread.
+     *     "the lines stay dead the whole track, the spectrum seems to jump up at the start and then
+     *      go to zero and remain there the whole track" — "the audio plays but the spectrum stays
+     *      dead at zero"
      *
-     * The lock on the render thread is an `os_unfair_lock` held for a sample-store loop, not an
-     * `NSLock` held across an FFT: it is the kernel's own unfair lock, which donates priority rather
-     * than inverting it. The `lock` above is still what guards the published bands, and it is now only
-     * ever taken off the render thread.
+     * One analysis per install is the repair. The tap's own storage **is** the analysis, so every
+     * callback a tap makes lands on the state of its own item: a teardown can only stop the analysis
+     * its own item started, and the PCM of an item the player has left can never be windowed as the
+     * item that is playing. Nothing about the audio changes — the FFT is on its own queue
+     * (`SpectrumAnalysis.analysisQueue`), no mix is written and no tap is reconfigured.
      */
-    private var pcm = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
-    private var pcmWrite = 0
-    private var sinceLastFrame = 0
-    private var pcmLock = os_unfair_lock_s()
-    private let analysisQueue = DispatchQueue(label: "app.navilite.spectrum.analysis", qos: .userInitiated)
-    private var analysisTimer: DispatchSourceTimer?
-    /// Set false to tell a handler that is already queued that the FFT setup is going away.
-    private var draining = false
-    /// The window the analysis queue is working on. Owned by `analysisQueue`, never shared.
-    private var analysisWindow = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
+    private var currentAnalysis: SpectrumAnalysis?
 
-    // FFT, built once, on the analysis queue — never on the render thread.
-    private var fftSetup: FFTSetup?
-    private var sampleRate: Double = 0
-    /// The format of the buffers the tap hands us, as reported by the tap itself at `prepare`.
-    private var tapFormat: AudioStreamBasicDescription?
-    private var window = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
-    private var windowed = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
-    private var realp = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
-    private var imagp = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
-    private var magnitudes = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
-    private var magnitudesSquared = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
-    /// `[from, to)` bin ranges, one per band — the same log spacing `visualizer.ts` uses.
-    private var bandRanges: [(from: Int, to: Int)] = []
-    /// False only when the buffers we were handed are a format we cannot read.
-    private var readable = true
+    /// Frames the FFT has produced for the life of the app process — what `snapshot`'s `frames` has
+    /// always been. Nothing decides anything from it any more (v1.9.25; see
+    /// `SpectrumAnalysis.frames`, which is the same count **for one item**).
+    private var lifetimeFrames = 0
 
     /* -------------------------------------------------------------------- the track */
 
@@ -253,12 +232,15 @@ final class AudibleSpectrumTap {
          * last second of a track arrives on this path. Only a genuinely *different* item — a new
          * load — falls through to the install below, which is the one moment in an item's life when
          * a tap can be installed without reconfiguring anything the listener is hearing.
+         *
+         * v1.9.25 — and the analysis it verifies is *this item's*, held by the tap that carries it:
+         * a request about the item being heard can never be answered by the state of another one.
          */
         if carriesOurTap(item) {
             verifyCount += 1
             self.player = player
             self.url = requestedUrl
-            return .success(sampleRate)
+            return .success(publishedSampleRate)
         }
         detach()
         /*
@@ -285,9 +267,18 @@ final class AudibleSpectrumTap {
         }
         #endif
 
+        /*
+         * **The analysis is made first, because the tap's own storage is it (v1.9.25).**
+         *
+         * `clientInfo` is what every one of this tap's callbacks hands back — `prepare`, `process`,
+         * `unprepare`, `finalize` — so the object it points at *is* the thing that gets measured and
+         * the thing that gets torn down when this item is. One per install is what keeps an item's
+         * teardown from reaching the item that is playing (see `currentAnalysis`).
+         */
+        let analysis = SpectrumAnalysis(owner: self)
         var callbacks = MTAudioProcessingTapCallbacks(
             version: kMTAudioProcessingTapCallbacksVersion_0,
-            clientInfo: Unmanaged.passRetained(self).toOpaque(),
+            clientInfo: Unmanaged.passRetained(analysis).toOpaque(),
             init: audibleSpectrumTapInit,
             finalize: audibleSpectrumTapFinalize,
             prepare: audibleSpectrumTapPrepare,
@@ -304,7 +295,7 @@ final class AudibleSpectrumTap {
         guard status == noErr, let tap = created else {
             // The retain handed to the tap's clientInfo is ours to drop when the tap never exists.
             if let info = callbacks.clientInfo {
-                Unmanaged<AudibleSpectrumTap>.fromOpaque(info).release()
+                Unmanaged<SpectrumAnalysis>.fromOpaque(info).release()
             }
             return .failure(.failure("the audio tap could not be created on the audible player (OSStatus \(status))"))
         }
@@ -326,9 +317,25 @@ final class AudibleSpectrumTap {
         self.player = player
         self.url = requestedUrl
         installCount += 1
+        /*
+         * **And the item this install replaces stops being measured (v1.9.25).**
+         *
+         * The analysis that was current belongs to an item the player is no longer on: it is
+         * *retired* — its timer cancelled, its FFT destroyed — which is a change to a queue on this
+         * side and to nothing the listener can hear, and it is what keeps the process from running a
+         * second FFT for a track nobody is listening to. The analysis being installed has no timer at
+         * all until AVFoundation prepares *its* tap (`prepare`), so the hand-over itself measures
+         * nothing and delays nothing; from the item's first frame on, `snapshot` publishes this
+         * analysis and only this one.
+         */
+        currentAnalysis?.retire()
+        currentAnalysis = analysis
 
-        return .success(sampleRate)
+        return .success(publishedSampleRate)
     }
+
+    /// The analysis's own sample rate, or 0 while no item is being measured (v1.9.25).
+    private var publishedSampleRate: Double { currentAnalysis?.published.sampleRate ?? 0 }
 
     /**
      * Whether this tap is installed on `item` *right now*.
@@ -374,6 +381,12 @@ final class AudibleSpectrumTap {
      *
      * The mix is only cleared when the item still carries *ours* — someone else's mix is left alone,
      * because the audio being rendered is not this file's to change.
+     *
+     * v1.9.25 — and the analysis goes with the tap, because it belonged to this item: the register the
+     * engine reads (`snapshot`'s `bands`/`live`) is that analysis's, so letting go of it is the same
+     * reading `detach` always produced — an all-zero frame that is not live. `lifetimeFrames` is
+     * deliberately *not* reset: it is the tap's count since the app started, and no decision is made
+     * from it any more.
      */
     func detach() {
         if let item, carriesOurTap(item) {
@@ -384,10 +397,8 @@ final class AudibleSpectrumTap {
         item = nil
         player = nil
         url = nil
-        lock.lock()
-        bands = [UInt8](repeating: 0, count: AudibleSpectrumTap.bandCount)
-        lastFrameLive = false
-        lock.unlock()
+        currentAnalysis?.retire()
+        currentAnalysis = nil
     }
 
     /* -------------------------------------------------------------------- reporting */
@@ -396,25 +407,31 @@ final class AudibleSpectrumTap {
     ///
     /// The keys are the contract `src/player/native.ts` reads; `positionMs` and `playing` are the
     /// *audible* player's own answers now, which is what they always claimed to be.
+    ///
+    /// `bands`, `live`, `silentFrames`, `readable` and `sampleRate` are **the analysis's** answers —
+    /// the item the tap is on — and none of them says anything about any other item (v1.9.25).
+    /// `frames` is still the process-lifetime count; `itemFrames` is that count **for this item**,
+    /// which is the fact the engine decides from: a register that does not move is not a measurement
+    /// of the item playing now.
     func snapshot() -> [String: Any] {
         lock.lock()
-        let frame = bands
-        let frameFrames = frames
-        let silent = silentFrames
-        let live = lastFrameLive
+        let lifetime = lifetimeFrames
         lock.unlock()
         let player = self.player
         let item = self.item
         let itemSeconds = item?.currentTime().seconds ?? 0
         let playerSeconds = player?.currentTime().seconds ?? itemSeconds
+        let measurement = currentAnalysis?.published
         return [
-            "bands": frame.map { Int($0) },
+            "bands": (measurement?.bands ?? [UInt8](repeating: 0, count: AudibleSpectrumTap.bandCount)).map { Int($0) },
             "bandCount": AudibleSpectrumTap.bandCount,
-            "live": live,
-            "frames": frameFrames,
+            "live": measurement?.live ?? false,
+            "frames": lifetime,
+            // Frames **this item's** tap has produced (v1.9.25) — the per-item fact.
+            "itemFrames": measurement?.frames ?? 0,
             // Frames the FFT has produced from digital silence — what "flat" looks like when it is
             // the *audio* that is flat rather than the measurement that is broken.
-            "silentFrames": silent,
+            "silentFrames": measurement?.silentFrames ?? 0,
             "positionMs": playerSeconds.isFinite ? playerSeconds * 1000 : 0,
             "playing": player?.timeControlStatus == .playing,
             // Whether the tap is currently on an item at all — the difference between "no frames
@@ -434,14 +451,118 @@ final class AudibleSpectrumTap {
             // with every pause, resume, seek and return to the foreground.
             "installs": installCount,
             "verifies": verifyCount,
-            "readable": readable,
-            "sampleRate": sampleRate
+            "readable": measurement?.readable ?? true,
+            "sampleRate": measurement?.sampleRate ?? 0
         ]
     }
 
-    /* ------------------------------------------------------------------------ the tap */
+    /// One frame the FFT has produced, counted for the app process (v1.9.25) — see `lifetimeFrames`.
+    ///
+    /// Called from the analysis queue by whichever analysis produced it, which is why the count needs
+    /// this object's own lock: the analyses come and go, the number does not.
+    fileprivate func noteAnalyzedFrame() {
+        lock.lock()
+        lifetimeFrames += 1
+        lock.unlock()
+    }
+}
+
+/**
+ * The measurement of **one item** (v1.9.25): the window of PCM that item's tap handed over, the FFT
+ * over it, the timer that drives the pair, and the frame they produce.
+ *
+ * It is created by `attach` for the item that install is putting a tap on, and it is the tap's own
+ * storage — so `prepare`, `process`, `unprepare` and `finalize` all land here, on the state of the
+ * item they are about, and never on another item's. That is the whole of the repair for the owner's
+ * *"the lines stay dead the whole track"*: the teardown of an item the player has left stops the
+ * analysis **that item started**, and the item playing now keeps its own timer and its own FFT.
+ *
+ * A retirement is final: once the plugin has installed a newer item's tap (`retire`), a late
+ * `prepare` for this one does not start it up again. A plain `unprepare` is not final — the same
+ * item can be prepared again (AVFoundation does that when an item is re-rendered) and the analysis
+ * starts measuring again, which is why the timer is created at `prepare` rather than here.
+ */
+final class SpectrumAnalysis {
+    /// The tap object this analysis belongs to. Weak, because it holds us.
+    private weak var owner: AudibleSpectrumTap?
+
+    /// Guards the published frame — the four values `snapshot` reports.
+    private let lock = NSLock()
+    private var bands = [UInt8](repeating: 0, count: AudibleSpectrumTap.bandCount)
+    /// Frames **this** analysis has produced: zero at the install, and reset by nothing else. The
+    /// plugin publishes it as `itemFrames`, and it is what makes "this item's tap has produced
+    /// nothing yet" a fact about the item rather than an inference from a process-wide counter.
+    private var frames = 0
+    private var silentFrames = 0
+    private var lastFrameLive = false
+    private var readable = true
+    private var sampleRate: Double = 0
+
+    /// The frame as one value, read under the lock (v1.9.25).
+    var published: PublishedFrame {
+        lock.lock()
+        let frame = PublishedFrame(
+            bands: bands,
+            live: lastFrameLive,
+            frames: frames,
+            silentFrames: silentFrames,
+            readable: readable,
+            sampleRate: sampleRate
+        )
+        lock.unlock()
+        return frame
+    }
+
+    /*
+     * ------------------------------------------------------------------ the hand-off
+     *
+     * v1.8.0 — **nothing here runs on the audio render thread any more.**
+     *
+     * Until v1.8.0 the tap's `process` callback did the windowing, the 2048-point FFT, the band fold
+     * *and* took an `NSLock` — on the thread that is rendering the audio the user is hearing. vDSP is
+     * fast and a frame every ~23 ms is small, so it usually got away with it, but a render thread must
+     * never block on a lock the main thread can hold, and it must not allocate. Apple's own guidance
+     * for `MTAudioProcessingTap` is to copy the samples out and process elsewhere. So the callback now
+     * writes the PCM it is handed into a small preallocated ring and returns; a timer on a dedicated
+     * queue drains that ring and does the window, the FFT and the fold off the audio thread.
+     *
+     * The lock on the render thread is an `os_unfair_lock` held for a sample-store loop, not an
+     * `NSLock` held across an FFT: it is the kernel's own unfair lock, which donates priority rather
+     * than inverting it. The `lock` above is still what guards the published bands, and it is now only
+     * ever taken off the render thread.
+     */
+    private var pcm = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
+    private var pcmWrite = 0
+    private var sinceLastFrame = 0
+    private var pcmLock = os_unfair_lock_s()
+    private let analysisQueue = DispatchQueue(label: "app.navilite.spectrum.analysis", qos: .userInitiated)
+    private var analysisTimer: DispatchSourceTimer?
+    /// Set false to tell a handler that is already queued that the FFT setup is going away.
+    private var draining = false
+    /// Set once this analysis belongs to an item the plugin has replaced: it is never started again.
+    private var retired = false
+    /// The window the analysis queue is working on. Owned by `analysisQueue`, never shared.
+    private var analysisWindow = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
+
+    // FFT, built once per item, on the analysis queue — never on the render thread.
+    private var fftSetup: FFTSetup?
+    /// The format of the buffers the tap hands us, as reported by **this item's** tap at `prepare`.
+    private var tapFormat: AudioStreamBasicDescription?
+    private var window = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
+    private var windowed = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize)
+    private var realp = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
+    private var imagp = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
+    private var magnitudes = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
+    private var magnitudesSquared = [Float](repeating: 0, count: AudibleSpectrumTap.windowSize / 2)
+    /// `[from, to)` bin ranges, one per band — the same log spacing `visualizer.ts` uses.
+    private var bandRanges: [(from: Int, to: Int)] = []
+
+    init(owner: AudibleSpectrumTap) {
+        self.owner = owner
+    }
 
     fileprivate func prepare(sampleRate: Double, format: AudioStreamBasicDescription) {
+        guard !retired else { return }
         self.sampleRate = sampleRate
         self.tapFormat = format
         /*
@@ -449,6 +570,11 @@ final class AudibleSpectrumTap {
          * the PCM ring is started with it. `prepare` is called by the tap before the first `process`,
          * so this is the one moment nothing is being analysed; doing it inside the queue's own
          * `sync` is what makes the FFT setup and the timer's handler mutually exclusive.
+         *
+         * The guard is on *this* analysis's timer (v1.9.25): a timer belonging to another item is not
+         * a reason to skip this item's first frames, which is exactly how the measurement of the item
+         * playing now used to be thrown away — the incoming item's `prepare` returned here because
+         * the outgoing item's timer was still running, and then that timer was destroyed.
          */
         analysisQueue.sync {
             guard self.analysisTimer == nil else { return }
@@ -496,6 +622,10 @@ final class AudibleSpectrumTap {
      * the float ring. No FFT, no lock held across computation, no allocation, no dispatch. The window
      * and the transform happen on `analysisQueue` (see `drainAndAnalyze`), which is what keeps the
      * visualiser from ever being the reason the audio stutters.
+     *
+     * v1.9.25 — and the ring is **this item's**. It used to be one ring for the process, which meant
+     * an outgoing item whose tap was still rendering wrote its samples into the window the item
+     * playing now was being measured with.
      */
     fileprivate func consume(bufferList: UnsafeMutablePointer<AudioBufferList>, frames frameCount: Int) {
         guard frameCount > 0, let format = tapFormat else { return }
@@ -606,17 +736,37 @@ final class AudibleSpectrumTap {
         if any { silentFrames = 0 } else { silentFrames += 1 }
         lastFrameLive = any
         lock.unlock()
+        /*
+         * And the same frame counted for the app process, which is what `frames` has always been:
+         * a *silent* item's frames count too, and that is the whole point — a tap that is measuring
+         * silence produces frames, a tap that has stopped measuring produces none, and the engine can
+         * tell those two apart only if both numbers exist.
+         */
+        owner?.noteAnalyzedFrame()
     }
 
     fileprivate func unprepare() {
-        /*
-         * Stop the analysis before the setup it uses is destroyed.
-         *
-         * The timer's handler runs on `analysisQueue`, and a handler may already be queued when this
-         * (render-thread) call arrives: cancelling stops future deliveries, the `sync` waits for the
-         * queue to be free, and `draining = false` is checked at the top of the handler, so anything
-         * that runs after this point returns without touching the FFT setup it can no longer see.
-         */
+        stop()
+    }
+
+    /**
+     * Stop measuring for good (v1.9.25): the plugin has installed a newer item's tap, so this item is
+     * no longer the one being heard. A late `prepare` for this analysis does nothing from here on.
+     */
+    func retire() {
+        retired = true
+        stop()
+    }
+
+    /**
+     * Stop the analysis before the setup it uses is destroyed.
+     *
+     * The timer's handler runs on `analysisQueue`, and a handler may already be queued when this
+     * (render-thread) call arrives: cancelling stops future deliveries, the `sync` waits for the queue
+     * to be free, and `draining = false` is checked at the top of the handler, so anything that runs
+     * after this point returns without touching the FFT setup it can no longer see.
+     */
+    private func stop() {
         analysisTimer?.cancel()
         analysisTimer = nil
         analysisQueue.sync {
@@ -631,8 +781,18 @@ final class AudibleSpectrumTap {
     }
 
     fileprivate func finalize() {
-        unprepare()
+        stop()
     }
+}
+
+/// One published frame of one item's analysis, as `snapshot` reports it (v1.9.25).
+struct PublishedFrame {
+    var bands: [UInt8]
+    var live: Bool
+    var frames: Int
+    var silentFrames: Int
+    var readable: Bool
+    var sampleRate: Double
 }
 
 /* --------------------------------------------------------------------- tap callbacks */
@@ -644,19 +804,20 @@ private func audibleSpectrumTapInit(tap: MTAudioProcessingTap, clientInfo: Unsaf
 private func audibleSpectrumTapFinalize(tap: MTAudioProcessingTap) {
     let storage = MTAudioProcessingTapGetStorage(tap)
     // The retain taken for `clientInfo` belongs to the tap: this is the only place it is dropped.
-    Unmanaged<AudibleSpectrumTap>.fromOpaque(storage).release()
+    // One tap, one analysis (v1.9.25), so this drops that item's measurement and nothing else's.
+    Unmanaged<SpectrumAnalysis>.fromOpaque(storage).release()
 }
 
 private func audibleSpectrumTapPrepare(tap: MTAudioProcessingTap, maxFrames: CMItemCount, processingFormat: UnsafePointer<AudioStreamBasicDescription>) {
     let storage = MTAudioProcessingTapGetStorage(tap)
-    let spectrum = Unmanaged<AudibleSpectrumTap>.fromOpaque(storage).takeUnretainedValue()
-    spectrum.prepare(sampleRate: processingFormat.pointee.mSampleRate, format: processingFormat.pointee)
+    let analysis = Unmanaged<SpectrumAnalysis>.fromOpaque(storage).takeUnretainedValue()
+    analysis.prepare(sampleRate: processingFormat.pointee.mSampleRate, format: processingFormat.pointee)
 }
 
 private func audibleSpectrumTapUnprepare(tap: MTAudioProcessingTap) {
     let storage = MTAudioProcessingTapGetStorage(tap)
-    let spectrum = Unmanaged<AudibleSpectrumTap>.fromOpaque(storage).takeUnretainedValue()
-    spectrum.unprepare()
+    let analysis = Unmanaged<SpectrumAnalysis>.fromOpaque(storage).takeUnretainedValue()
+    analysis.unprepare()
 }
 
 private func audibleSpectrumTapProcess(
@@ -671,8 +832,8 @@ private func audibleSpectrumTapProcess(
     let status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, &timeRange, numberFramesOut)
     if status == noErr {
         let storage = MTAudioProcessingTapGetStorage(tap)
-        let spectrum = Unmanaged<AudibleSpectrumTap>.fromOpaque(storage).takeUnretainedValue()
-        spectrum.consume(bufferList: bufferListInOut, frames: Int(numberFramesOut.pointee))
+        let analysis = Unmanaged<SpectrumAnalysis>.fromOpaque(storage).takeUnretainedValue()
+        analysis.consume(bufferList: bufferListInOut, frames: Int(numberFramesOut.pointee))
     }
     /*
      * And then *nothing*. The v1.7.x tap zeroed these buffers to keep its own player silent; these

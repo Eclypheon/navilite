@@ -546,3 +546,56 @@ establishes, and the one state it deliberately leaves open.
    `ios/` or `tools/` changed, the v1.9.22 guards on the three detach sites hold, nothing detaches or re-attaches
    a tap on a playing item, and no envelope or idle spectrum is synthesised.
 
+## The tap on the item playing now owns its own analysis, 2026-10-16 (card `t_4b279e4b` — unreleased)
+
+The owner's report after installing v1.9.24 — *"the lines stay dead the whole track, the spectrum seems to jump up at
+the start and then go to zero and remain there the whole track"*, *"while it's flat it says native audio … mostly
+when i skip out of a loud passage … on a cold start the spectrum always works"* — what the fix establishes, and the
+one half of it only his phone runs.
+
+1. **A frame is drawn, and may spend the chip's third word, only if this item's tap produced it since the last
+   read** (`src/player/engine.ts`: `noteTapFrames` and the branch above `nativeBands` in `pollSpectrum`).
+   `bands`/`live` are a **last-value register** — the last frame the FFT ever produced, zeroed only in `detach` —
+   so on a track whose own analysis is gone the plugin hands over the *previous* item's last frame, non-zero and
+   `live`. The frozen rule (`checksum !== 0 && checksum === lastNativeChecksum`, `FROZEN_FRAMES_BEFORE_THEME`) was
+   the writer of what he reads: ten identical reads of that register, ~330 ms in, and the chip went to *native
+   audio* with the bars flat. It now only ever sees frames that moved, so it catches the live-but-stuck tap it was
+   written for and nothing else; a register that simply stopped is a different state, with its own sentence (§3).
+2. **"Nothing has been measured for this item" is a plugin fact, not an inference.** `NativeSpectrumFrame.itemFrames`
+   (new; `NaviliteSpectrum.snapshot`) is the analysis's own count for the item its tap is on: zero at the install,
+   growing while that item is measured. The engine uses it when the plugin sends it and falls back to the growth of
+   the process-lifetime `frames` (§515.2's rule, unchanged) when it does not. A tap measuring *silence* still
+   produces frames; a tap whose analysis is gone produces none — the distinction the engine could not read before,
+   and the reason this defect looked like the owner's *"there isn't enough silence between the songs"*.
+3. **The state §515 left open is answered in §515's own terms.** A tap on the item playing now that has produced
+   nothing since the last read keeps the chip's third word (the same word §515.4 gives a tap that never answered),
+   the bars follow the audio, and the reason line names *which* register it is looking at — *the frame the plugin is
+   holding was not produced by this item's tap since the last read* (his loud skip: the register still looks live)
+   or *the tap on the item that is playing has produced no frame since the last read* (it is flat). No verdict is
+   spent, no re-attach is issued and no timer exists: a verify cannot restart a tap AVFoundation has stopped
+   preparing, so asking would be a round trip that corrects nothing — the shape v1.9.24 deleted for `resync`.
+4. **And the cause is native, where §515.5 said nothing changed: it is not.** One `AudibleSpectrumTap` per process
+   held one PCM ring, one analysis timer and one FFT for **every** item, while `prepare`/`unprepare` are per item
+   and arrive in an order AVFoundation chooses — so the outgoing item's teardown landing after the incoming item's
+   `prepare` left the track playing now with no analysis for the rest of its life, and neither half could put it
+   back. `SpectrumAnalysis` (new, `ios/App/App/NaviliteSpectrum.swift`) is **one analysis per install**, handed to
+   the tap as its `clientInfo`, so every callback lands on the state of its own item: a teardown stops only the
+   analysis its own item started, and an outgoing item's PCM can no longer be windowed as the item that is playing.
+   This is *the* answer to *"on a cold start the spectrum always works"* — with no outgoing item there is no race.
+   No mix is written, nothing is detached, nothing is delayed: a hand-over still measures nothing until AVFoundation
+   prepares the new item's own tap, so the bars are live on the new track from that item's first frame.
+5. **The boundary's adoption resets the per-item state too** (`adoptNativeAdvance`: `nativeBands`,
+   `lastNativeChecksum`, `identicalNativeFrames`, beside the resets it already had). It takes the item over without
+   passing through `startNative`, so without this the previous item's register was judged against the track the
+   native player had just started itself.
+6. **The reason line carries the tap's own numbers now** (`EngineStatus.tap`: frames for this item, the plugin's
+   two frame counters, its install/verify counts, and the slot the plugin says the tap is on against the slot the
+   bridge is playing). Three of those were already computed and dropped at the bridge; for a defect that has been
+   diagnosed from source three times, one reading of his is worth more than a fourth pass.
+7. **What is not claimed.** The native ordering cannot be reproduced in node. The harness states *"this item's tap
+   has stopped producing for it"* — all the engine ever sees — and proves the engine's half of it
+   (`test/engine-native.test.ts`, the v1.9.25 regression: six steps, both entry points a transition has, and it
+   fails on the pre-fix engine by drawing the previous item's frame at a skip). That the teardown lands after a
+   `prepare` on his phone, and that this item's analysis now survives it, is **unverified on device** until he
+   skips out of a loud passage on the build that carries it.
+

@@ -3380,6 +3380,16 @@ function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineStatus): v
     `${status.state} · ${status.backend} · spectrum ${status.spectrum ? 'live' : 'off'} · ` +
     `${status.pluginState === null ? 'player: nothing reported yet' : `player: ${status.pluginState}`} · ` +
     `adopt: ${status.adoptOutcome} · warm: ${status.warmedIds.length} · ` +
+    /* v1.9.25 — **the tap's own numbers**, which no build has ever put on the screen: this item's
+     * frames, the plugin's two counters and the two slot names. The defect this line exists for is
+     * decided by exactly these — `frames/item` standing still while the audio plays is a tap that has
+     * stopped measuring, `tapped` ≠ `audible` is a tap on another player, and `frames/item` growing
+     * while the bars are flat is the drawing rather than the tap. The engine's sentence
+     * (`modeReason`) says what the app concluded; these say what the phone did. */
+    `tap: +${status.tap.framesForItem} frames/item · ` +
+    `installs ${status.tap.installs ?? '—'}/verifies ${status.tap.verifies ?? '—'} · ` +
+    `tapped ${status.tap.tapped ?? '—'} (audible ${status.tap.audible ?? '—'}) · ` +
+    `plugin frames ${status.tap.pluginFrames ?? '—'} (${status.tap.pluginItemFrames ?? '—'} for this item) · ` +
     // v1.9.8 — the native player's own boundary: how many slots it will play by itself while the
     // app is away, how many tracks it has taken, and the sentence naming which state it is in.
     `native: ${status.nativeBoundary.armed} armed, ${status.nativeBoundary.advances} taken, ` +
