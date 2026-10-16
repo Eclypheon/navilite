@@ -3222,5 +3222,7 @@ IPA was built from; this section is the one commit after it, written from that b
    release check, `README.md`, `DECISIONS.md`, and one test file's now-screen assertion. The two P3 notes §516's
    review left are untouched, and neither is claimed here.
 
-Raw runs (agent scratch, attached to the release card `t_77e69a9b`): `typecheck-1926.txt`, `npm-test-1926.txt`,
-`offline-check-1926.txt`, `spectrum-proof-1926.txt`, `ipa-build-1926.txt`.
+Raw runs (this machine's agent scratch, `/Users/neokester/.hermes/profiles/nerd/cache/scratch/runs-1926/`):
+`typecheck-1926.txt`, `npm-test-1926.txt`, `offline-check-1926.txt`, `spectrum-proof-1926.txt`,
+`ipa-build-1926.txt`; the readings they hold are condensed into `release-1.9.26-evidence.txt`, attached to the
+release card `t_77e69a9b`.
