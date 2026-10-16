@@ -213,9 +213,18 @@ export async function withChromePage(fn, options = {}) {
       '--hide-scrollbars',
       '--autoplay-policy=no-user-gesture-required',
       /*
-       * v2.0-beta: the caller's own flags, appended. `tools/container-tap-check.mjs` is the first to
-       * use it, and it exists for exactly one reason: that check drives real playback, and a harness
-       * that makes a noise on the owner's desk is a harness he will not run.
+       * v2.0-beta: **every harness runs muted by default.** Several of them really play (the tap
+       * checks, the property probe, the slow-link browser test), and a check that makes a noise on
+       * the machine it runs on is a check that stops being run — the card that produced this build
+       * says so outright ("any browser repro runs muted; never boot a Simulator, his Mac is his
+       * desk"). Chrome still decodes and the analyser still sees real samples: `--mute-audio` mutes
+       * the output device, not the pipeline, which is why the bars the spectrum checks assert on are
+       * unaffected (proved by the suite itself, which asserts non-zero bands with this flag on).
+       */
+      '--mute-audio',
+      /*
+       * A caller's own flags, appended — `options.args` stays for anything a harness needs beyond
+       * the defaults.
        */
       ...(options.args ?? []),
       'about:blank',
