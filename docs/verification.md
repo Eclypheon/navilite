@@ -1821,3 +1821,112 @@ ran against).
 
 Raw runs: `offline-check-RED-v1.9.21-leftovers.txt`, `offline-check-GREEN-fix.txt`, `npm-test.txt` and
 `grown-row-probe.txt` (both probe readings), attached to this card (t_4009b23a).
+
+## 20. v1.9.21 — the release that carries the race guard and the two review leftovers (2026-10-16)
+
+§18 (`a0d296e`) and §19 (`7453ebd`) are the fixes; both were on `main` and **unreleased** when they were
+written, and both said so. This is the cut that stamps and ships them, and it is one release carrying
+those two commits and nothing else. What is new here is only what a release adds: the version, the
+evidence for the release as a whole, and the artifact.
+
+**What was run, once each, against a `dist/` built from the fixed source.**
+
+```
+$ npm run build                 # tsc --noEmit && vite build — 43 modules, dist/ in 57 ms
+$ npm run typecheck             # clean
+$ npm test                      # 241 tests, 241 pass, 0 fail, 0 cancelled, 0 skipped, 39.3 s
+$ node tools/mock-subsonic.mjs --port 4683 --stress --dist dist
+$ node tools/offline-check.mjs --app http://127.0.0.1:4683 --online-playlist pl-stress-long
+                                # 36 checks, 0 failures, exit 0
+$ node tools/spectrum-proof.mjs --url http://127.0.0.1:4683
+                                # exit 0
+```
+
+`npm test` is the release check as well as the suite: `test/changelog.test.ts` compares `CHANGELOG.md`
+with `src/ui/changelog.ts` item for item and asserts the version list ends at 1.9.21, so a bump that
+touched only part of `docs/VERSIONING.md` §3's list fails there. Nothing was skipped (0 skipped, so no
+browser fixture opted out), and `test/pager.test.ts` — the file that carries the flake the neighbouring
+card filed — passed inside the run (38.9 s of the 39.3 s).
+
+**The harness's 36 checks, on this release's build.** The block is §18's five race cases with their
+controls and the second-Enter check, plus §19's two Library-offline checks. What the screen read, 2.5 s
+after the route was left, on the five cases this release exists for — every one of them drawn from the
+answer the block then holds open, which is the control that makes the readings mean anything:
+
+| case (answer held 1800 ms, left 250 ms in) | the reading |
+| --- | --- |
+| album page | still `#/downloads` — h1 “On this phone”, 4 rows, no album header, cover or song rows |
+| artist page | still `#/downloads` — 4 rows, no artist header and album cards |
+| Favourites | still `#/downloads` — 4 rows, no Favourites header and sections |
+| Search | still `#/downloads` — 4 rows, no Search header and result sections |
+| the router's failure fallback (an album id the library does not know) | still `#/downloads` — 4 rows, **no error box** |
+| a second Enter while the first search is still held | h1 “Search”, 2 cards, 0 song rows — the guard is keyed to the render, not the request |
+| the Library's “On this phone” row, API refused | on the offline page too, in the same list as the downloads, tapping through to `#/downloads` |
+
+**The spectrum proof** — this cut changes no player code, and it was run anyway so that the release's
+own evidence is whole: 29804 lit pixels while playing, then **668** at +700 / +900 / +1200 / +1500 ms,
+the last three byte-identical, 0 columns with a second run of lit pixels, 0 lit below the baseline.
+
+**The artifact.**
+
+```
+$ bash tools/build-ios-ipa.sh
+built  artifacts/Navilite-1.9.21-unsigned.ipa
+bytes: 1,026,541          (v1.9.20: 1,026,082 — +459, +0.04 %)
+app version 1.9.21 (42), UIBackgroundModes[0]=audio
+```
+
+Read out of the archive itself, not out of a source file:
+
+```
+$ unzip -p artifacts/Navilite-1.9.21-unsigned.ipa Payload/App.app/Info.plist \
+    | plutil -p - | grep -E 'CFBundleShortVersionString|CFBundleVersion'
+  "CFBundleShortVersionString" => "1.9.21"
+  "CFBundleVersion" => "42"
+```
+
+Every hashed asset in `dist/assets/` is byte-identical to its own member inside the IPA (sha256 of each
+member read straight out of the archive), so the shipped bundle is a fresh build of the released tree:
+
+| asset | sha256 — the same in `dist/` and in the IPA |
+| --- | --- |
+| `index-BeHJDgul.js` (192,463 B) | `e65b2a944e1e404a6af6ebe10301c3e0eae0783fab9de5e32f3a576e434c37cf` |
+| `index-F6_Re_h1.css` (14,005 B) | `9316db8712117f190a34005bf1ba3f0221eab5aeb3ee32c61056932c35b522ef` |
+| `base-DHtd_KoX.js`, `esm-Bhol3Z4j.js`, `esm-CB2XQsFD.js`, `native-ByBeX_iW.js`, `web-BN6ndMGc.js`, `web-Dsf-jfFA.js` | `e5208356…`, `779d5e9c…`, `2baeee1d…`, `4ad2c4b0…`, `efea2507…`, `308e8bc1…` |
+| `sw.js` | `9ee133a51619bb69299c434daaf54e4b8f611a36dfeba61730c5faba3e9fdf59` (stamped `a5bb600`, the commit it was built from) |
+
+The previous release's chunk was `index-jr7GwDk1.js` (190,985 B, sha256 `62b3ff94…`), so this is not
+v1.9.20's bundle — and the new code is *in* it: `A slow answer can no longer draw itself over the screen
+you are looking at.` and `34 of 35` both appear in `index-BeHJDgul.js`, which is the same chunk the
+app's About line and Settings → **What's new** read from.
+
+**Order of operations, and what was built.** The release body was committed first (`a5bb600`), then
+`dist/` was rebuilt from that commit and the IPA made from it — `docs/VERSIONING.md` §6's order, and one
+deviation from the sequence v1.9.20 used, where the artifact preceded the commit and so carried the
+*parent's* short SHA inside `sw.js` (`648b3e4`, checked in that IPA). The evidence build (before the
+commit) and the shipped build (after it) are byte-identical in every asset in the table above; only
+`dist/sw.js` differs between them, which is exactly what that file is for. Counts for the whole cut:
+**two `vite build`s** (one for the evidence, one after the commit for the artifact) and **one
+`xcodebuild`**; one `npm test` run, one harness run, one spectrum-proof run. The tag `v1.9.21` sits on
+`a5bb600`, the commit the IPA was built from; this section is the one commit after it, written from that
+build's readings.
+
+**Not verified here, and not claimed.**
+
+1. **His phone.** Everything above is Chrome at 393 × 852 on this Mac against the mock: the slow answer
+   is the mock's own hold, the refused port is a refused port, and the WebView is untouched by all of it.
+2. **The installed IPA.** It is unsigned on purpose (§15.4, `docs/ios-sideload.md`); the sideload and the
+   7-day re-sign are the owner's own steps, and nothing here runs the app on a device or a simulator.
+3. **The suite's determinism.** Not in this cut: `t_744cba0b` (the pager check's 20 s patience under
+   `npm test`'s parallel load) is parked at the owner's request and its fix is uncommitted in that card's
+   workspace. One green `npm test` is **one** run — §18's 4-in-17 reading still stands as the size of
+   that flake, and nothing here says it is gone. `npm test` itself is unchanged.
+4. **Android.** No APK was built for 1.9.21 (`versionCode` is bumped to 41 so that the next one carries
+   it), so nothing here is evidence about the APK, and the guard's behaviour in Android's WebView is the
+   same unmeasured class as §18's note 1.
+5. **The one awaited paint §18 left alone** (`renderAlbums`' lazy `load()`) — unchanged, and named in
+   `DECISIONS.md` for 1.9.21 rather than left to look like an oversight.
+
+Raw runs behind the tables and the counts (agent scratch, attached to the release card `t_15b0a5c5`):
+`npm-test.txt`, `offline-check-1921.txt`, `spectrum-proof-1921.txt`, `assets-build1.txt`,
+`assets-build2.txt`.
