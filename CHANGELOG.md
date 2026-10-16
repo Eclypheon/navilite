@@ -301,3 +301,8 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - The bar no longer says "native audio" while the spectrum is working. With a song loaded and paused on the playlist pages, the little word on the player bar read "native audio" beside "spectrum off" — as if the app could not read that song at all — while the spectrum was fine and the only thing true about it was that nothing was playing. A paused song says "paused" there now.
 - Every word on that bar means one thing, and nothing else: "spectrum" while the bars are being fed by the song you are hearing, "spectrum…" while the phone is still setting that song's reading up, the transport's own word ("paused", "loading…") when the only reason nothing is being drawn is that nothing is playing, and "native audio" only on a build that genuinely cannot read the music that is playing — never as a stand-in for a pause.
+
+## 1.9.27 — 2026-10-16
+
+- Pressing play again after a pause no longer flashes "native audio" on the player bar — and neither does coming back to the app from the background. For a moment the bar said the app could not read the song that was playing, when the only thing true about it was that the phone had not answered yet about that song. It says "spectrum…" until the phone answers, and then "spectrum", exactly as it does when a song starts.
+- The same flash is gone on the web page and the installed web app, in the word it wore there: a song whose bars were still on their way no longer says the browser cannot read that song either. A song the phone or the browser really cannot read still says so — "native audio", or "theme" on the web — before and after a pause.

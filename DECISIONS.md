@@ -699,7 +699,7 @@ The owner, on the v1.9.24 build he had just installed, with a track loaded and *
    of `docs/VERSIONING.md` §3, the changelog entry in his terms in both copies, the IPA, and §29 of
    `docs/verification.md`. The fix commit itself carried none of those; the code in it is unchanged by the cut.
 
-## The browser's own first-frame window is the spectrum's word, not a capability verdict, 2026-10-16 (card `t_71dc787e` — unreleased)
+## The browser's own first-frame window is the spectrum's word, not a capability verdict, 2026-10-16 (card `t_71dc787e` — released as v1.9.27)
 
 Sage, out of the verification of `t_9329e3b0`/`t_1c2d1c51`, measured in Chrome at 393 x 852 over the mock library
 (the real app at `d769fd4`), reading `test/chip-word-browser.test.ts`'s own word list:
@@ -765,11 +765,14 @@ he uses the app — not on the phone, and not the word in his screenshot, hence 
    (this item's verdict, as a field) and it needs his phone to verify, so it is filed as `t_71dc787e`'s follow-up
    card rather than folded in here. On the **web** path the same window is already closed by this entry, because
    the register that decides the verdict is the register the window is read from.
-6. **Unreleased, like its predecessor.** No version bump, no `CHANGELOG.md` heading, no artifact, no tag: the fix,
-   its harnesses, this entry and §30 of `docs/verification.md` are the commit. The release that carries it is its
-   own card, after review.
+6. **Released as v1.9.27, with the native half and in one version.** The fix, its harnesses, this entry and §30 of
+   `docs/verification.md` were committed unreleased (`48f9497`); the cut is `t_55732fc5`, and it carries this and
+   `t_c8cc01c6` as **one** version rather than two — the two windows are one rule read on the two ways of
+   measuring (the entry at the end of this file), and the owner has asked not to be streamed version after
+   version. The release commit carries the version files, the changelog in his words, and §32 of
+   `docs/verification.md`; **no line of `48f9497`'s code was changed by the cut.**
 
-## The other half of the same window: a native resume, and the per-item fact that keeps it honest, 2026-10-16 (card `t_c8cc01c6` — unreleased)
+## The other half of the same window: a native resume, and the per-item fact that keeps it honest, 2026-10-16 (card `t_c8cc01c6` — released as v1.9.27)
 
 Filed out of `t_71dc787e`, where the web path's first-frame window was closed and this one was measured and
 deliberately left alone. Item 5 of that entry is this card's brief; the probe below is the same probe, on
@@ -821,7 +824,43 @@ background.
 6. **No new vocabulary, therefore no owner's call.** `spectrum…` already means *playing, and the thing that
    measures it has not answered for it yet* (§515.4, the owner's call of 2026-10-16); this entry spends that word
    on one more transition and adds nothing to the dictionary.
-7. **Unreleased, like its predecessor.** No version bump, no `CHANGELOG.md` heading, no artifact, no tag: the fix,
-   the harness, this entry and §31 of `docs/verification.md` are the commit. Its release is its own card, after
-   Sage's verification.
+7. **Released as v1.9.27, with the web half it mirrors.** The fix, its harness, this entry and §31 of
+   `docs/verification.md` were committed unreleased (`36ddb14`); the cut (`t_55732fc5`, gated on Sage's
+   verification `t_1c099158`) stamps both halves at once, for the reason item 6 of §t_71dc787e names. The release
+   commit carries the version files, the changelog in his words, and §32 of `docs/verification.md`; **no line of
+   `36ddb14`'s code was changed by the cut.**
+
+## The first-frame window is one rule on both ways of measuring, 2026-10-16 (cards `t_71dc787e` + `t_c8cc01c6`, released as v1.9.27)
+
+The two entries above were written a minute apart, on either side of a deliberate deferral; this is the invariant
+they add up to, stated once, because the next thing to touch `visualiserWord` will read them as two local fixes
+unless it is written down that they are one rule.
+
+1. **The rule.** While the transport is **playing**, the word on the bar is a statement about *the item in hand*,
+   and *"the thing that measures this item has not answered for it yet"* is **never** reported as *"this build
+   cannot measure it"*. The capability word (`native audio` on the phone, `theme` on the web) is reached only by
+   the item's own verdict — and, on a build with no tap at all, by the absence of the thing itself.
+2. **One rule, two registers, because there are two ways of measuring.** The web path answers from `zeroFrames`
+   (`analyserArming()`), the native path from the tap's own verdict for this item (`tapVerdictForItem`,
+   `tapArming()`). `status()` spends one word on both:
+   `spectrumArming = playing && (spectrumArming || analyserArming() || tapArming())`. The named flag stays for the
+   windows the writers do see (a request in flight at a start, an adoption, an orphan, a tap producing nothing);
+   the two derived reads are what survive the transitions no writer sees — a resume, a return from the background,
+   an analyser's first frame.
+3. **No new vocabulary, therefore no owner's call was needed.** §515.4's `spectrum…` — *"playing, and the thing
+   that measures it has not answered for it yet"*, the owner's call of 2026-10-16 — is spent on one more
+   transition on each path. No word was added, removed or re-defined, and the dictionary in `CHANGELOG.md` 1.9.26
+   still holds verbatim.
+4. **No clock, no count.** What ends a window is the item's own frame or its own verdict, never elapsed time and
+   never a poll budget. v1.9.24 deleted the timer shape; the two windows added here are read out of registers the
+   fix already keeps, and neither introduces one.
+5. **The verdict outranks the window, and that is the point of the third fact.** `(spectrumLive, spectrumArming) =
+   (false, false)` while playing is how a *reached* verdict looks on both paths, so neither window may re-arm by
+   flag: an item whose tap read silence, or returned one frozen frame, keeps `native audio` across a pause **and**
+   a resume. Silent re-arming would have said *the spectrum is coming* over an item the engine has already ruled
+   out — §515's silence verdict, the owner's own.
+6. **Both halves shipped in one version**, verified separately before the cut (`t_7481b20f`, `t_1c099158`) and
+   recorded in §30 and §31 of `docs/verification.md`; `v1.9.27` carries the combination and §32 records that cut.
+   The two named residuals (§30.5.3's ~1.8 s per item on a genuinely unmeasurable stream, §31.3.4's ~0.3 s restart
+   of a frozen tap's verdict after a resume) are stated there and are **not** closed by this release.
 
