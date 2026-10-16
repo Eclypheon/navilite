@@ -3402,3 +3402,132 @@ Raw runs (this machine's agent scratch, `/Users/neokester/.hermes/profiles/nerd/
 `chip-word-browser-after.txt`, `tainted-probe-first-pass.txt` (the tainted run's first pass, kept because it is
 what showed the verdict needs the item's own 1.8 s), `npm-test-after.txt`, `typecheck.txt`.
 
+## 31. the native path's resume was wearing the capability word — the other half of §515's window (2026-10-16, card `t_c8cc01c6`, unreleased)
+
+**No version is bumped, no IPA/APK is built, no tag is written and the `CHANGELOG.md` release heading is
+untouched.** This is the fix, its harness, `DECISIONS.md` §t_c8cc01c6 and this record — an unreleased fix like its
+two predecessors (`d769fd4`, `48f9497`), whose releases were their own cards.
+
+### 31.1 The defect, and where it was measured
+
+`t_71dc787e` closed the web path's first-frame window and measured this one on the way past without touching it
+(§30.5.2). It is the same licence line, reached by elimination on the **other** path: the instant a `resume()`
+returns the transport to `playing`, `disarmConsumers` (the pause) has cleared `spectrumLive` and `spectrumArming`
+was never set by a resume, so `visualiserWord`'s `if (this.state === 'playing')` branch paints the amber
+capability word `native audio` on an item whose tap was measuring a moment ago. The status is one the app really
+emits — the resume `dispatch` calls `applyState` and then `emit()` synchronously, before the bridge is asked
+anything — so the bar paints it too; on his phone that is every resume and every return from the background,
+until the poll's own round trip answers.
+
+The probe is the card's, on the existing fake bridge in `test/engine-native.test.ts`
+(`nativeEngine(recording())`, play → settle → pause → `resume()`), **run against the parent commit's engine
+(`48f9497`, `git checkout 48f9497 -- src/player/engine.ts`) with the new test in place**:
+
+```
+probe A1 native playing:        "spectrum" (spectrum true, arming false)
+probe A2 native paused:         "paused"   (spectrum false, arming false)
+probe A3 the instant resume() is called: state playing, spectrum false, arming false — the chip reads "native audio" (emitted: "native audio")
+✖ a native resume wears the spectrum’s own word, and a tap’s own verdict survives it (t_c8cc01c6)
+
+AssertionError [ERR_ASSERTION]: the tap that was measuring this item a moment ago has not answered for it yet —
+the spectrum is coming, not a capability the app has lost
+  + actual - expected
+  + 'native audio'
+  - 'spectrum…'
+ℹ tests 1, pass 0, fail 1
+```
+
+A4 (`"spectrum"`, once the poll answers) is what made this the *window* rather than a wrong word: the engine is
+right about the item and wrong about the moment.
+
+### 31.2 What changed
+
+Three things in `src/player/engine.ts`, and the exact rule is item 3 of `DECISIONS.md` §t_c8cc01c6:
+
+1. **`tapVerdictForItem`** — *this item's tap has answered with its own verdict* — set where the two verdicts are
+   written (the digital-silence branch and the frozen-frame branch of `pollSpectrum`), cleared in
+   `forgetTapFrames` (a load, an adoption, the orphan branch) and by this item's own live frame.
+2. **`tapArming()`** — the native path's window, read from that register instead of from the writers: `native`,
+   nothing live, the tap is on this item (`hasSpectrumTap`), and no verdict for it. Nothing here is a clock or a
+   count (the shape v1.9.24 deleted); what ends the window is this item's tap producing its own frame or giving
+   its own verdict.
+3. **`status()`** — `spectrumArming` is now *the transport is playing* AND (`spectrumArming` || `analyserArming()`
+   || `tapArming()`): the two derived reads (one per way of measuring) beside the flag the writers still own.
+   `visualiserWord` is unchanged in shape; its playing branch is now reachable on this path only by an item's own
+   verdict or by a build with no tap.
+
+The trap this card names is the reason for the third fact rather than `spectrumArming = true` in `startConsumers`:
+on this path `(spectrumLive, spectrumArming) = (false, false)` **while playing** is also how a *reached verdict*
+looks, so re-arming would say *the spectrum is coming* over a track the tap has already ruled out — §515's
+silence verdict. Section 31.3.3 and 31.3.4 are that behaviour, asserted.
+
+### 31.3 The same probe after the change
+
+```
+probe A1 native playing:        "spectrum" (spectrum true, arming false)
+probe A2 native paused:         "paused"   (spectrum false, arming false)
+probe A3 the instant resume() is called: state playing, spectrum false, arming true — the chip reads "spectrum…" (emitted: "spectrum…")
+     the window: the tap answers a read in 40 ms here, and its first frame ended the window 43 ms after this read; 1 emitted status(es) inside it, a capability word on 0 of them
+probe A4 native resumed:        "spectrum" (spectrum true, arming false)
+2. back from the background, the player saying it is playing: state playing, spectrum false, arming true — the chip reads "spectrum…"
+   …the tap’s own frame ended that window too, 44 ms later
+3. a tap reading digital silence: spectrum false, arming false — the chip reads "native audio" (the native tap is reading digital silence — the audio itself is silent, so the bars are flat)
+   and at the resume: spectrum false, arming false — the chip reads "native audio"
+   after the resume: "native audio" (the native tap is reading digital silence — the audio itself is silent, so the bars are flat)
+4. a tap returning one frozen frame: spectrum false, arming false — the chip reads "native audio" (the native tap kept returning the same frame, which is not a measurement — showing the album-art theme)
+   at the resume: spectrum false, arming false — the chip reads "native audio"
+   and 300 ms after the resume the tap’s own verdict is back: "native audio" (the native tap kept returning the same frame, which is not a measurement — showing the album-art theme)
+✔ a native resume wears the spectrum’s own word, and a tap’s own verdict survives it (t_c8cc01c6)
+```
+
+Read as the acceptance:
+
+1. **A3 is `spectrum…`**, in the status the engine emits as well as the one read from it (`spectrum false,
+   arming true`), and **the window that opens is ended by the tap's own frame** — 43 ms later in the fake, whose
+   tap is stated as answering in one `ROUND_TRIP_MS` (40 ms) per read; on the phone that is the plugin's own
+   round trip. Not one emitted status inside the window wore a capability word.
+2. **A return from the background wears it too.** The app leaves the screen with the track paused and comes back
+   to a player that is playing: the return path adopts that answer (`engine-state playing`) instead of calling a
+   tap, so no writer arms anything there either — `spectrum…`, ended by the tap's own frame 44 ms later, no
+   capability word on any reading taken on the way in.
+3. **A tap that answered with silence keeps `native audio` across a pause and a resume** — at the instant the
+   resume flips the transport, and at every reading afterwards, with no `spectrum…` anywhere in between: the
+   verdict is about the item, not the moment. This is the behaviour the card exists to protect.
+4. **A tap returning one frozen frame is the same statement** (and this harness can now state it at all: the fake
+   gained `frozenUrls`, a tap whose own per-item counter moves while its bands never change — the v1.8.0 frozen
+   buffer, which the v1.9.25 *register-rule* cases are deliberately not). Its verdict is `native audio`, its
+   resume instant is `native audio`, and the verdict is reached again 300 ms after the resume because the resumed
+   poll re-opens the per-item register `startConsumers` keeps — the frozen rule's own ~0.4 s latency, restarted by
+   a transition. **That is named, not fixed, and it is not this card's**: the bars there are drawn from frames
+   this item's tap really produced, and this card is about the capability word arriving early, not late.
+
+### 31.4 The suite, and what is not claimed
+
+```
+$ npm run typecheck                             # clean
+$ npm test                                      # 263 tests, 263 pass, 0 fail, 0 cancelled, 0 skipped, 37.6 s
+$ node --test --test-name-pattern="t_c8cc01c6" test/engine-native.test.ts
+                                                # 1 test, 1 pass, 0 fail, 3.2 s (before the fix: 0 pass, 1 fail)
+```
+
+263 is `48f9497`'s 262 plus this card's single case; the harness is the file that already existed
+(`test/engine-native.test.ts`), extended with two facts it could not state before (`frozenUrls`, `frameDelayMs`)
+rather than a new harness.
+
+1. **His phone is not touched and not claimed.** Every reading above is off the fake bridge. What the change
+   predicts on his phone: at a resume (and at a return from the background) the chip reads `spectrum…` instead of
+   flashing the amber `native audio`, for the length of the plugin's own round trip, and a track the tap has
+   ruled out still reads `native audio` across a pause and a resume. **Nothing in this record is a reading off
+   his screen** — his phone is the only surface that can settle it, and that is what the verification card and
+   the next installed build are for.
+2. **The web path, the paused / ended / interrupted words and the no-tap build are not re-litigated** — they are
+   covered by `t_71dc787e`'s and `t_1c2d1c51`'s cases, all still green in the 263. The no-tap build's
+   `native audio` is preserved by construction (`tapArming` requires the tap to exist at all) and by that case.
+3. **The frozen rule's ~0.4 s restart at a resume** is as described in 31.3.4: observed, explained, not changed.
+4. **No artifact, no version, no tag, nothing about the APK or the IPA.** The release that carries this fix is its
+   own card, after Sage's verification (`t_1c099158`), and it is not this one.
+
+Raw runs (this machine's agent scratch, `/Users/neokester/.hermes/profiles/nerd/cache/scratch/runs-t_c8cc01c6/`):
+`engine-native-window-before.txt` (the new test against `48f9497`'s engine: the failure above),
+`engine-native-window-after.txt` (the run quoted in 31.3), `npm-test-after.txt` (263/263).
+

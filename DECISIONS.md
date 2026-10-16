@@ -769,3 +769,59 @@ he uses the app — not on the phone, and not the word in his screenshot, hence 
    its harnesses, this entry and §30 of `docs/verification.md` are the commit. The release that carries it is its
    own card, after review.
 
+## The other half of the same window: a native resume, and the per-item fact that keeps it honest, 2026-10-16 (card `t_c8cc01c6` — unreleased)
+
+Filed out of `t_71dc787e`, where the web path's first-frame window was closed and this one was measured and
+deliberately left alone. Item 5 of that entry is this card's brief; the probe below is the same probe, on
+`test/engine-native.test.ts`'s fake bridge (`nativeEngine(recording())`, play → settle → pause → `resume()`):
+
+```
+probe A1 native playing:        "spectrum" (spectrum true, arming false)
+probe A2 native paused:         "paused"   (spectrum false, arming false)
+probe A3 the instant resume() is called: state playing, spectrum false, arming false — the chip reads "native audio"
+probe A4 native resumed:        "spectrum"
+```
+
+A3 is a status the app really emits (`resume()` dispatches the state, `applyState` runs and `emit()` fires before
+the bridge is asked anything), so the amber capability word is painted on an item whose tap was measuring a
+moment ago, until the poll's own round trip answers — on his phone, at every resume and at every return from the
+background.
+
+1. **The fix is a third fact, not a re-arm — and the reason is §515's silence verdict.** `spectrumArming` is
+   written only by `startNative` (a load), `adoptNativeAdvance` and the polls that find the tap producing nothing
+   or sitting on another item; a resume is none of those, and `disarmConsumers` (the pause) clears `spectrumLive`,
+   so the window opened by elimination. But `(spectrumLive, spectrumArming) = (false, false)` **while the transport
+   plays** is also exactly how a *reached verdict* looks — the tap has read silence for `ZERO_POLLS_BEFORE_THEME`,
+   or returned one frozen frame over and over, and both of those paths clear `spectrumArming`. Setting
+   `spectrumArming = true` in `startConsumers` would therefore say *the spectrum is coming* over an item the engine
+   has already ruled out, which is the owner's silence verdict of 2026-10-16 and the whole of the last three
+   releases. The engine keeps the fact it was missing instead.
+2. **The fact:** `tapVerdictForItem` — *this item's tap has answered with its own verdict.* Set where the two
+   verdicts are written (the `answered` branch of `pollSpectrum`, whose sentence names digital silence, and the
+   frozen-frame branch, whose sentence names the repeating frame); cleared in `forgetTapFrames`, which is the one
+   place a new item (a load, an adoption) and an item the tap has left (the orphan branch) already pass through;
+   and cleared by this item's own live frame, because a tap measuring again supersedes its own old verdict —
+   exactly what a real analyser frame does to the web half's `zeroFrames`.
+3. **The window:** `tapArming()` — `backend === 'native'`, `spectrumLive` false, the tap **is on this item**
+   (`hasSpectrumTap`, which is also what keeps a build with no tap on `native audio`), and no verdict for it. It is
+   the mirror of `analyserArming()` (item 2 of §t_71dc787e), and it is OR'd in beside it and the flag:
+   `status()` computes `spectrumArming` as *the transport is playing* AND (`spectrumArming` || `analyserArming()` ||
+   `tapArming()`). The flag stays for the windows the writers own (a request in flight at a start, an adoption, an
+   orphan, a tap producing nothing); the derived read is what survives the transitions no writer sees — a resume,
+   and the return from the background that adopts the player's own `playing`.
+4. **No clock and no budget.** What ends the window is this item's tap producing its own frame (live, silent or
+   frozen) or giving its own verdict about it. v1.9.24 deleted the timer shape and none is reintroduced; the
+   measured window below is the fake's own stated answer latency, and on the phone it is the plugin's round trip.
+5. **What must not regress, and is asserted:** a track whose tap read silence for the whole track, and one whose
+   tap returned one frozen frame, keep `native audio` across a pause **and** a resume — the verdict is about the
+   *item*, and at the resume instant the chip is the verdict's word (not `spectrum…`, which is what a re-arm would
+   have produced). A tap that starts measuring again ends its own verdict, and the window is then walked again
+   from this item's frames. The paused / ended / interrupted words, the web path and the no-tap build's
+   `native audio` are untouched (`t_71dc787e` and `t_1c2d1c51` verified them; not re-litigated).
+6. **No new vocabulary, therefore no owner's call.** `spectrum…` already means *playing, and the thing that
+   measures it has not answered for it yet* (§515.4, the owner's call of 2026-10-16); this entry spends that word
+   on one more transition and adds nothing to the dictionary.
+7. **Unreleased, like its predecessor.** No version bump, no `CHANGELOG.md` heading, no artifact, no tag: the fix,
+   the harness, this entry and §31 of `docs/verification.md` are the commit. Its release is its own card, after
+   Sage's verification.
+

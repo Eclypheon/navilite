@@ -184,6 +184,9 @@ export interface TrackRequest extends NativeTrackInfo {
  *   - `spectrum…` — the item in hand is playing and the thing that measures it has not answered for
  *     it yet: a native tap that is installed and to give its first frame, or (v1.9.27, card
  *     `t_71dc787e`) a web analyser that is attached and has not produced this item's first frame.
+ *     From v1.9.27's native card (`t_c8cc01c6`) this is also the word for **every way into `playing`
+ *     that is not a start** — a resume, a return from the background — until the tap's own answer
+ *     arrives, which is where the amber capability word was reaching the screen on his phone.
  *     This is the same word a tap refused for a whole track keeps (§515.4, the owner's call of
  *     2026-10-16: the engine cannot tell *"will never attach"* from *"still attaching"* without a
  *     clock), and the same word for the browser's own first-frame window — **no frame for this item
@@ -269,6 +272,15 @@ export interface EngineStatus {
    * thing that measures this item answered for it yet?* — asked of the two ways of measuring. Before
    * it, a browser's first-frame window had no word of its own and spent the amber `theme` for ~128 ms
    * at the start of every track, on a build whose graph was built and working.
+   *
+   * **v1.9.27 (card `t_c8cc01c6`) — and on the native path the flag is not the whole of it.**
+   * `spectrumArming` is written only by a start, an adoption and a poll that has found a problem, so
+   * the ways into `playing` that are none of those — **a resume**, a return from the background —
+   * reached the capability word with this flag still false, on an item whose tap was measuring a
+   * moment ago. `tapArming` reads the native path's own per-item verdict register, the mirror of
+   * `analyserArming`, and `status()` ORs that in too; a track whose tap has *answered* — silence, or
+   * one frozen frame — keeps `native audio` across a pause and a resume, because that verdict is
+   * about the item and not about the moment.
    */
   spectrumArming: boolean;
   /**
@@ -677,6 +689,35 @@ export class AudioEngine {
    * The other half of {@link spectrumLive} (v1.9.6): see {@link EngineStatus.spectrumArming}.
    */
   private spectrumArming = false;
+  /**
+   * **Whether this item's tap has answered with its own verdict (v1.9.27, card `t_c8cc01c6`)** — the
+   * third fact about the native path's tap, and the one a resume needs.
+   *
+   * On this path `(spectrumLive, spectrumArming) = (false, false)` while the transport is **playing**
+   * has two very different reasons, and until this field the engine could not tell them apart:
+   *
+   *   - **the tap has ruled this item out** — the two verdicts {@link pollSpectrum} writes: frames
+   *     from a tap on this item whose bands read silence for {@link ZERO_POLLS_BEFORE_THEME}, or the
+   *     same frozen frame over and over. Both clear `spectrumArming`, and while the transport plays
+   *     they are the only thing the capability word `native audio` may mean.
+   *   - **the tap has not answered for this item yet, and nothing is feeding the bars this instant** —
+   *     which is what the status looks like for one bridge round trip after a **resume** (and after a
+   *     return from the background that adopts the player saying it is playing). `spectrumArming` is
+   *     only ever set by a start (`startNative`), an adoption ({@link adoptNativeAdvance}) and the
+   *     polls that find the tap producing nothing or sitting on another item; a resume is none of
+   *     those, so `visualiserWord`'s licence line was reached and the amber capability word painted
+   *     at every resume — `t_71dc787e`'s defect, on the other path.
+   *
+   * So this field is that second state's missing fact, stated per item and never re-armed by a
+   * clock: set where the two verdicts are written, cleared where {@link forgetTapFrames} is (a new
+   * item, or the tap leaving this one) and by this item's own live frame — a tap measuring again
+   * supersedes its own old verdict. `spectrum…` is then worn for exactly as long as *no answer for
+   * this item has arrived at all*, and a track whose tap has answered with silence keeps `native
+   * audio` across a pause and a resume, because that verdict is about the item and not the moment
+   * (§515's silence verdict, the owner's call of 2026-10-16 — the behaviour re-arming would have
+   * broken).
+   */
+  private tapVerdictForItem = false;
   private modeReason = 'nothing playing yet';
   private nativeBands: Uint8Array | null = null;
   private spectrumPoll: ReturnType<typeof setInterval> | null = null;
@@ -1375,8 +1416,14 @@ export class AudioEngine {
      * capability word `theme` (`t_71dc787e`). `analyserArming` is that window, read from the web
      * path's own per-item register, so both paths answer the question with a fact about the item in
      * hand rather than with an elimination.
+     *
+     * **And the native flag is not enough on its own** (`t_c8cc01c6`): `spectrumArming` is written by
+     * starts and adoptions, so the ways into `playing` that are neither — a resume, a return from the
+     * background — reached the licence word with the flag untouched. `tapArming` is the native path's
+     * read of its own register, the mirror of `analyserArming`, and it is what makes the window
+     * survive those transitions.
      */
-    const arming = this.state === 'playing' && (this.spectrumArming || this.analyserArming());
+    const arming = this.state === 'playing' && (this.spectrumArming || this.analyserArming() || this.tapArming());
     return {
       state: this.state,
       backend: this.backend,
@@ -1495,12 +1542,15 @@ export class AudioEngine {
      *     reachable — both starts build their path before the player is asked to play — and if it
      *     ever were, this line is the honest word.)
      *
-     * **v1.9.27 — the window that is neither of those is above this line, not here** (card
-     * `t_71dc787e`). A playing item whose measurement has not answered *yet* — a native tap in
-     * flight, an analyser that has not produced this item's first frame — is `spectrum…`, which is
-     * what `arming` says and what this branch used to be reached by instead: on a browser it spent
-     * `theme` (the amber capability word) for ~128 ms at the start of every track, on a build whose
-     * Web Audio graph was built and working. What is left here is only the item's own verdict.
+     * **v1.9.27 — the window that is neither of those is above this line, not here** (cards
+     * `t_71dc787e` and `t_c8cc01c6`). A playing item whose measurement has not answered *yet* — a
+     * native tap in flight, an analyser that has not produced this item's first frame, and now
+     * **every way into `playing` that is not a start** (a resume, a return from the background) — is
+     * `spectrum…`, which is what `arming` says and what this branch used to be reached by instead: on
+     * a browser it spent `theme` for ~128 ms at the start of every track, and on the native path it
+     * spent `native audio` at every resume. What is left here is only the item's own verdict — the
+     * tap's silence or frozen frame for this item (or no tap at all, above), the analyser's own
+     * `ZERO_FRAMES_BEFORE_THEME` of unusable samples on the web path.
      */
     if (this.state === 'playing') return this.backend === 'native' ? 'native audio' : 'theme';
     return STOPPED_WORD[this.state];
@@ -1586,6 +1636,35 @@ export class AudioEngine {
     if (this.backend !== 'web' || this.analyser === null) return false;
     if (this.spectrumLive) return false;
     return this.zeroFrames < ZERO_FRAMES_BEFORE_THEME;
+  }
+
+  /**
+   * **The native path's own arming window** (v1.9.27, card `t_c8cc01c6`) — the last hole in
+   * `spectrumArming`, and the same question read off the same kind of register `analyserArming` reads
+   * off the analyser's.
+   *
+   * `spectrumArming` is a *flag*, and only three kinds of writer ever set it: a start (`startNative`),
+   * an adoption (`adoptNativeAdvance`), and the polls that find the tap producing nothing for this
+   * item or sitting on another one. Every other way into `playing` — **a resume**, a return from the
+   * background that adopts the player's own `playing`, the recovery from an interruption — enters
+   * with the flag exactly as it was and with `disarmConsumers` having cleared `spectrumLive`, so for
+   * one bridge round trip the engine's own facts said *"playing, nothing measured, and the tap has
+   * told me nothing"*, which `visualiserWord`'s licence line painted as `native audio` (see the
+   * field's own note for the measurement).
+   *
+   * The window is read from the same fact the verdicts are kept in: the tap is on this item
+   * ({@link hasSpectrumTap}, which is also what keeps a build with **no** tap on `native audio`),
+   * nothing is feeding the bars right now, and this item's tap has **no verdict for it** — so the
+   * spectrum is coming, and saying so cannot overwrite §515's silence verdict, which is the whole
+   * reason this is a fact and not a re-arm.
+   *
+   * Nothing here is a clock and nothing here is a budget (v1.9.24 deleted that shape): what ends the
+   * window is this item's tap producing its own frame, or giving its own verdict about it.
+   */
+  private tapArming(): boolean {
+    if (this.backend !== 'native' || this.spectrumLive) return false;
+    if (!this.hasSpectrumTap()) return false;
+    return !this.tapVerdictForItem;
   }
 
   /**
@@ -3207,6 +3286,13 @@ export class AudioEngine {
       // And it has answered (v1.9.6): whatever the bars were doing a poll ago, this item's tap is
       // installed and reading sound, so the chip is back on "spectrum".
       this.spectrumArming = false;
+      /*
+       * v1.9.27 (card `t_c8cc01c6`) — and this item's own live frame supersedes any verdict it
+       * carried: a tap measuring again is the one thing that ends a verdict, exactly as a real frame
+       * ends the same verdict on the web path (`sample()` resets `zeroFrames`). It is what keeps the
+       * chip off `native audio` at the next resume over a track whose tap recovered.
+       */
+      this.tapVerdictForItem = false;
       if (!this.spectrumLive) {
         this.spectrumLive = true;
         this.modeReason = 'real spectrum — an FFT of the stream this player is playing, read from the native audio tap';
@@ -3239,6 +3325,12 @@ export class AudioEngine {
       if (this.spectrumZeroPolls >= ZERO_POLLS_BEFORE_THEME && (this.spectrumLive || (this.spectrumArming && answered))) {
         this.spectrumLive = false;
         this.spectrumArming = false;
+        /*
+         * v1.9.27 (card `t_c8cc01c6`) — **the verdict is recorded as this item's answer**, which is
+         * what lets the chip go back to `spectrum…` at a resume *without* saying it over a track the
+         * tap has already ruled out (see `tapVerdictForItem`).
+         */
+        this.tapVerdictForItem = true;
         this.modeReason =
           answered
             ? 'the native tap is reading digital silence — the audio itself is silent, so the bars are flat'
@@ -3272,6 +3364,9 @@ export class AudioEngine {
       // v1.9.6 — a frozen buffer is an answer about this item's tap (and not a good one); the chip
       // stops waiting and says so, as the reason line does.
       this.spectrumArming = false;
+      // v1.9.27 (card `t_c8cc01c6`) — and it is recorded as this item's verdict, beside the silence
+      // one above: the two are the whole of what `native audio` may mean while this item plays.
+      this.tapVerdictForItem = true;
       this.modeReason = 'the native tap kept returning the same frame, which is not a measurement — showing the album-art theme';
       this.emit();
     }
@@ -3382,6 +3477,15 @@ export class AudioEngine {
   private forgetTapFrames(): void {
     this.tapFramesForItem = 0;
     this.tapFramesAtLastRead = null;
+    /*
+     * v1.9.27 (card `t_c8cc01c6`) — **and the verdict with the frames.** Both of this file's verdicts
+     * about an item's tap (silence, and one frozen frame) are answers about *that item's* frames, so
+     * the fact that one was reached belongs to the item as well: a new one starts with no answer
+     * (`startNative`, `adoptNativeAdvance`) and an item the tap has left goes back to having none (the
+     * orphan branch), which is what keeps the chip's window open for the item that is actually
+     * playing instead of spending the previous item's verdict on it.
+     */
+    this.tapVerdictForItem = false;
   }
 
   /**

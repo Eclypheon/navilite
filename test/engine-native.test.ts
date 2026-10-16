@@ -159,6 +159,30 @@ interface SpectrumState {
   installMs?: number;
   /** The stream the tap is installed on, once a request has landed (`plugin` only). */
   tappedUrl?: string | null;
+  /**
+   * v1.9.27 (card `t_c8cc01c6`) — **the streams whose tap produces frames it never changes**: a tap
+   * stuck on one buffer, whose own per-item counter still moves (so this item's analysis *is*
+   * measuring) and whose bands are the same values on every read.
+   *
+   * The two other quiet states in this fake are different on purpose and both are stated above:
+   * `framesQuietUrls` is a counter that stands still (nothing measured for this item), and
+   * `staleRegisterUrls` is a register that holds the *previous* item's frame. This one is the shape
+   * the v1.8.0 frozen-frame rule was written for, and it is the second of the two verdicts a tap can
+   * reach about an item — the one the chip's capability word is licensed by, so it has to be
+   * stateable here (card `t_c8cc01c6`).
+   */
+  frozenUrls?: string[];
+  /**
+   * v1.9.27 (card `t_c8cc01c6`) — **how long the tap takes to answer a read**, in ms: the bridge round
+   * trip the engine's window is measured in.
+   *
+   * The default (`0`, a resolved promise) is what every other test in this file has always had, and it
+   * is the reason a *transition's* window is one emitted status here: the tap answers before the
+   * engine's next paint. On the owner's phone the answer is a real round trip (`ROUND_TRIP_MS` in this
+   * file's own terms), which is why the word a transition paints stays on screen — so a test that
+   * wants to watch the window rather than the single status that opens it states the latency.
+   */
+  frameDelayMs?: number;
   /** The item the plugin is holding for the *outgoing* track, when a test wants a slow landing. */
   slowLandUrls?: string[];
   /**
@@ -451,6 +475,10 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
          */
         const stale =
           record.playingUrl !== null && (record.spectrum.staleRegisterUrls ?? []).includes(record.playingUrl);
+        /* v1.9.27 (card `t_c8cc01c6`) — and the tap that produces the same frame for ever (see the
+         * field's own note): its counter moves, its bands never do. */
+        const frozen =
+          record.playingUrl !== null && (record.spectrum.frozenUrls ?? []).includes(record.playingUrl);
         /*
          * v1.9.26 — **the tap's own cadence.** The plugin produces a frame when its own PCM buffer
          * says so, not once per read (`drainAndAnalyze` is driven by the tap's callbacks), so a tap
@@ -458,6 +486,9 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
          * it produced last. The reads in between are the state the v1.9.25 rule blanked on.
          */
         record.spectrum.frameReads += 1;
+        // v1.9.27 (card `t_c8cc01c6`) — the tap's own answer latency, when a test states one: the
+        // window a transition opens is a bridge round trip wide.
+        if (record.spectrum.frameDelayMs) await wait(record.spectrum.frameDelayMs);
         const every = Math.max(1, record.spectrum.itemFramesEvery ?? 1);
         const period = record.spectrum.framePeriodMs ?? 33;
         /*
@@ -488,7 +519,11 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
           (!produced || quiet || (bound && !itemIsCurrent) || record.spectrum.bands.every((value) => value === 0));
         const fresh = silent
           ? record.spectrum.bands.map(() => 0)
-          : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
+          : frozen
+            ? // The frozen buffer: the same band values on every read, so no two frames differ and
+              // the checksum repeats (v1.9.27, card `t_c8cc01c6`).
+              record.spectrum.bands.slice()
+            : record.spectrum.bands.map((value, index) => (value + record.spectrum.frames * 7 + index) % 251);
         if (produced) {
           // The register now holds this item's own frame — what every read in between hands over
           // unchanged (v1.9.26). Nothing else writes it: a tap that has stopped leaves its last frame
@@ -2862,6 +2897,286 @@ test('the web path wears the spectrum’s own word until its analyser has answer
     // And that item reaches its own verdict in its own time.
     await settle(2200);
     assert.equal(chipWord(web.status()), 'theme', 'and then its own samples answer, as item 1’s did');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * v1.9.27 (card `t_c8cc01c6`) — **the native half of the first-frame window: a resume.**
+ *
+ * `t_71dc787e` closed the web path's window (a browser's first frames arrive a moment after the
+ * element plays, and the chip spent the amber `theme` for them). The native path has the same window
+ * at the one transition no writer arms: **a resume.** `spectrumArming` is only ever set by a start
+ * (`startNative`), an adoption (`adoptNativeAdvance`) and the polls that find the tap producing
+ * nothing or sitting on another item; a resume is none of those, and `disarmConsumers` (the pause)
+ * clears `spectrumLive` — so the instant the resume returns the transport to `playing`, the chip's
+ * licence line (`state === 'playing'` and nothing being fed) paints **`native audio`** on an item
+ * whose tap was measuring a moment ago, until the poll's own round trip answers. The probe, on the
+ * fake bridge, is the card's: play → settle → pause → `resume()`, read at the instant the resume
+ * flips the transport (`resume()` dispatches the state and emits synchronously, so this is a status
+ * the app really paints — not a simulation of one).
+ *
+ * **Why the fix is a fact and not a re-arm.** `(spectrumLive, spectrumArming) = (false, false)` while
+ * the transport plays is *also* exactly how a reached verdict looks: a tap whose frames read silence
+ * for `ZERO_POLLS_BEFORE_THEME`, or one frozen frame over and over — both of which clear
+ * `spectrumArming` and mean *the spectrum cannot run on this item*. Re-arming at a resume would say
+ * *the spectrum is coming* over an item the engine has already ruled out, which is §515's silence
+ * verdict (the owner's call of 2026-10-16) and the whole of the last three releases. So the engine
+ * keeps the third fact it was missing — **this item's tap has answered with a verdict** — and the
+ * window is read from it: playing, the tap is on this item, nothing is being fed, and no verdict has
+ * been reached for it ⇒ `spectrum…`. Nothing here is a clock or a budget: what ends the window is
+ * this item's tap producing its own frame, or giving its own verdict (v1.9.24 deleted the timer).
+ *
+ * What is asserted, in the card's own order:
+ *
+ *   1. the instant the resume returns the transport to `playing` (and by every read until the poll's
+ *      answer arrives) the chip is `spectrum…`, never `native audio`;
+ *   2. the same transition on a return from the background, which re-arms through `engine-state
+ *      playing` rather than through a tap — the player's own answer is adopted, and the chip must
+ *      still not wear the capability word in the window that opens;
+ *   3. a track whose tap has answered with **silence**, and one whose tap has answered with **one
+ *      frozen frame**, keep `native audio` across a pause *and* a resume: the verdict is about the
+ *      item, not about the moment — the behaviour that must not regress;
+ *   4. the paused word is still the transport's own (`paused`), and the window still ends on this
+ *      item's own frame.
+ */
+test('a native resume wears the spectrum’s own word, and a tap’s own verdict survives it (t_c8cc01c6)', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  /** How long `predicate` took to hold, in ms, or null if it never did inside the budget. */
+  const until = async (predicate: () => boolean, budgetMs: number): Promise<number | null> => {
+    const started = Date.now();
+    for (;;) {
+      if (predicate()) return Date.now() - started;
+      if (Date.now() - started > budgetMs) return null;
+      await settle(5);
+    }
+  };
+  /** One emitted status, as the chip would have painted it. */
+  interface Reading {
+    at: number;
+    state: EngineState;
+    spectrum: boolean;
+    arming: boolean;
+    word: string;
+  }
+  try {
+    /* ================= 1. the probe: play → settle → pause → resume ================= */
+    const record = recording();
+    // One bridge round trip per read of the tap (see the field's own note): the window this test is
+    // about is a round trip wide on the phone, and the fake states it rather than answering for free.
+    record.spectrum.frameDelayMs = ROUND_TRIP_MS;
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    let watchFrom = 0;
+    let seen: Reading[] = [];
+    const unsubscribe = engine.subscribe((status) => {
+      seen.push({
+        at: Date.now() - watchFrom,
+        state: status.state,
+        spectrum: status.spectrum,
+        arming: status.spectrumArming,
+        word: chipWord(status),
+      });
+    });
+
+    await engine.play(TRACK);
+    await settle(300);
+    const a1 = engine.status();
+    say(`probe A1 native playing: "${chipWord(a1)}" (spectrum ${a1.spectrum}, arming ${a1.spectrumArming})`);
+    assert.equal(chipWord(a1), 'spectrum', 'the tap answered for this item and the bars are the measurement');
+
+    await engine.pause();
+    await settle(150);
+    const a2 = engine.status();
+    say(`probe A2 native paused: "${chipWord(a2)}" (spectrum ${a2.spectrum}, arming ${a2.spectrumArming})`);
+    assert.equal(chipWord(a2), 'paused', 'a pause is the transport’s own word (v1.9.26, unchanged)');
+
+    /*
+     * **A3 — the defect.** `resume()` flips the transport on the tap (`dispatch` → `applyState` →
+     * `emit`) and only then asks the player, so the status read here is one the app really paints;
+     * both the emitted one and `status()` are checked, because they are the same fact reached two
+     * ways. Before this card the chip read `native audio` on this line, on the owner's phone, at
+     * every resume and every return from the background.
+     */
+    watchFrom = Date.now();
+    seen = [];
+    const resuming = engine.resume();
+    const emitted = seen[seen.length - 1];
+    const a3 = engine.status();
+    say(
+      `probe A3 the instant resume() is called: state ${a3.state}, spectrum ${a3.spectrum}, arming ${a3.spectrumArming} — the chip reads "${chipWord(a3)}" (emitted: "${emitted?.word ?? 'nothing emitted'}")`,
+    );
+    assert.equal(a3.state, 'playing', 'the resume returns the transport to playing on the tap, before any round trip');
+    assert.equal(emitted?.state, 'playing', 'and that status is one the engine emitted, not one the test synthesised');
+    assert.equal(
+      chipWord(a3),
+      'spectrum…',
+      'the tap that was measuring this item a moment ago has not answered for it yet — the spectrum is coming, not a capability the app has lost',
+    );
+    assert.equal(emitted?.word, 'spectrum…', 'and the word the app paints is the same one');
+    assert.equal(a3.spectrumArming, true, 'the status field says so too (spectrum false, arming true)');
+    assert.equal(a3.spectrum, false, 'nothing is being measured at that instant, which is true');
+
+    /*
+     * And every read while playing, until the poll's own answer arrives, is that word: no capability
+     * word may appear in the window, and the window is not a number of ticks — it ends when this
+     * item's tap produces its own frame. The tap's answer latency is stated (`frameDelayMs`, one
+     * `ROUND_TRIP_MS`) so the window is a window rather than the single status that opens it: on the
+     * phone that round trip is the plugin's.
+     */
+    const healed = await until(() => engine.status().spectrum === true, 600);
+    assert.ok(healed !== null, 'the tap’s own frame is what ends the window, not a deadline');
+    await resuming;
+    const windowReadings = seen.filter((reading) => reading.state === 'playing' && !reading.spectrum);
+    const capability = windowReadings.filter((reading) => reading.word === 'native audio' || reading.word === 'theme');
+    say(
+      `     the window: the tap answers a read in ${record.spectrum.frameDelayMs} ms here, and its first frame ended the window ${healed} ms after this read; ${windowReadings.length} emitted status(es) inside it, a capability word on ${capability.length} of them`,
+    );
+    assert.ok(healed >= 20, `the window was a window, not a single paint (${healed} ms)`);
+    assert.ok(windowReadings.length >= 1, 'and the status the resume paints is inside it — the one this card names');
+    assert.equal(
+      capability.length,
+      0,
+      `the capability word appeared while the transport was playing (${capability.map((r) => `${r.at} ms "${r.word}"`).join(', ')})`,
+    );
+    assert.equal(
+      windowReadings.every((reading) => reading.word === 'spectrum…'),
+      true,
+      'every one of them wore §515.4’s word for the window',
+    );
+    const a4 = engine.status();
+    say(`probe A4 native resumed: "${chipWord(a4)}" (spectrum ${a4.spectrum}, arming ${a4.spectrumArming})`);
+    assert.equal(chipWord(a4), 'spectrum', 'the bars are fed again by the item in hand');
+
+    /* ============ 2. the same transition on a return from the background ============ */
+    /*
+     * The app leaves the screen with the track paused and comes back to a player that is playing (the
+     * lock screen's own play, or a player that never stopped): the return path adopts what the player
+     * says (`dispatch({ type: 'engine-state', playing: true })`) instead of calling a tap, so no arming
+     * writer runs here either — the same window, entered through the other door.
+     */
+    await engine.pause();
+    await settle(150);
+    await engine.handleVisibility(true);
+    await engine.handleVisibility(false);
+    watchFrom = Date.now();
+    seen = [];
+    const returned = engine.status();
+    say(
+      `2. back from the background, the player saying it is playing: state ${returned.state}, spectrum ${returned.spectrum}, arming ${returned.spectrumArming} — the chip reads "${chipWord(returned)}"`,
+    );
+    assert.equal(returned.state, 'playing', 'the player’s own answer is adopted, and the app is playing again');
+    assert.equal(
+      chipWord(returned),
+      'spectrum…',
+      'the same window, through the other door: the tap has not answered for this item since the transport came back',
+    );
+    const backgroundHealed = await until(() => engine.status().spectrum === true, 500);
+    assert.ok(backgroundHealed !== null, 'and it ends on the tap’s own frame here too');
+    assert.equal(
+      seen.filter((reading) => reading.state === 'playing' && reading.word !== 'spectrum…' && reading.word !== 'spectrum').length,
+      0,
+      'no capability word on the way back in either',
+    );
+    say(`   …the tap’s own frame ended that window too, ${backgroundHealed} ms later`);
+
+    /* ================= 3. a tap that answered with silence keeps its verdict ================= */
+    /*
+     * The behaviour that must not regress (acceptance 2): this item's tap has given its own answer —
+     * twelve polls of frames from a tap on it, every band zero — and that answer is about **the
+     * item**, so a pause and a resume may not re-open the window over it. The card's whole reason for
+     * a third fact rather than `spectrumArming = true` in `startConsumers`.
+     */
+    const silentRecord = recording();
+    silentRecord.spectrum.bands = silentRecord.spectrum.bands.map(() => 0);
+    const silent = nativeEngine(silentRecord);
+    engines.push(silent);
+    await silent.play(TRACK);
+    await settle(700);
+    const silenced = silent.status();
+    say(
+      `3. a tap reading digital silence: spectrum ${silenced.spectrum}, arming ${silenced.spectrumArming} — the chip reads "${chipWord(silenced)}" (${silenced.modeReason})`,
+    );
+    assert.equal(chipWord(silenced), 'native audio', 'the tap has answered for this item: the spectrum cannot run on it');
+    let silentSeen: Reading[] = [];
+    watchFrom = Date.now();
+    const unsubscribeSilent = silent.subscribe((status) => {
+      silentSeen.push({ at: Date.now() - watchFrom, state: status.state, spectrum: status.spectrum, arming: status.spectrumArming, word: chipWord(status) });
+    });
+    await silent.pause();
+    await settle(150);
+    assert.equal(chipWord(silent.status()), 'paused', 'paused is still the transport’s word');
+    silentSeen = [];
+    const silentResuming = silent.resume();
+    const silentAtTheInstant = silent.status();
+    say(
+      `   and at the resume: spectrum ${silentAtTheInstant.spectrum}, arming ${silentAtTheInstant.spectrumArming} — the chip reads "${chipWord(silentAtTheInstant)}"`,
+    );
+    await silentResuming;
+    await settle(200);
+    const silentResumed = silent.status();
+    say(`   after the resume: "${chipWord(silentResumed)}" (${silentResumed.modeReason})`);
+    assert.equal(silentResumed.state, 'playing', 'it resumed');
+    assert.equal(
+      chipWord(silentResumed),
+      'native audio',
+      'the verdict is about the item, not about the moment — a resume is not evidence about the samples',
+    );
+    assert.equal(
+      silentSeen.filter((reading) => reading.state === 'playing' && reading.word !== 'native audio').length,
+      0,
+      'and the resume never re-opened the window over that verdict: no "spectrum…" on an item the tap has ruled out',
+    );
+    unsubscribeSilent();
+
+    /* ============ 4. and a tap that answered with one frozen frame keeps it too ============ */
+    const frozenRecord = recording();
+    frozenRecord.spectrum.frozenUrls = [TRACK.url];
+    const frozen = nativeEngine(frozenRecord);
+    engines.push(frozen);
+    await frozen.play(TRACK);
+    const frozeAt = await until(() => /same frame/.test(frozen.status().modeReason), 1500);
+    assert.ok(frozeAt !== null, 'the frozen-frame rule is reachable on this harness and this item reached it');
+    const frozenVerdict = frozen.status();
+    say(
+      `4. a tap returning one frozen frame: spectrum ${frozenVerdict.spectrum}, arming ${frozenVerdict.spectrumArming} — the chip reads "${chipWord(frozenVerdict)}" (${frozenVerdict.modeReason})`,
+    );
+    assert.equal(chipWord(frozenVerdict), 'native audio', 'the tap’s own frozen-frame verdict is the capability word');
+    await frozen.pause();
+    await settle(150);
+    assert.equal(chipWord(frozen.status()), 'paused', 'paused, as everywhere');
+    /*
+     * Read *before* the await, which is the instant the transport flips (the same reading as A3): the
+     * verdict is in hand, so the word is the verdict's — `spectrum…` here would be the engine saying
+     * *the spectrum is coming* over an item its own tap has ruled out.
+     */
+    const frozenResuming = frozen.resume();
+    const frozenAtTheInstant = frozen.status();
+    say(`   at the resume: spectrum ${frozenAtTheInstant.spectrum}, arming ${frozenAtTheInstant.spectrumArming} — the chip reads "${chipWord(frozenAtTheInstant)}"`);
+    assert.equal(
+      chipWord(frozenAtTheInstant),
+      'native audio',
+      'the frozen verdict is about the item too — a resume does not re-open the window over it',
+    );
+    await frozenResuming;
+    /*
+     * And then the tap's register starts moving again (the resumed poll re-opens the per-item register
+     * `startConsumers` keeps, so the frozen run is counted from the resume), which the engine admits
+     * until its own `FROZEN_FRAMES_BEFORE_THEME` run is complete — ~0.4 s — and then the verdict is
+     * reached again on the tap's own evidence, still without a clock. Named here rather than asserted
+     * away: it is the frozen rule's own latency, restarted by a transition, and it is *not* what this
+     * card changes (the bars are drawn from frames this item's tap really produced).
+     */
+    const refrozen = await until(() => /same frame/.test(frozen.status().modeReason), 1500);
+    assert.ok(refrozen !== null, 'the frozen tap’s verdict is reached again on its own evidence after the resume');
+    const frozenAgain = frozen.status();
+    say(`   and ${refrozen} ms after the resume the tap’s own verdict is back: "${chipWord(frozenAgain)}" (${frozenAgain.modeReason})`);
+    assert.equal(chipWord(frozenAgain), 'native audio', 'a frozen tap is still the capability word, and still by its own evidence');
+
+    unsubscribe();
   } finally {
     fakes.restore();
     await stopAll(engines);
