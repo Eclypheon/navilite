@@ -15,6 +15,10 @@
  *   node tools/mock-subsonic.mjs [--port 4533] [--dist dist] [--user U] [--password P]
  *                              [--stress] [--lyrics-plain] [--no-lyrics] [--no-cors]
  *
+ * `--port 0` asks the OS for a free port and prints `navilite-mock-port <n>` when it is listening;
+ * that is how `test/support/mock-fixture.ts` starts it, so no two test files can be handed the same
+ * port (docs/verification.md §21).
+ *
  * `--stress` adds one artist, album, three tracks and two playlists whose names are long,
  * Japanese and unbroken — the shape the owner's own library is full of, and the worst case
  * for a 393 px layout. `tools/layout-audit.mjs` runs against it.
@@ -1084,6 +1088,30 @@ const server = createServer((request, response) => {
   serveStatic(response, path === '/' ? '/index.html' : path);
 });
 
-console.log(`mock Subsonic library at http://127.0.0.1:${PORT}/rest (user ${USER}, password ${PASSWORD})`);
-console.log(`serving the built app from ${DIST}`);
-server.listen(PORT, '127.0.0.1');
+/*
+ * The bind, and the port it *actually* got.
+ *
+ * `--port 0` means "ask the OS", which is what `test/support/mock-fixture.ts` uses: a test file that
+ * hard-codes a port can be handed one that another test file already owns, and then this process dies
+ * of `EADDRINUSE` while the other file's mock quietly answers for it (v1.9.21: 4615 was claimed by
+ * both `test/pager.test.ts` and `test/palette-apply.test.ts`; see docs/verification.md §21). Asking
+ * makes that impossible, and the machine-readable line below is how the fixture learns the port.
+ *
+ * A failure to bind is a named one-liner and a non-zero exit, not an unhandled 'error' event: this
+ * process is spawned by tests whose stdio is captured, and "listen EADDRINUSE: address already in use
+ * 127.0.0.1:4615" three stack frames deep is a worse failure message than one line that says which
+ * port and why.
+ */
+server.on('error', (error) => {
+  console.error(`mock-subsonic could not bind 127.0.0.1:${PORT} — ${error.code ?? ''} ${error.message}`.trim());
+  process.exit(1);
+});
+
+server.listen(PORT, '127.0.0.1', () => {
+  const bound = server.address().port;
+  console.log(`mock Subsonic library at http://127.0.0.1:${bound}/rest (user ${USER}, password ${PASSWORD})`);
+  console.log(`serving the built app from ${DIST}`);
+  // Parsed by test/support/mock-fixture.ts. The one line above is for a human; this one is for the
+  // suite, and it is printed from the listen callback so it means "listening", not "asked to listen".
+  console.log(`navilite-mock-port ${bound}`);
+});

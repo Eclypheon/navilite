@@ -32,13 +32,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { startMockLibrary } from './support/mock-fixture.ts';
 
 /**
- * A port of this test's own: `node --test` runs these files in parallel, and a mock is killed in the
- * `finally` below — on a shared port that would take the other test's library down with it, which is
- * a flake, not a finding. (4611/4613/4615/4657 are the other Chrome fixtures.)
+ * No port of this test's own any more: the fixture asks the OS (test/support/mock-fixture.ts). This
+ * comment used to say a *number* was needed because `node --test` runs these files in parallel and a
+ * mock is killed in the `finally` below — taking another test's library down with it "which is a flake,
+ * not a finding". That reasoning was right and the fix was one test file deep: 4619 moved this file out
+ * of the way, and 4615 stayed claimed by both test/pager.test.ts and test/palette-apply.test.ts, which
+ * is exactly the flake it was written about. Now no file claims a number at all.
  */
-const PORT = 4619;
 const REPORT = join(tmpdir(), `navilite-offline-check-${process.pid}.json`);
 const CHROME_CANDIDATES: string[] = [
   ...(process.env.CHROME_PATH ? [process.env.CHROME_PATH] : []),
@@ -112,29 +115,14 @@ test('a downloaded playlist is browsable with no connection, and no view prints 
 
   // The mock serves the built app *and* a real Subsonic API on one origin, which is what makes the
   // online control below possible: the same route, twice — once with the API reachable, once not.
-  const mock = spawn(process.execPath, ['tools/mock-subsonic.mjs', '--port', String(PORT), '--stress'], {
-    cwd: new URL('..', import.meta.url),
-    stdio: 'ignore',
-  });
+  const mock = await startMockLibrary({ stress: true });
   try {
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${PORT}/rest/ping.view?u=navidrome&p=navidrome&v=1.16.1&c=Navilite&f=json`);
-        if (response.ok) break;
-      } catch {
-        /* not up yet */
-      }
-      if (Date.now() > deadline) throw new Error('the mock library never came up');
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-
     const { code, output } = await run(
       process.execPath,
       [
         'tools/offline-check.mjs',
         '--app',
-        `http://127.0.0.1:${PORT}`,
+        mock.base,
         '--online-playlist',
         'pl-stress-long',
         '--json',
@@ -294,6 +282,6 @@ test('a downloaded playlist is browsable with no connection, and no view prints 
     assert.notEqual(palette?.after, '#7cd2ff', 'the palette stayed on the default: the cover on disk was not read');
     assert.ok(String(palette?.after).length > 0, 'no palette was written at all');
   } finally {
-    mock.kill('SIGKILL');
+    mock.stop();
   }
 });

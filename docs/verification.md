@@ -1934,3 +1934,145 @@ build's readings.
 Raw runs behind the tables and the counts (agent scratch, attached to the release card `t_15b0a5c5`):
 `npm-test.txt`, `offline-check-1921.txt`, `spectrum-proof-1921.txt`, `assets-build1.txt`,
 `assets-build2.txt`.
+
+## 21. the suite's own determinism — the port two test files shared, and the harness plumbing (2026-10-16, unreleased)
+
+Card `t_744cba0b`, filed by §18's verification. The symptom was `test/pager.test.ts` failing inside `npm test`,
+always with one reason — `the run reached the end of its checks — page threw: Error: timed out waiting for the
+stress album` — while the same file passed standalone and the pre-change build had been green 6 runs out of 6.
+This section is the fix. It is also a **correction of this record**: §14.5 and §18 both filed that flake as a
+*load* phenomenon — "a starved renderer under parallel load can miss 20 s" — and it was not one. The library the
+pager check was driving was not the pager test's own, and the test that owned it killed it a few seconds in.
+
+### 21.1 The finding: one port, two test files, and a probe that cannot tell their mocks apart
+
+```
+$ grep -n "const PORT" test/pager.test.ts test/palette-apply.test.ts
+test/pager.test.ts:38:const PORT = 4615;
+test/palette-apply.test.ts:33:const PORT = 4615;
+```
+
+Both files spawn `tools/mock-subsonic.mjs --port 4615 --stress` with `stdio: 'ignore'`, and both then wait for
+`/rest/ping.view?u=navidrome&p=navidrome&…` to answer — the *same* request, answered identically by either mock,
+because both are `--stress` mocks of the same library. So when one `npm test` starts both:
+
+- the file whose mock loses the bind dies of `EADDRINUSE` before it can listen, into a stdio nobody reads: there
+  is no line anywhere in the run that says so;
+- the winner's mock answers the loser's readiness probe, so the loser's check drives a library that belongs to
+  another test file;
+- and when that file finishes, its `finally` SIGKILLs the library the *other* check is still using.
+
+That is asymmetric, which is why the flake was always the pager's and always the same message.
+`test/palette-apply.test.ts` runs for **3.0 s** (its check is short) and `test/pager.test.ts` for **35.9 s**, so
+whichever mock lost the bind, the *pager* is the run that outlives the library. §18's 4-failures-in-17 reading is
+the fraction of runs in which palette-apply's mock won the bind.
+
+### 21.2 The reproduction, on the pre-change tree (`9a2490b`, the `dist/` this suite's browser tests use)
+
+Each row is `node --test test/pager.test.ts` alone, with a mock this section started itself on 4615 — which is
+exactly what the neighbouring test's mock is to the pager test:
+
+| the squatter on 4615 | what the pager test did |
+| --- | --- |
+| left alive for the whole run | **passed**, 35.9 s — and the whole API session was served *by it*: its own `/__state` logged 29 REST calls, from the boot through the album, the stream, the scrobbles and the saved play queue. That is the proof that the check was not talking to its own mock. |
+| SIGKILLed ~3 s in | **failed**, 43.8 s — the card's own message, with two checks above it: |
+
+```
+✖ the swipe pager pulls its panes, and never takes a scroll
+  AssertionError: the pager check failed:
+  FAIL  and the drag seeks the track to the proportion it was dragged to
+  FAIL  the lyric highlight still advances while the finger is down
+  FAIL  the run reached the end of its checks
+    - the run reached the end of its checks — page threw: Error: timed out waiting for the stress album
+```
+
+The two checks above the fatal one are the "one FAIL or several" the card could not account for: they read the
+audio's own numbers, so a library that has gone takes their readings with it. Step 9
+(`tools/pager-check.mjs:759-763`) is where the run finally dies, because it is the first *wait* in that run that
+needs a fresh answer for a page that is not already drawn.
+
+The 20 s patience was therefore never the mechanism, and could not have been: a longer one fails just as
+completely, because the library is gone — and the page-state that the wait now reports is what would have said so.
+
+### 21.3 What changed
+
+1. **`test/support/mock-fixture.ts` (new) — a port the OS picks, tied to the child that reports it.** The mock is
+   started with `--port 0` and prints a machine-readable `navilite-mock-port <n>` line **from its own listen
+   callback**, so the number a test uses belongs to the process that test spawned and cannot be a number another
+   file took. The fixture then reads `/__state` on that port, so "the child is answering" is a fact rather than an
+   assumption, and a child that dies before listening (or reports a port nothing answers on) fails in
+   milliseconds with the child's own output. All six browser-driven files use it — `layout-393`, `offline-views`,
+   `pager`, `palette-apply`, `scroll-containment`, `slow-link-browser` — and **no test file names a port any
+   more**. Sampled during a suite run, the mocks listen on OS-chosen ephemeral ports (`52272`, `52279`, `52422`,
+   `52466`, `52505` in one run), none of them in the old `4611`–`4657` range.
+2. **`tools/mock-subsonic.mjs` — `--port 0` is honoured, and a failed bind is a named line.**
+   `mock-subsonic could not bind 127.0.0.1:4611 — EADDRINUSE listen EADDRINUSE: address already in use
+   127.0.0.1:4611`, exit 1 — printed, rather than an unhandled `'error'` event lost in a captured stdio.
+3. **`tools/layout-audit.mjs` — the plumbing the card's third point named.** `Cdp.send` has a deadline (60 s,
+   `NAVILITE_CDP_TIMEOUT_MS`); a socket that closes or errors rejects every call it is holding, so a browser that
+   dies mid-call is one named failure instead of a silent wait; the debug port is read from Chrome's own
+   `DevToolsActivePort` with `--remote-debugging-port=0`, so there is nothing to collide with and nothing to
+   adopt; and Chrome is launched `detached` so its **whole process group** is killed — Chrome is not one process,
+   and killing only the launcher is what leaves the orphans the card counted.
+4. **`tools/layout-probe-browser.js` — a wait that runs out of patience reports the page.** `timed out after
+   20000 ms waiting for the stress album — the page is on #/album/album-ja-1, h1 "…", 0 rows, showing: "…"`.
+   **No assertion was touched, and `PATIENCE_MS` is still 20 s**: this is a diagnostic on a wait, not a longer
+   wait.
+5. **`package.json` is unchanged.** The suite still runs `node --test "test/*.test.ts"` at node's own default
+   concurrency (one file per core). The `--test-concurrency=4` shape the card offered as the blunt lever was
+   tried in the earlier uncommitted attempt on this card — and is what pegged this Mac for 20+ minutes in the
+   owner's own report — and with the cause gone it buys nothing. §21.4's numbers are what says so rather than a
+   preference.
+
+### 21.4 What was run, against the change
+
+`npm run typecheck` — clean. Ten consecutive `npm test`, default concurrency, pre-change `dist/` (runs 9–10
+after the last edit, which is the debug-port readiness wait in §21.3.3):
+
+| run | tests | pass | fail | skipped | `test/pager.test.ts` | wall |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 249 | 249 | 0 | 0 | ✔ 38.4 s | 39.1 s |
+| 2 | 249 | 249 | 0 | 0 | ✔ 37.9 s | 38.5 s |
+| 3 | 249 | 249 | 0 | 0 | ✔ 36.2 s | 36.8 s |
+| 4 | 249 | 249 | 0 | 0 | ✔ 36.5 s | 37.1 s |
+| 5 | 249 | 249 | 0 | 0 | ✔ 36.1 s | 36.7 s |
+| 6 | 249 | 249 | 0 | 0 | ✔ 36.7 s | 37.3 s |
+| 7 | 249 | 249 | 0 | 0 | ✔ 37.2 s | 37.7 s |
+| 8 | 249 | 249 | 0 | 0 | ✔ 36.0 s | 36.6 s |
+| 9 | 249 | 249 | 0 | 0 | ✔ 38.5 s | 39.1 s |
+| 10 | 249 | 249 | 0 | 0 | ✔ 38.8 s | 39.4 s |
+
+0 skipped in every run, so no browser fixture opted out and every reading above is a real one; the suite is
+~37–39 s of wall time, of which the pager test is ~36–38 s (everything else overlaps it). Runs 9–10 were taken
+while this working tree also carried another card's in-flight, uncommitted `src/` edits (a lane running in the
+same checkout); runs 1–8 are the ones that correspond exactly to this commit's tree, and both readings agree
+because this change touches no `src/` file. Then, with the change in place:
+
+| check | reading |
+| --- | --- |
+| the same squatter on 4615, left alive | **served 0 API requests** — the pager test never touched it |
+| that squatter SIGKILLed 4 s into the pager test | the pager test **passed**, 33.7 s |
+| Chrome's own debug port | `51806`, read out of `DevToolsActivePort` — no port this repo guessed |
+| a renderer wedged in an infinite loop, `NAVILITE_CDP_TIMEOUT_MS=2000` | `Runtime.evaluate went unanswered for 2000 ms — the renderer is wedged or gone` (the deadline the card's 300 s no-report hang had no cause for) |
+| a second mock asked for the same port | `mock-subsonic could not bind 127.0.0.1:4611 — EADDRINUSE …`, exit 1 |
+| `Chrome` processes holding a `navilite-chrome-` profile after all of it | 0 |
+
+### 21.5 Not verified here, and not claimed
+
+1. **No app code was touched.** The diff is `tools/`, `test/` and these docs: `src/`, `ios/`, `android/` and
+   `dist/` are untouched, and nothing here changes what the app does.
+2. **The pager check's assertions are untouched**, and so is its 20 s patience. The flake was in the driving.
+3. **`Cdp.send`'s deadline is not covered by a committed test.** It is exercised by the throwaway probe in the
+   table above (a renderer wedged in a loop, so no reply can arrive) — agent scratch, not part of the suite.
+4. **Ten green runs are ten runs, not a proof about a busy machine.** The cause is gone *by construction* —
+   no test file can drive a library it did not start, and a mock that cannot bind now fails loudly in the file
+   that owns it — but the suite has not been run with other work on this Mac, and nothing here says a starved
+   renderer cannot still miss a patience (§14.5's observation stands for that case).
+5. **Unreleased.** No version bump, no changelog entry, no tag, no artifact: this is `main` plus this commit, and
+   the next release carries it. `DECISIONS.md` records the two rules it establishes (no test file names a port;
+   the suite keeps node's default concurrency), and supersedes the v1.9.21 note that said nothing about the
+   suite's plumbing would change.
+
+Raw runs behind the tables (agent scratch, attached to `t_744cba0b`): `run1.log`–`run8.log`,
+`pager-holding-pre.log` (the pre-change pass that drove a foreign library), `pager-kill-pre.log` (the pre-change
+failure), `post-fix-4615-squat.mjs` and its output, `plumbing-probe.mjs` and its output, `mock-ports2.txt`.

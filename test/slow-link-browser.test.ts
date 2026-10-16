@@ -23,8 +23,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { startMockLibrary } from './support/mock-fixture.ts';
 
 /**
  * The browser plumbing, borrowed from the existing audit tool rather than re-written.
@@ -68,34 +68,8 @@ interface Reading {
   throughputKbps: number | null;
 }
 
-const PORT = 4657;
-const BASE = `http://127.0.0.1:${PORT}`;
 const USER = 'navilite-check';
 const PASSWORD = 'mock';
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** The mock, started the way every other check starts it. */
-function startMock(): { kill: () => void } {
-  const child = spawn(process.execPath, ['tools/mock-subsonic.mjs', '--port', String(PORT), '--stress', '--dist', 'dist', '--user', USER, '--password', PASSWORD], {
-    cwd: process.cwd(),
-    stdio: 'ignore',
-  });
-  return { kill: () => child.kill('SIGKILL') };
-}
-
-async function waitForMock(): Promise<void> {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    try {
-      const response = await fetch(`${BASE}/rest/ping?u=${USER}&p=${PASSWORD}&v=1.16.1&c=navilite&f=json`);
-      if (response.ok) return;
-    } catch {
-      /* not up yet */
-    }
-    await sleep(150);
-  }
-  throw new Error('the mock Subsonic server never answered');
-}
 
 /**
  * Everything measured, in one page evaluation.
@@ -188,20 +162,25 @@ test('the tap paints first, the next track is already in flight, and a warm chan
     t.skip('no built dist/ — run `npm run build` first');
     return;
   }
-  const mock = startMock();
+  // The OS picks the port and the mock reports which one it got — this file used to ask for 4657
+  // (test/support/mock-fixture.ts).
+  const mock = await startMockLibrary({
+    stress: true,
+    dist: 'dist',
+    extra: ['--user', USER, '--password', PASSWORD],
+  });
   try {
-    await waitForMock();
     const reading = (await withChromePage(async ({ cdp }) => {
-      await navigate(cdp, BASE);
+      await navigate(cdp, mock.base);
       await evaluate(
         cdp,
         `(() => {
-          localStorage.setItem('navilite.settings', JSON.stringify({ serverUrl: ${JSON.stringify(BASE)}, username: ${JSON.stringify(USER)} }));
+          localStorage.setItem('navilite.settings', JSON.stringify({ serverUrl: ${JSON.stringify(mock.base)}, username: ${JSON.stringify(USER)} }));
           localStorage.setItem('navilite.subsonic-password', ${JSON.stringify(PASSWORD)});
           return true;
         })()`,
       );
-      await navigate(cdp, BASE);
+      await navigate(cdp, mock.base);
       await evaluate(
         cdp,
         `(async () => {
@@ -267,6 +246,6 @@ test('the tap paints first, the next track is already in flight, and a warm chan
     assert.equal(reading.warm.selected, true, 'the second row is selected in the same paint');
     assert.equal(reading.warm.loading, true, 'and it shows its loading state');
   } finally {
-    mock.kill();
+    mock.stop();
   }
 });

@@ -29,8 +29,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { startMockLibrary } from './support/mock-fixture.ts';
 
-const PORT = 4615;
 const DEFAULT_PRIMARY = '#7cd2ff';
 const REPORT = join(tmpdir(), `navilite-palette-${process.pid}.json`);
 const CHROME_CANDIDATES: string[] = [
@@ -101,26 +101,13 @@ test('a track change re-themes the app: the album-art palette applies, and nothi
     return;
   }
 
-  const mock = spawn(process.execPath, ['tools/mock-subsonic.mjs', '--port', String(PORT), '--stress'], {
-    cwd: new URL('..', import.meta.url),
-    stdio: 'ignore',
-  });
+  // A port the OS picked, not 4615: this file and test/pager.test.ts both used to ask for that one,
+  // and the loser's mock was answered by the winner's (see test/support/mock-fixture.ts).
+  const mock = await startMockLibrary({ stress: true });
   try {
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${PORT}/rest/ping.view?u=navidrome&p=navidrome&v=1.16.1&c=Navilite&f=json`);
-        if (response.ok) break;
-      } catch {
-        /* not up yet */
-      }
-      if (Date.now() > deadline) throw new Error('the mock library never came up');
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-
     const { code, output } = await run(
       process.execPath,
-      ['tools/palette-check.mjs', '--url', `http://127.0.0.1:${PORT}`, '--json', REPORT],
+      ['tools/palette-check.mjs', '--url', mock.base, '--json', REPORT],
       180_000,
     );
     const failed = output
@@ -163,6 +150,6 @@ test('a track change re-themes the app: the album-art palette applies, and nothi
     assert.ok(noArt?.played.song, 'the second track change did not start a track');
     assert.notEqual(noArt?.played.song, withArt?.played.song, 'both halves played the same track, so the second proved nothing');
   } finally {
-    mock.kill('SIGKILL');
+    mock.stop();
   }
 });

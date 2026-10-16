@@ -48,6 +48,18 @@ export function findChrome() {
 
 /* ------------------------------------------------------------ CDP plumbing */
 
+/**
+ * How long one CDP call may go unanswered before it is a *named* failure.
+ *
+ * `send` used to have no deadline at all. A wedged renderer therefore produced a harness that hung for
+ * as long as its caller allowed — t_744cba0b's own evidence includes a 300 s `offline-check.mjs` run
+ * that wrote no report and printed nothing, because nothing ever rejected. Every legitimate
+ * `Runtime.evaluate` here is a page that answers (the longest *in-page* wait any harness asks for is
+ * `PATIENCE_MS`, 20 s), so a minute is generous for the slowest honest call on a loaded box and still
+ * turns a hang into one line that says which call it was.
+ */
+const CDP_TIMEOUT_MS = Number(process.env.NAVILITE_CDP_TIMEOUT_MS ?? 60_000);
+
 class Cdp {
   constructor(ws) {
     this.ws = ws;
@@ -65,12 +77,40 @@ class Cdp {
       }
       for (const listener of this.listeners.get(message.method) ?? []) listener(message.params);
     });
+    /*
+     * A browser that dies mid-call used to leave its callers waiting for a reply that can no longer
+     * arrive (the reasons are, in practice, a SIGKILLed Chrome or a debugging port that belonged to a
+     * different browser). Say so once, at the socket, rather than leaving each caller to its own
+     * timeout.
+     */
+    const gone = (reason) => {
+      for (const [id, entry] of this.pending) {
+        this.pending.delete(id);
+        entry.reject(new Error(`${entry.method}: ${reason}`));
+      }
+    };
+    ws.addEventListener('close', () => gone('the browser connection closed'));
+    ws.addEventListener('error', () => gone('the browser connection failed'));
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMs = CDP_TIMEOUT_MS) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} went unanswered for ${timeoutMs} ms — the renderer is wedged or gone`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        method,
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -110,17 +150,62 @@ async function waitForDevtools(port, timeoutMs = 20000) {
   throw new Error(`Chrome did not open a devtools port on ${port}`);
 }
 
+/**
+ * The port this Chrome opened — normally the one *it* was given by the OS, not one this file guessed.
+ *
+ * `withChromePage` used to pick `9500 + Math.random() * 400` and hand that to `--remote-debugging-port`.
+ * Two problems, both seen on this machine while t_744cba0b was being diagnosed: about seven of these
+ * harnesses run at once under `npm test`, so a collision is ~7 % per run (with a collision the second
+ * harness *adopts the first one's browser* — and its page dies when the first harness SIGKILLs its
+ * Chrome); and orphan browsers from earlier runs keep ports in that range reserved (four were alive,
+ * one 17 hours old holding 9725).
+ *
+ * `--remote-debugging-port=0` asks the OS and Chrome writes the port it got into
+ * `DevToolsActivePort` inside its own fresh profile directory, which is the only place it can be: two
+ * harnesses cannot be handed the same port, and an orphan cannot be adopted. `options.port` is still
+ * honoured for a caller that wants a fixed one.
+ */
+async function boundDevtoolsPort(profile, explicitPort, timeoutMs = 20000) {
+  if (explicitPort !== undefined) {
+    await waitForDevtools(explicitPort, timeoutMs);
+    return explicitPort;
+  }
+  const file = join(profile, 'DevToolsActivePort');
+  const deadline = Date.now() + timeoutMs;
+  let port = null;
+  while (port === null && Date.now() < deadline) {
+    try {
+      const [first] = readFileSync(file, 'utf8').split('\n');
+      const value = Number(first);
+      if (Number.isInteger(value) && value > 0) port = value;
+    } catch {
+      /* Chrome has not written it yet */
+    }
+    if (port === null) await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+  if (port === null) {
+    throw new Error(`Chrome never reported a devtools port (no ${file} after ${timeoutMs} ms)`);
+  }
+  /*
+   * The file names the port; `/json/version` is what says the HTTP endpoint is answering on it.
+   * Chrome writes the file once its listener exists, so this normally returns immediately — but "the
+   * number is known" and "the number answers" are two different facts, and the caller opens its page
+   * over that port, so the second one is the one worth waiting for.
+   */
+  await waitForDevtools(port, Math.max(1000, deadline - Date.now()));
+  return port;
+}
+
 /** Boot headless Chrome, hand a connected page to `fn`, and always shut the browser down. */
 export async function withChromePage(fn, options = {}) {
   const chrome = options.chromePath ?? findChrome();
   if (!chrome) throw new Error('no Chrome/Chromium binary found');
-  const port = options.port ?? 9500 + Math.floor(Math.random() * 400);
   const profile = mkdtempSync(join(tmpdir(), 'navilite-chrome-'));
   const child = spawn(
     chrome,
     [
       '--headless=new',
-      `--remote-debugging-port=${port}`,
+      `--remote-debugging-port=${options.port ?? 0}`,
       `--user-data-dir=${profile}`,
       '--no-first-run',
       '--no-default-browser-check',
@@ -129,11 +214,16 @@ export async function withChromePage(fn, options = {}) {
       '--autoplay-policy=no-user-gesture-required',
       'about:blank',
     ],
-    { stdio: 'ignore' },
+    /*
+     * `detached` puts the browser in its own process group so the whole group can be killed below:
+     * Chrome is not one process, and killing only the launcher leaves the renderer, the GPU process
+     * and the utility processes behind — the orphans described above.
+     */
+    { stdio: 'ignore', detached: true },
   );
   let cdp = null;
   try {
-    await waitForDevtools(port);
+    const port = await boundDevtoolsPort(profile, options.port);
     const created = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json();
     const ws = new WebSocket(created.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
@@ -170,6 +260,13 @@ export async function withChromePage(fn, options = {}) {
     return await fn({ cdp, port, safeArea });
   } finally {
     cdp?.close();
+    // The whole process group: Chrome's renderer, GPU and utility processes are children of the
+    // launcher, and only killing the group leaves them behind (see `boundDevtoolsPort`).
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch {
+      /* no process group (the spawn failed), or already gone */
+    }
     child.kill('SIGKILL');
     // Chrome may still be writing into its profile when it gets the signal; a leftover temp
     // directory is not worth failing a passing run over.

@@ -30,8 +30,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { startMockLibrary } from './support/mock-fixture.ts';
 
-const PORT = 4613;
 const REPORT = join(tmpdir(), `navilite-scroll-containment-${process.pid}.json`);
 const CHROME_CANDIDATES: string[] = [
   ...(process.env.CHROME_PATH ? [process.env.CHROME_PATH] : []),
@@ -110,26 +110,11 @@ test('nothing moves when you scroll: not the list behind the spectrum, not the t
     return;
   }
 
-  const mock = spawn(process.execPath, ['tools/mock-subsonic.mjs', '--port', String(PORT), '--stress'], {
-    cwd: new URL('..', import.meta.url),
-    stdio: 'ignore',
-  });
+  const mock = await startMockLibrary({ stress: true });
   try {
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${PORT}/rest/ping.view?u=navidrome&p=navidrome&v=1.16.1&c=Navilite&f=json`);
-        if (response.ok) break;
-      } catch {
-        /* not up yet */
-      }
-      if (Date.now() > deadline) throw new Error('the mock library never came up');
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-
     const { code, output } = await run(
       process.execPath,
-      ['tools/scroll-check.mjs', '--url', `http://127.0.0.1:${PORT}`, '--json', REPORT],
+      ['tools/scroll-check.mjs', '--url', mock.base, '--json', REPORT],
       300_000,
     );
     const failed = output
@@ -186,6 +171,6 @@ test('nothing moves when you scroll: not the list behind the spectrum, not the t
     // The 393 px layout guard still bites after the shell stopped being the scroller.
     assert.ok(Number(report.states.layoutGuard?.injected?.overflow) > 0, 'the layout audit missed an injected 600 px element');
   } finally {
-    mock.kill('SIGKILL');
+    mock.stop();
   }
 });

@@ -482,3 +482,33 @@ views the two lanes happened to touch.
    `versionCode` is bumped (40 → 41) so that the next APK build carries 1.9.21 — no APK was built for
    this release, and none of the claims in §20 of the verification record rest on one.
 
+## The suite's own determinism, 2026-10-16 (card t_744cba0b — unreleased)
+
+Two files asked the same test fixture for the same port, and the flake that was filed as a load phenomenon
+turned out to be that collision. What the fix establishes, and what it changes about how the suite is run.
+
+1. **No test file names a port, and no test drives a library it did not start.** Every browser-driven file
+   starts its mock through `test/support/mock-fixture.ts`, which asks the OS for a port and takes the number
+   from *its own child's* `navilite-mock-port` line (printed from the child's listen callback), then proves the
+   child is answering. The rule is the point, not the file: a hard-coded port is a claim about a machine, and
+   two files that make the same claim lose it silently — the loser's mock dies of `EADDRINUSE` into a stdio
+   nobody reads, the winner answers the loser's readiness probe, and the loser's check spends the rest of its
+   run driving a library that another test file will kill. What follows from it: **a harness that drives a
+   shared fixture must own that fixture's address.**
+2. **A failed bind, and a wait that runs out of patience, must name themselves.** The mock prints one line and
+   exits non-zero on a bind failure; a wait in `tools/layout-probe-browser.js` that times out reports the page's
+   own state (route, heading, rows, text). The card's evidence could not be read for seventeen runs because the
+   interesting failure was the *silent* one, and this is the rule that came out of it: the failure a harness
+   cannot name is the failure that gets misfiled as load.
+3. **The suite keeps node's default concurrency.** No `--test-concurrency` bound: with the collision gone, ten
+   consecutive `npm test` runs are green (249/249, 0 skipped, ~37–39 s each) at the default, and bounding it would
+   make every run slower for no reading that any of this rests on. The lever the card offered as "the blunt
+   one" is deliberately not pulled — §21 of the verification record has the numbers.
+4. **Nothing about the pager check's assertions or its 20 s patience changed.** The flake was in the driving.
+   The wait's *message* now carries the page's state, which is diagnosis rather than a longer wait.
+5. **What this supersedes.** The v1.9.21 release decision said the suite's determinism was not in that cut and
+   that "nothing changes about how the suite is run … no plumbing change"; that was true of that release, and
+   this is the commit that changes the plumbing — `Cdp.send`'s deadline, Chrome's debug port read from its own
+   `DevToolsActivePort` instead of a guessed one, and the browser's whole process group killed instead of its
+   launcher. The suite command itself is still exactly `node --test "test/*.test.ts"`.
+

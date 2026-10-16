@@ -800,6 +800,38 @@
     };
   }
 
+  /**
+   * What the page is showing, for a wait that ran out of patience.
+   *
+   * A mute `timed out waiting for X` is what made the v1.9.21 flake look like a slow renderer, twice,
+   * in writing (docs/verification.md §14.5 and the note by §9 of tools/pager-check.mjs) — while the
+   * reason was that the library behind the page had been killed by another test file, and a *longer*
+   * patience would have failed too. The reading that distinguishes "this box is starved" from "this
+   * page was never going to draw" is the page's own state: the address it is on, the heading, and the
+   * text of the view. `tools/offline-check.mjs` has read it that way for a while; this is the same
+   * one, for the waits driven from inside the page.
+   */
+  function describePage() {
+    try {
+      var head = document.querySelector('.page-head h1');
+      var view = document.querySelector('.view');
+      var rows = document.querySelectorAll('.row').length;
+      var text = view ? String(view.textContent).replace(/\s+/g, ' ').slice(0, 200) : '';
+      return (
+        ' — the page is on ' +
+        String(location.hash || location.pathname) +
+        ', h1 ' +
+        JSON.stringify(head ? head.textContent : null) +
+        ', ' +
+        rows +
+        ' rows, showing: ' +
+        JSON.stringify(text)
+      );
+    } catch (error) {
+      return ' — and its own state could not be read: ' + error.message;
+    }
+  }
+
   function waitFor(expression, label, timeoutMs) {
     var limit = timeoutMs || PATIENCE_MS;
     var deadline = Date.now() + limit;
@@ -817,7 +849,7 @@
           return;
         }
         if (Date.now() > deadline) {
-          reject(new Error('timed out waiting for ' + label));
+          reject(new Error('timed out after ' + limit + ' ms waiting for ' + label + describePage()));
           return;
         }
         setTimeout(tick, 100);

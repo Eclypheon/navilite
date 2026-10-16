@@ -34,8 +34,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { startMockLibrary } from './support/mock-fixture.ts';
 
-const PORT = 4615;
 const REPORT = join(tmpdir(), `navilite-pager-${process.pid}.json`);
 const CHROME_CANDIDATES: string[] = [
   ...(process.env.CHROME_PATH ? [process.env.CHROME_PATH] : []),
@@ -125,26 +125,19 @@ test('the swipe pager pulls its panes, and never takes a scroll', async (t) => {
     return;
   }
 
-  const mock = spawn(process.execPath, ['tools/mock-subsonic.mjs', '--port', String(PORT), '--stress'], {
-    cwd: new URL('..', import.meta.url),
-    stdio: 'ignore',
-  });
+  /*
+   * The mock library, on a port the OS picked: this file used to ask for 4615, which
+   * `test/palette-apply.test.ts` also asked for. When that file's mock won the bind, this one died of
+   * `EADDRINUSE` into a stdio nobody read, and this check drove the rest of its ~36 s (measured)
+   * against a library that belonged to another test — and that test SIGKILLs its own mock in its
+   * `finally` after ~3 s (measured), which is where this check's step 9 died. See
+   * `test/support/mock-fixture.ts` and docs/verification.md §21.
+   */
+  const mock = await startMockLibrary({ stress: true });
   try {
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${PORT}/rest/ping.view?u=navidrome&p=navidrome&v=1.16.1&c=Navilite&f=json`);
-        if (response.ok) break;
-      } catch {
-        /* not up yet */
-      }
-      if (Date.now() > deadline) throw new Error('the mock library never came up');
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-
     const { code, output } = await run(
       process.execPath,
-      ['tools/pager-check.mjs', '--url', `http://127.0.0.1:${PORT}`, '--json', REPORT],
+      ['tools/pager-check.mjs', '--url', mock.base, '--json', REPORT],
       420_000,
     );
     const failed = output
@@ -279,6 +272,6 @@ test('the swipe pager pulls its panes, and never takes a scroll', async (t) => {
       `the follow moved the panel ${report.stages.grace.duringGrace - report.stages.grace.afterHand} px while he was reading`,
     );
   } finally {
-    mock.kill('SIGKILL');
+    mock.stop();
   }
 });

@@ -15,8 +15,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
+import { startMockLibrary } from './support/mock-fixture.ts';
 
-const PORT = 4611;
 const CHROME_CANDIDATES: string[] = [
   ...(process.env.CHROME_PATH ? [process.env.CHROME_PATH] : []),
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -61,27 +61,12 @@ test('the now screen keeps its safe areas, spends less on chrome, and senses the
     return;
   }
 
-  const port = PORT + 1;
-  const mock = spawn(process.execPath, ['tools/mock-subsonic.mjs', '--port', String(port), '--stress', '--dist', 'dist'], {
-    cwd: new URL('..', import.meta.url),
-    stdio: 'ignore',
-  });
+  // The OS picks the port; the mock reports which one it got (test/support/mock-fixture.ts).
+  const mock = await startMockLibrary({ stress: true, dist: 'dist' });
   try {
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/rest/ping.view?u=navidrome&p=navidrome&v=1.16.1&c=Navilite&f=json`);
-        if (response.ok) break;
-      } catch {
-        /* not up yet */
-      }
-      if (Date.now() > deadline) throw new Error('the mock library never came up');
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-
     const { code, output } = await run(
       process.execPath,
-      ['tools/layout-audit.mjs', '--url', `http://127.0.0.1:${port}`, '--now-chrome'],
+      ['tools/layout-audit.mjs', '--url', mock.base, '--now-chrome'],
       240_000,
     );
     const failed = output
@@ -91,7 +76,7 @@ test('the now screen keeps its safe areas, spends less on chrome, and senses the
     assert.equal(code, 0, `the now screen's chrome or its seek bar regressed:\n${failed || output}`);
     assert.match(output, /RESULT: the chrome is smaller and the drag starts on the bar\./);
   } finally {
-    mock.kill('SIGKILL');
+    mock.stop();
   }
 });
 
@@ -105,27 +90,11 @@ test('the app has no horizontal overflow at 393 x 852 on any route, in either no
     return;
   }
 
-  const mock = spawn(process.execPath, ['tools/mock-subsonic.mjs', '--port', String(PORT), '--stress'], {
-    cwd: new URL('..', import.meta.url),
-    stdio: 'ignore',
-  });
+  const mock = await startMockLibrary({ stress: true });
   try {
-    // Wait for the mock to answer before driving a browser at it.
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${PORT}/rest/ping.view?u=navidrome&p=navidrome&v=1.16.1&c=Navilite&f=json`);
-        if (response.ok) break;
-      } catch {
-        /* not up yet */
-      }
-      if (Date.now() > deadline) throw new Error('the mock library never came up');
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-
     const { code, output } = await run(
       process.execPath,
-      ['tools/layout-audit.mjs', '--url', `http://127.0.0.1:${PORT}`, '--json', '/tmp/navilite-layout-393.json'],
+      ['tools/layout-audit.mjs', '--url', mock.base, '--json', '/tmp/navilite-layout-393.json'],
       240_000,
     );
     const failed = output
@@ -159,6 +128,6 @@ test('the app has no horizontal overflow at 393 x 852 on any route, in either no
       assert.equal(step.detail?.zoom, 1, `${step.label} zoomed its visual viewport`);
     }
   } finally {
-    mock.kill('SIGKILL');
+    mock.stop();
   }
 });
