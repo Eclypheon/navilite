@@ -438,3 +438,47 @@ branch as 1.9.21's race fix — no version, changelog or native field is touched
    appended **above** the playlists' rows in that page's one list (never a second rows list), and the
    transport's message is still nowhere on the screen.
 
+## 1.9.21, 2026-10-16 — released: a slow answer may only paint the view it was asked for, and only while that view is the screen
+
+This is the cut that carries the three fixes already committed on `main` (the race guard `a0d296e`, the
+review's two gaps `7453ebd`) to the owner's phone: version bump, changelog entry, tag and IPA are this
+release's, and nothing else is in it. The two sections above record the fixes themselves; this one
+records **the rule they establish**, because it now binds every view that awaits anything, not only the
+views the two lanes happened to touch.
+
+1. **The invariant: an answer may paint only its own view, and only while that view is still the
+   screen.** `overtaken(shell, route)` reads the router's own `shell.viewRoute` at the moment of the
+   write, and the guard sits on every paint that can reach the screen: the Library, the playlists
+   screen, the playlist page, the downloads view, the album page, the artist page, Favourites, Search,
+   and the router's own failure fallback. A view whose answer lands after the owner has walked
+   somewhere else is dropped — silently, because he has already been shown the screen he asked for,
+   and a message about the one he left is noise. That a **rejection is a paint too** is the part the
+   card did not name: `renderRoute`'s `fail` was replacing the destination with an error box about a
+   screen two back, so it is guarded by the same rule.
+2. **The guard is keyed to the render, not to the request.** Each view captures its route once at the
+   top of the *render*, never per request, so a second Enter while the first search is still in flight
+   is the *same* render and both answers are current ones and land. Stated because the neighbouring
+   reading — "drop any answer that is not the newest request" — would silently cancel a legitimate
+   repaint and would have made the second search look broken.
+3. **Only the write to the screen is guarded; the data work never is.** The guard filters one paint;
+   it does not cancel the work behind it. Where `state/library.ts` caches — artists, an artist, an
+   album, a playlist, the starred set — the answer is in the cache whether or not its paint was
+   dropped, so walking back to that view draws from memory rather than repeating the round trip.
+   (Search is not cached; a dropped search answer is simply discarded.) One awaited paint is left
+   unguarded **deliberately**: `renderAlbums`' lazy `load()` writes into a list host its own render
+   created, which the next render's own header has already detached, so a late answer there lands
+   where nothing is shown — measured, not assumed: it passes in the RED run of §18 above. Guarding it
+   would be uniformity with no defect to fix, and it is named here rather than left to look like an
+   oversight.
+4. **The suite's own determinism is deliberately not in this cut, and nothing changes about how the
+   suite is run.** The pager check's 20 s patience under `npm test`'s parallel load (card `t_744cba0b`,
+   the flake recorded in `docs/verification.md` §18 and §14.5) is parked at the owner's request — he
+   does not want the machine loaded while he is using it — and this release was **un-gated** from that
+   card rather than holding two ready fixes behind a harness tuning. So `npm test` is still exactly
+   `node --test "test/*.test.ts"` with no concurrency flag, no patience change and no plumbing change;
+   the fix exists only in that card's workspace, uncommitted, and if the pager flake appears in this
+   release's evidence it is reported as what it is rather than tuned away.
+5. **This cut's artifact is the iOS IPA.** `npm run ipa:unsigned` is what was run, and the Android
+   `versionCode` is bumped (40 → 41) so that the next APK build carries 1.9.21 — no APK was built for
+   this release, and none of the claims in §20 of the verification record rest on one.
+

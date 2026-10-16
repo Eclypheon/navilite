@@ -267,3 +267,10 @@ Plain language, user-visible changes only. The app shows this same list under
 - The album art comes down with your music, so the spectrum page shows the cover and takes its colours from it with no connection.
 - Downloads from earlier versions keep working and are marked as downloaded straight away. Their album art comes down the next time you press the download button on that playlist, without downloading any music again.
 - The download button now tells you how much space the download will take including the album art, before you press it.
+
+## 1.9.21 — 2026-10-16
+
+- A playlist you have downloaded and then added tracks to no longer reports the wrong count on the Playlists screen. Its row said “34 of 34 on this phone” while the playlist itself has 35 tracks and its own page said “34 of 35” — the row and its page now say the same numbers.
+- With no connection, the Library keeps its “On this phone” row at the top, in the same list as the playlists you have downloaded. That row had gone missing from the Library screen whenever your server could not be reached.
+- A slow answer can no longer draw itself over the screen you are looking at. Open an album, an artist, Favourites or a search on a slow connection and move on before the answer arrives: the late answer used to appear over whatever you had moved to, and it now draws only if that screen is still the one you are on.
+- A slow failure behaves the same way: an error about a screen you have left no longer replaces the screen in front of you.
