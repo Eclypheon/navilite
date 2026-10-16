@@ -25,7 +25,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { AudioEngine, reduce, type EngineOptions, type EngineState, type EngineStatus, type PlayerEvent } from '../src/player/engine.ts';
+import { AudioEngine, reduce, type EngineOptions, type EngineState, type EngineStatus, type PlayerEvent, type VisualiserTone } from '../src/player/engine.ts';
 import type { NativeBridge, NativeBridgeEvents, NativeTrackInfo, NativeTruth } from '../src/player/native.ts';
 import type { TrackRequest } from '../src/player/engine.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
@@ -1980,7 +1980,7 @@ test('the chip is never told "native audio" while the tap is being installed on 
     assert.equal(
       installing.spectrumArming,
       true,
-      'so the chip reads "spectrum…" instead of his "native audio" — the tap is installed, the spectrum is coming',
+      'so the chip reads "spectrum" in its arming tone instead of his "native audio" — the tap is installed, the spectrum is coming',
     );
 
     // The tap's first frames arrive: the window ends on that fact.
@@ -2006,7 +2006,7 @@ test('the chip is never told "native audio" while the tap is being installed on 
  * decide the next one's first poll (which is how the chip could have said "native audio" at a boundary
  * it was told to stay quiet through).
  */
-test('a tap that answers with silence ends the "spectrum…" window, once, with the sentence that names it', async () => {
+test('a tap that answers with silence ends the arming window, once, with the sentence that names it', async () => {
   const fakes = installFakes();
   const engines: AudioEngine[] = [];
   try {
@@ -2498,7 +2498,7 @@ test('a healthy tap polled faster than it produces keeps the bars live and the c
       `the counter really did stand still on reads this test watched (${stillReads} of ${reads}) — without that this test states no slow cadence at all`,
     );
     assert.equal(darkReads, 0, 'not one read blanked the bars');
-    assert.equal(armedReads, 0, 'and the chip never went back to "spectrum…"');
+    assert.equal(armedReads, 0, 'and the chip never went back to the arming window');
     /*
      * And the pace the rule was judged on is the tap's own: the number the plugin declared, carried by
      * the status to the banner (`src/ui/app.ts`), which is where his phone answers what a real tap's
@@ -2660,7 +2660,8 @@ function chipWord(status: EngineStatus): string {
  *
  *   1. loading → `loading`, playing → `spectrum`;
  *   2. **paused → `paused`** — the state his screenshot is in;
- *   3. a change onto an item whose tap has produced nothing → `spectrum…` (§515.4, unchanged);
+ *   3. a change onto an item whose tap has produced nothing → `spectrum` in the `arming` tone
+ *      (v2.0-beta — §515.4's second word is gone; the window is not);
  *   4. the end of a track → `ended`;
  *   5. and a build with **no tap at all** (Android today) → `native audio`, playing *and* paused:
  *      that build cannot measure any item, so the word is the truth about it whatever the transport
@@ -2710,7 +2711,8 @@ test('the chip’s word is the transport’s when the transport is the reason �
     await settle(250);
     assert.equal(chipWord(engine.status()), 'spectrum', 'the bars come back with the transport, not with a re-attach');
 
-    // 4. A change onto an item whose own tap has produced nothing: §515.4's word, unchanged.
+    // 4. A change onto an item whose own tap has produced nothing: the spectrum's own word, in its
+    //    arming tone (v2.0-beta — §515.4's second word is gone; the window itself is unchanged).
     record.tapProducing = false;
     const changing = engine.play(OTHER_TRACK);
     assert.equal(chipWord(engine.status()), 'loading', 'a track change is a load, and says so');
@@ -2718,7 +2720,12 @@ test('the chip’s word is the transport’s when the transport is the reason �
     await settle(150);
     const arming = engine.status();
     say(`4. the new item’s tap has produced nothing: arming ${arming.spectrumArming} — the chip reads "${chipWord(arming)}"`);
-    assert.equal(chipWord(arming), 'spectrum…', 'the spectrum is coming: §515.4’s word, not a capability claim');
+    assert.equal(chipWord(arming), 'spectrum', 'the spectrum is coming: the spectrum’s own word, not a capability claim');
+    assert.equal(
+      arming.visualiser.tone,
+      'arming',
+      'and the window is the arming tone now — v2.0-beta, one word per capability (§515.4 reversed)',
+    );
 
     /*
      * 5. The end of a track. There is no queue on this harness, so the machine rests on `ended` —
@@ -2784,7 +2791,7 @@ test('the chip’s word is the transport’s when the transport is the reason �
  * `visualiserWord` (`if (this.state === 'playing') return native ? 'native audio' : 'theme'`),
  * taken whenever the bars were not being fed — including the window in which the analyser has
  * simply not produced this item's first frame yet. The native path has a word for that window
- * (v1.9.6's `arming` → `spectrum…`); the web path had none, so it fell through to the claim that
+ * (v1.9.6's `arming` window → §515.4's `spectrum…`, and from v2.0-beta `spectrum` + the `arming` tone); the web path had none, so it fell through to the claim that
  * the app cannot measure the item it is measuring.
  *
  * What may still spend `theme` while a web item plays is a verdict **about that item's samples**:
@@ -2820,9 +2827,10 @@ test('the web path wears the spectrum’s own word until its analyser has answer
     assert.equal(opened.spectrum, false, 'and nothing is being measured yet, which is true');
     assert.equal(
       chipWord(opened),
-      'spectrum…',
-      'the spectrum is coming — not the word for a browser that cannot measure this item',
+      'spectrum',
+      'the spectrum is coming — the spectrum’s own word, not the word for a browser that cannot measure this item',
     );
+    assert.equal(opened.visualiser.tone, 'arming', 'and the window is the arming tone (v2.0-beta)');
 
     /*
      * 2. And it stays that word while the answer is still outstanding: the app does not decide that a
@@ -2833,14 +2841,14 @@ test('the web path wears the spectrum’s own word until its analyser has answer
     const waiting = web.status();
     say(`2. 700 ms later, still answering nothing: arming ${waiting.spectrumArming} — the chip reads "${chipWord(waiting)}"`);
     assert.equal(waiting.state, 'playing', 'the track is still playing');
-    assert.equal(chipWord(waiting), 'spectrum…', 'and the word is still the spectrum’s, not a verdict');
+    assert.equal(chipWord(waiting), 'spectrum', 'and the word is still the spectrum’s, not a verdict');
 
     /*
      * 3. The verdict, from this item's own samples: `ZERO_FRAMES_BEFORE_THEME` (18, at a 100 ms
      *    meter) analyser frames of silence is the app's answer that the samples are not real. This is
      *    the state `theme` is licensed for, and it must still be reachable — it is what a tainted
      *    cross-origin stream looks like, and the reason the card exists rather than a blanket
-     *    replacement of `theme` by `spectrum…`.
+     *    replacement of `theme` by the spectrum's own word (v2.0-beta: `spectrum` + `arming`).
      */
     await settle(1600);
     const verdict = web.status();
@@ -2882,7 +2890,7 @@ test('the web path wears the spectrum’s own word until its analyser has answer
      * 6. **A track change wears the new item's window, never the last item's verdict.** The register
      *    the samples are judged on is per item (the web half of `forgetTapFrames`, v1.9.24's rule on
      *    the native side): the item that has just started an unmeasurable stream gets its own
-     *    `spectrum…`, not the `theme` the register was left on by the item before it.
+     *    `spectrum` arming, not the `theme` the register was left on by the item before it.
      */
     fakes.setSilent(true);
     await web.play(OTHER_TRACK);
@@ -2891,9 +2899,10 @@ test('the web path wears the spectrum’s own word until its analyser has answer
     assert.equal(changed.state, 'playing', 'the new item is the one playing');
     assert.equal(
       chipWord(changed),
-      'spectrum…',
+      'spectrum',
       'the item that just started has not worn the previous item’s verdict',
     );
+    assert.equal(changed.visualiser.tone, 'arming', 'it wears the arming tone — its own window, on one word (v2.0-beta)');
     // And that item reaches its own verdict in its own time.
     await settle(2200);
     assert.equal(chipWord(web.status()), 'theme', 'and then its own samples answer, as item 1’s did');
@@ -2926,13 +2935,13 @@ test('the web path wears the spectrum’s own word until its analyser has answer
  * verdict (the owner's call of 2026-10-16) and the whole of the last three releases. So the engine
  * keeps the third fact it was missing — **this item's tap has answered with a verdict** — and the
  * window is read from it: playing, the tap is on this item, nothing is being fed, and no verdict has
- * been reached for it ⇒ `spectrum…`. Nothing here is a clock or a budget: what ends the window is
+ * been reached for it ⇒ `spectrum` in the `arming` tone. Nothing here is a clock or a budget: what ends the window is
  * this item's tap producing its own frame, or giving its own verdict (v1.9.24 deleted the timer).
  *
  * What is asserted, in the card's own order:
  *
  *   1. the instant the resume returns the transport to `playing` (and by every read until the poll's
- *      answer arrives) the chip is `spectrum…`, never `native audio`;
+ *      answer arrives) the chip is `spectrum`/`arming`, never `native audio`;
  *   2. the same transition on a return from the background, which re-arms through `engine-state
  *      playing` rather than through a tap — the player's own answer is adopted, and the chip must
  *      still not wear the capability word in the window that opens;
@@ -2961,6 +2970,8 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     spectrum: boolean;
     arming: boolean;
     word: string;
+    /** The tone the chip would have worn (v2.0-beta: the window lives here, not in a second word). */
+    tone: VisualiserTone;
   }
   try {
     /* ================= 1. the probe: play → settle → pause → resume ================= */
@@ -2979,6 +2990,7 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
         spectrum: status.spectrum,
         arming: status.spectrumArming,
         word: chipWord(status),
+        tone: status.visualiser.tone,
       });
     });
 
@@ -3013,10 +3025,12 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     assert.equal(emitted?.state, 'playing', 'and that status is one the engine emitted, not one the test synthesised');
     assert.equal(
       chipWord(a3),
-      'spectrum…',
+      'spectrum',
       'the tap that was measuring this item a moment ago has not answered for it yet — the spectrum is coming, not a capability the app has lost',
     );
-    assert.equal(emitted?.word, 'spectrum…', 'and the word the app paints is the same one');
+    assert.equal(a3.visualiser.tone, 'arming', 'in the arming tone — the window is the tone, since v2.0-beta');
+    assert.equal(emitted?.word, 'spectrum', 'and the word the app paints is the same one');
+    assert.equal(emitted?.tone, 'arming', 'the paint is the arming tone too');
     assert.equal(a3.spectrumArming, true, 'the status field says so too (spectrum false, arming true)');
     assert.equal(a3.spectrum, false, 'nothing is being measured at that instant, which is true');
 
@@ -3043,9 +3057,9 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
       `the capability word appeared while the transport was playing (${capability.map((r) => `${r.at} ms "${r.word}"`).join(', ')})`,
     );
     assert.equal(
-      windowReadings.every((reading) => reading.word === 'spectrum…'),
+      windowReadings.every((reading) => reading.word === 'spectrum' && reading.arming === true),
       true,
-      'every one of them wore §515.4’s word for the window',
+      'every one of them wore the spectrum’s word in its arming tone (§515.4’s window, on one word — v2.0-beta)',
     );
     const a4 = engine.status();
     say(`probe A4 native resumed: "${chipWord(a4)}" (spectrum ${a4.spectrum}, arming ${a4.spectrumArming})`);
@@ -3071,13 +3085,14 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     assert.equal(returned.state, 'playing', 'the player’s own answer is adopted, and the app is playing again');
     assert.equal(
       chipWord(returned),
-      'spectrum…',
+      'spectrum',
       'the same window, through the other door: the tap has not answered for this item since the transport came back',
     );
+    assert.equal(returned.visualiser.tone, 'arming', 'and it wears the arming tone, as the resume does');
     const backgroundHealed = await until(() => engine.status().spectrum === true, 500);
     assert.ok(backgroundHealed !== null, 'and it ends on the tap’s own frame here too');
     assert.equal(
-      seen.filter((reading) => reading.state === 'playing' && reading.word !== 'spectrum…' && reading.word !== 'spectrum').length,
+      seen.filter((reading) => reading.state === 'playing' && reading.word !== 'spectrum').length,
       0,
       'no capability word on the way back in either',
     );
@@ -3104,7 +3119,7 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     let silentSeen: Reading[] = [];
     watchFrom = Date.now();
     const unsubscribeSilent = silent.subscribe((status) => {
-      silentSeen.push({ at: Date.now() - watchFrom, state: status.state, spectrum: status.spectrum, arming: status.spectrumArming, word: chipWord(status) });
+      silentSeen.push({ at: Date.now() - watchFrom, state: status.state, spectrum: status.spectrum, arming: status.spectrumArming, word: chipWord(status), tone: status.visualiser.tone });
     });
     await silent.pause();
     await settle(150);
@@ -3128,7 +3143,7 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     assert.equal(
       silentSeen.filter((reading) => reading.state === 'playing' && reading.word !== 'native audio').length,
       0,
-      'and the resume never re-opened the window over that verdict: no "spectrum…" on an item the tap has ruled out',
+      'and the resume never re-opened the window over that verdict: no arming tone on an item the tap has ruled out',
     );
     unsubscribeSilent();
 
@@ -3150,7 +3165,7 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     assert.equal(chipWord(frozen.status()), 'paused', 'paused, as everywhere');
     /*
      * Read *before* the await, which is the instant the transport flips (the same reading as A3): the
-     * verdict is in hand, so the word is the verdict's — `spectrum…` here would be the engine saying
+     * verdict is in hand, so the word is the verdict's — an arming tone here would be the engine saying
      * *the spectrum is coming* over an item its own tap has ruled out.
      */
     const frozenResuming = frozen.resume();

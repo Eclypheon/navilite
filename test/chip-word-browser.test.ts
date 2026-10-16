@@ -36,8 +36,8 @@
  *
  *   1. the ordinary run — a library the app is same-origin with, so every stream is measurable. Its
  *      word list must show **no capability word while the item is playing**: the window in front of
- *      the analyser's first frame is `spectrum…`, not the amber `theme` it used to wear for ~128 ms
- *      at every track start;
+ *      the analyser's first frame is `spectrum` wearing the `arming` tone (v2.0-beta; `spectrum…`
+ *      until then), not the amber `theme` it used to wear for ~128 ms at every track start;
  *   2. the second run — the app on `127.0.0.1`, the settings naming `localhost`, and
  *      `--no-cors-stream`: a cross-origin library that will not hand the stream over. There the
  *      capability word must still arrive, as **this item's own verdict**, after that window and with
@@ -115,7 +115,7 @@ interface Readings {
 interface Probed {
   out: Readings;
   /** Every distinct word the chip wore, in order, as it wore it, with the reason at that moment. */
-  words: { ms: number; label: string; chip: string | null; onScreen: string | null; state: string; reason: string }[];
+  words: { ms: number; label: string; chip: string | null; onScreen: string | null; state: string; tone: string | null; reason: string }[];
 }
 
 /**
@@ -284,7 +284,7 @@ const PROBE = (lingerMs: number): string => `(async () => {
 
   return {
     out,
-    words: seen.map((r) => ({ ms: r.ms, label: r.label, chip: r.chip, onScreen: r.onScreen, state: r.state, reason: r.reason })),
+    words: seen.map((r) => ({ ms: r.ms, label: r.label, chip: r.chip, onScreen: r.onScreen, state: r.state, tone: r.tone, reason: r.reason })),
   };
 })()`;
 
@@ -459,8 +459,9 @@ test('the chip’s word on the screen he photographed: a paused track on a playl
      *     this browser could not measure the item — the graph was built and the bars came in a moment
      *     later — but because the licence the chip's word reached the capability through was *"the
      *     transport is playing and the bars are not being fed"*, and the analyser's own first-frame
-     *     window is inside that. The word for that window is §515.4's `spectrum…`: **no frame for
-     *     this item yet** is not **frames for this item that are not real**. The item's own verdict
+     *     window is inside that. The word for that window is the spectrum's own word in its arming
+     *     tone (v2.0-beta; §515.4's `spectrum…` until then): **no frame for this item yet** is not
+     *     **frames for this item that are not real**. The item's own verdict
      *     (silence for `ZERO_FRAMES_BEFORE_THEME`, or one frozen frame over and over) is the only
      *     thing that may spend `theme`, and the second run in this file — a library whose stream the
      *     browser will not hand over — is where that half is read off a screen, not argued from code.
@@ -500,8 +501,8 @@ test('the chip’s word on the screen he photographed: a paused track on a playl
  *
  * What the word list must show, in order, while the transport is playing:
  *
- *   1. `spectrum…` — the analyser is attached, the item is playing, and its samples have not answered
- *      yet. Before the fix this was `theme`, amber, from the first paint — the capability claim the
+ *   1. `spectrum` wearing the `arming` tone (v2.0-beta; `spectrum…` until then) — the analyser is
+ *      attached, the item is playing, and its samples have not answered yet. Before the fix this was `theme`, amber, from the first paint — the capability claim the
  *      card is about, on a stream that *does* turn out to be unmeasurable, which is exactly why the
  *      fix may not be a blanket replacement;
  *   2. `theme` — the item's own verdict, after `ZERO_FRAMES_BEFORE_THEME` analyser frames of silence,
@@ -527,10 +528,16 @@ test('on a stream the browser will not hand over, the chip still reaches the cap
   }
 
   const playing = probed.words.filter((w) => w.state === 'playing');
-  const firstComing = playing.findIndex((w) => w.onScreen === 'spectrum…');
+  /*
+   * v2.0-beta — **the window is looked for as the word plus its tone, not as a second word.** It was
+   * `spectrum…` (the `indexOf` this line used to do); the owner reversed that (§515.4) and asked for
+   * one word per capability, so the window is `spectrum` wearing the `arming` tone, and the tone is
+   * read from the engine's own status at that read (`tone` beside `onScreen`).
+   */
+  const firstArming = playing.findIndex((w) => w.onScreen === 'spectrum' && w.tone === 'arming');
   const firstVerdict = playing.findIndex((w) => w.onScreen === 'theme');
   console.log(
-    `      while playing: ${JSON.stringify(playing.map((w) => w.onScreen))} — first "spectrum…" at ${firstComing === -1 ? 'never' : `${playing[firstComing].ms} ms`}, first "theme" at ${firstVerdict === -1 ? 'never' : `${playing[firstVerdict].ms} ms`}`,
+    `      while playing: ${JSON.stringify(playing.map((w) => `${w.onScreen}/${w.tone}`))} — first "spectrum"/arming at ${firstArming === -1 ? 'never' : `${playing[firstArming].ms} ms`}, first "theme" at ${firstVerdict === -1 ? 'never' : `${playing[firstVerdict].ms} ms`}`,
   );
   console.log(
     `      and the item watched on (${r.lingered ? `${r.lingered.ms} ms` : 'no lingered reading'}): chip "${r.lingered?.onScreen}" · spectrum ${r.lingered?.spectrum} · arming ${r.lingered?.arming} — ${r.lingered?.reason}`,
@@ -543,8 +550,18 @@ test('on a stream the browser will not hand over, the chip still reaches the cap
    *    used to be worn over.
    */
   assert.ok(
-    firstComing !== -1,
-    'the item is playing, its analyser is attached and its samples have not answered: the spectrum is coming',
+    firstArming !== -1,
+    'the item is playing, its analyser is attached and its samples have not answered: the spectrum is coming — as the spectrum’s own word in its arming tone (v2.0-beta: there is no second word to look for)',
+  );
+  /*
+   * And the owner's own acceptance for that item, on the surface: **no read of the bar, at any state,
+   * is `spectrum…` any more.** Deleting the member from the type union is the mechanism; this is the
+   * screen. A run that found even one read of it means the word is still being produced somewhere.
+   */
+  assert.deepEqual(
+    playing.filter((w) => w.onScreen === 'spectrum…').map((w) => `${w.onScreen}@${w.ms}ms`),
+    [],
+    'not one read of the bar is the deleted second word, over a stream the browser will not hand over (v2.0-beta item 2)',
   );
 
   /*
@@ -572,7 +589,7 @@ test('on a stream the browser will not hand over, the chip still reaches the cap
    */
   assert.ok(firstVerdict !== -1, 'the capability word is still reachable on this path');
   assert.ok(
-    firstVerdict > firstComing,
+    firstVerdict > firstArming,
     'the capability word is the item’s verdict, reached after the window — never instead of it',
   );
 

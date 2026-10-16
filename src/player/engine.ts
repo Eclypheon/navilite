@@ -180,17 +180,21 @@ export interface TrackRequest extends NativeTrackInfo {
  *
  * So the word is one fact about the item in hand, computed here, once:
  *
- *   - `spectrum` — the bars are being fed by that item, now.
- *   - `spectrum…` — the item in hand is playing and the thing that measures it has not answered for
- *     it yet: a native tap that is installed and to give its first frame, or (v1.9.27, card
- *     `t_71dc787e`) a web analyser that is attached and has not produced this item's first frame.
- *     From v1.9.27's native card (`t_c8cc01c6`) this is also the word for **every way into `playing`
- *     that is not a start** — a resume, a return from the background — until the tap's own answer
- *     arrives, which is where the amber capability word was reaching the screen on his phone.
- *     This is the same word a tap refused for a whole track keeps (§515.4, the owner's call of
- *     2026-10-16: the engine cannot tell *"will never attach"* from *"still attaching"* without a
- *     clock), and the same word for the browser's own first-frame window — **no frame for this item
- *     yet** is not the same statement as **frames for this item that are not real**.
+ *   - `spectrum` — the bars are being fed by that item, now. **v2.0-beta: and the same word for the
+ *     window before they are.** The item in hand is playing and the thing that measures it has not
+ *     answered for it yet — a native tap that is installed and to give its first frame, a web
+ *     analyser that is attached and has not produced this item's first frame (v1.9.27, card
+ *     `t_71dc787e`), and **every way into `playing` that is not a start** (card `t_c8cc01c6`) — a
+ *     resume, a return from the background — until the tap's own answer arrives.
+ *
+ *     What tells that window apart from a live reading is **the tone and not a second word**
+ *     (v2.0-beta): `arming` (the mid colour between the live green and the fallback amber) while no
+ *     answer for this item is in hand, `live` from this item's first real frame — see
+ *     {@link AudioEngine.visualiser}, which computes it from the fact rather than from the word,
+ *     because the word is now the same one in both. `spectrum…` was that second word until
+ *     v2.0-beta deleted it: the owner reads it as a second capability claim and wants one word for
+ *     one capability (his call of 2026-10-17, `DECISIONS.md`, which supersedes §515.4). The window
+ *     itself is unchanged, and the chip's tooltip still names it (`status.spectrumArming`).
  *   - the transport's own words — `idle`, `loading`, `paused`, `ended`, `interrupted`, `error` —
  *     worn when **the only reason nothing is being measured is that nothing is playing**. This is
  *     the state he was reading a capability claim in, and it is stated as what it is.
@@ -208,7 +212,6 @@ export interface TrackRequest extends NativeTrackInfo {
  */
 export type VisualiserWord =
   | 'spectrum'
-  | 'spectrum…'
   | 'idle'
   | 'loading'
   | 'paused'
@@ -337,7 +340,7 @@ export interface EngineStatus {
    *
    * This defect has been diagnosed from source three times and reproduced on the owner's phone every
    * time, and until now the app has never rendered a single fact about the tap itself: the chip says
-   * *spectrum…* or *native audio*, and the sentence behind it was written by the engine's own reading
+   * *spectrum* (v2.0-beta; *spectrum…* until then) or *native audio*, and the sentence behind it was written by the engine's own reading
    * of a register. These are the four numbers that separate the states, all of them already computed
    * somewhere — how many frames this item's tap has produced, how many frames the plugin has produced
    * for that item, how often it installed versus verified a tap, and which slot it says the tap is on
@@ -711,8 +714,9 @@ export class AudioEngine {
    * So this field is that second state's missing fact, stated per item and never re-armed by a
    * clock: set where the two verdicts are written, cleared where {@link forgetTapFrames} is (a new
    * item, or the tap leaving this one) and by this item's own live frame — a tap measuring again
-   * supersedes its own old verdict. `spectrum…` is then worn for exactly as long as *no answer for
-   * this item has arrived at all*, and a track whose tap has answered with silence keeps `native
+   * supersedes its own old verdict. The arming *tone* is then worn for exactly as long as *no answer
+   * for this item has arrived at all* (v2.0-beta: the word there is `spectrum`, as it is once the
+   * bars are fed), and a track whose tap has answered with silence keeps `native
    * audio` across a pause and a resume, because that verdict is about the item and not the moment
    * (§515's silence verdict, the owner's call of 2026-10-16 — the behaviour re-arming would have
    * broken).
@@ -1506,24 +1510,41 @@ export class AudioEngine {
    */
   private visualiser(arming: boolean): { word: VisualiserWord; tone: VisualiserTone } {
     const word = this.visualiserWord(arming);
+    /*
+     * v2.0-beta — **the tone is computed from the fact, not read off the word.**
+     *
+     * The word is `spectrum` both while the bars are being fed and while this item's answer is still
+     * coming, so the distinction has to be made here, from `arming`: it can no longer be inferred
+     * from the string, because the string is the same one in both cases. (Until v2.0-beta this was
+     * `word === 'spectrum…' ? 'arming' : 'live'`, and the window was a second word.)
+     */
     const tone: VisualiserTone =
       word === 'spectrum'
-        ? 'live'
-        : word === 'spectrum…'
+        ? arming
           ? 'arming'
-          : word === 'native audio' || word === 'theme'
-            ? 'fallback'
-            : // Neither a measurement nor a fallback: the transport, doing what it is doing. It is
-              // not a failure state and must not wear the amber of one (v1.9.6 made the same
-              // argument for `arming`, and the same reasoning applies to a pause).
-              'stopped';
+          : 'live'
+        : word === 'native audio' || word === 'theme'
+          ? 'fallback'
+          : // Neither a measurement nor a fallback: the transport, doing what it is doing. It is
+            // not a failure state and must not wear the amber of one (v1.9.6 made the same
+            // argument for `arming`, and the same reasoning applies to a pause).
+            'stopped';
     return { word, tone };
   }
 
   /** The word alone — see {@link VisualiserWord} for what each one claims. */
   private visualiserWord(arming: boolean): VisualiserWord {
     if (this.spectrumLive) return 'spectrum';
-    if (arming) return 'spectrum…';
+    /*
+     * v2.0-beta — **the arming window wears `spectrum` now, and it must still short-circuit the
+     * capability branch below.** The window itself is untouched (a playing item whose measurement
+     * has not answered yet — a tap in flight, an analyser without this item's first frame, and every
+     * way into `playing` that is not a start); only the word it wears changed, when the owner
+     * reversed §515.4 and asked for one word per capability. What tells the two apart is the tone
+     * (`visualiser`). Deleting this branch instead of re-wording it would put the window back on
+     * `theme` / `native audio`, which is precisely the defect v1.9.27 exists to fix.
+     */
+    if (arming) return 'spectrum';
     /*
      * Nothing is being measured, and there are two different reasons — the whole of this fix. First
      * the question the UI could not ask: **can this build measure this item at all?** An evidenced
