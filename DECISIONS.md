@@ -546,7 +546,7 @@ establishes, and the one state it deliberately leaves open.
    `ios/` or `tools/` changed, the v1.9.22 guards on the three detach sites hold, nothing detaches or re-attaches
    a tap on a playing item, and no envelope or idle spectrum is synthesised.
 
-## The tap on the item playing now owns its own analysis, 2026-10-16 (card `t_4b279e4b` — unreleased)
+## The tap on the item playing now owns its own analysis, 2026-10-16 (card `t_4b279e4b` — released as v1.9.25)
 
 The owner's report after installing v1.9.24 — *"the lines stay dead the whole track, the spectrum seems to jump up at
 the start and then go to zero and remain there the whole track"*, *"while it's flat it says native audio … mostly

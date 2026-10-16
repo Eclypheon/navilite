@@ -2775,3 +2775,119 @@ Raw runs behind the tables and the counts (agent scratch, attached to the releas
 `npm-test-1924.txt`, `offline-check-1924.txt`, `offline-check-1924-run2.txt`, `offline-check-1924.json`,
 `spectrum-proof-1924.txt`, `ipa-build-1924.txt`, `assets-ipa-vs-dist-1924.txt`,
 `assets-fresh-build-vs-ipa-1924.txt`, `chunk-identifiers-1924.txt`, `chunk-strings-1924.txt`.
+
+## 27. v1.9.25 — the release that carries the tap's own pace (2026-10-16)
+
+`2e1eb9d` (`DECISIONS.md` §516 — an item's tap owns its own analysis) and `c234e58` (§516.1 as amended — the drawing
+rule is the tap's own frame pace, not one frame per poll) were both on `main` and **unreleased** when they were
+written, and both said so. This is the cut that stamps and ships them: one release carrying those two commits and
+nothing else. The open state behind them (`t_aedab91d` — a tap refused for a whole track keeps *"spectrum…"*, owner's
+call: leave it) is not this cut's subject and is deliberately **not** written as fixed.
+
+### 27.1 What was run, and the counts for this cut
+
+```
+$ npm run typecheck             # tsc --noEmit — clean
+$ npm test                      # 258 tests, 258 pass, 0 fail, 0 cancelled, 0 skipped, 36.6 s
+$ node tools/mock-subsonic.mjs --port 4691 --stress --dist dist
+$ node tools/offline-check.mjs --app http://127.0.0.1:4691 --online-playlist pl-stress-long
+                                # 42 checks ok, 0 FAIL, exit 0
+$ node tools/spectrum-proof.mjs --url http://127.0.0.1:4691
+                                # exit 0
+$ npm run ipa:unsigned          # one vite build + cap sync ios + one xcodebuild → the artifact in §27.4
+```
+
+**One `npm test`**, **one `offline-check` run**, **one `spectrum-proof` run**, **one `typecheck`**, **one `vite
+build`** (inside `ipa:unsigned`) and **one `xcodebuild`**. Each ran once for this cut: the runs are the release
+record, not a loop.
+
+### 27.2 The suite, and the release check
+
+`npm test` — **258 tests, 258 pass, 0 fail, 0 cancelled, 0 skipped, 36.6 s**, the same count `c234e58` was verified
+at (this cut adds no test). The one test file it edits is the release check itself: `test/changelog.test.ts` compares
+`CHANGELOG.md` with `src/ui/changelog.ts` item for item and asserts the version list ends at 1.9.25, so a bump that
+touched only part of `docs/VERSIONING.md` §3's list fails there. `tsc --noEmit` prints nothing.
+
+### 27.3 The harness's 42 checks, and the spectrum proof
+
+The harness's 42 checks are the block §18–§23 built, unchanged by this cut: every one `ok`, none `FAIL`, exit 0 (a
+downloaded playlist is browsable with no connection, one row per playlist, the Library's own door into the
+downloaded music with the API refused, nothing printing a URL at him, a view left mid-answer not painting over the
+screen he moved to). The spectrum proof is this cut's subject, so it was run against this build as the release's own
+baseline:
+
+- playing: **30,663** lit pixels (checksum 999837626) · 3 columns with a second run of lit pixels · 0 lit below the baseline;
+- pause: **668** lit pixels at +700, +900, +1200 and +1500 ms, the last three **byte-identical**;
+- settled frame: 0 columns with a second run of lit pixels, 0 lit below the baseline.
+
+It drives the mock's own audio in Chrome on this Mac; it says nothing about the native tap (§27.5 note 1).
+
+### 27.4 The artifact, and the bytes it carries
+
+```
+$ npm run ipa:unsigned
+** BUILD SUCCEEDED **
+built  artifacts/Navilite-1.9.25-unsigned.ipa
+bytes: 1,030,943          (v1.9.24: 1,028,192 — +2,751, +0.27 %)
+app version 1.9.25 (46), UIBackgroundModes[0]=audio
+```
+
+Read out of the archive itself, not out of a source file:
+
+```
+$ unzip -p artifacts/Navilite-1.9.25-unsigned.ipa Payload/App.app/Info.plist \
+    | plutil -p - | grep -E 'CFBundleIdentifier|CFBundleShortVersionString|CFBundleVersion'
+  "CFBundleIdentifier" => "app.navilite"
+  "CFBundleShortVersionString" => "1.9.25"
+  "CFBundleVersion" => "46"
+```
+
+`artifacts/Navilite-1.9.25-unsigned.ipa` is 1,030,943 bytes, sha256
+`2db878633ff85e2e1c8051515c875e2c6ea10ecd5b044402528ded53d4ae750b`, and `file` reads it as `Zip archive data, at
+least v1.0 to extract`, carrying `Payload/App.app/` — 47 files, `Payload/App.app/App` among them. Every hashed asset
+in `dist/` is **byte-identical to the same member inside the IPA** (`index-C3B39aWG.js`, `index-F6_Re_h1.css`,
+`base-BUcoc2DZ.js`, `esm-BBR6i2z5.js`, `esm-ImJRG9Mc.js`, `native-CGnyy8ei.js`, `web-C36wsTzt.js`,
+`web-yw7QHmtH.js`), and `sw.js` is stamped `ead25fb` — the commit the IPA was built from and the commit the tag
+`v1.9.25` sits on.
+
+The fix is *in* the shipped bytes, read against the previous release's chunk as the control:
+
+| in the bundle | v1.9.24's `index-it8C1qaH.js` (198,307 B) | v1.9.25's `index-C3B39aWG.js` (201,127 B) |
+| --- | --- | --- |
+| `framePeriodMs` / `frameAgeMs` / `itemFramePeriodMs` (the tap's own pace, published) | 0 / 0 / 0 | **2 / 2 / 2** |
+| `tapFramesForItem` (the per-item counter) | 4 | **8** |
+| `itemFrames` (the frames this analysis produced for this item) | 0 | **6** |
+| `spectrumRechecks`, `retrySpectrumOnce`, `slowSpectrumPoll` (the three shapes v1.9.24 deleted) | 0 | 0 |
+
+The old chunk hashes to `cda60f8ea4eab157297bd810405aefdd7d0b752e0975e662f8377a2346848198` — §26.5's own value, so
+the v1.9.24 artifact is the one that record was written about and this cut changed nothing inside it. The new chunk
+is `2d2761601e76cef19465ec0afd6fbda970fa29d9f5283ed734693ba4dbaa859f`.
+
+**Order of operations.** The release body was committed first (`ead25fb`) with a clean tree, then tagged, then the
+IPA was built from that commit — `docs/VERSIONING.md` §6's order. The tag `v1.9.25` is on `ead25fb`, the commit the
+IPA was built from; this section is the one commit after it, written from that build's readings.
+
+### 27.5 Not verified here, and not claimed
+
+1. **His phone.** Everything above is a read of the shipped bytes and of Chrome at 393 × 852 on this Mac against the
+   mock; no device, no simulator, no native mixer. The native `prepare`/`unprepare` ordering, the tap's real
+   `maxFrames` / frame period, and the bars being live on his phone after a skip out of a loud passage are
+   **unverified on device** — the two numbers the banner prints beside the tap line (`framePeriodMs`, `frameAgeMs`)
+   are how one skip settles them, and that reading is his to give.
+2. **The residual §516.1 names.** The frame is stamped on the 10 ms drain timer, so a real inter-frame interval about
+   10 ms long can still leave a single poll whose age is past the declared period — one dark canvas window, one poll
+   of *"spectrum…"*, recovering on the next frame. This cut does not change it and does not claim it.
+3. **The state this release deliberately leaves open.** A tap refused for a whole track keeps *"spectrum…"*
+   (`t_aedab91d`; the owner's call was to leave it). It is **not** written as fixed in the changelog, and nothing in
+   this release touches it.
+4. **The installed IPA.** Unsigned on purpose (§15.4, `docs/ios-sideload.md`); the sideload and the 7-day re-sign are
+   the owner's own steps.
+5. **Android.** No APK was built for 1.9.25. `versionCode` is bumped to 45 and `versionName` to 1.9.25 so the next
+   APK carries them (`docs/VERSIONING.md` §3 does not require an APK for the parity), and nothing here is evidence
+   about the APK.
+6. **The two P3 notes §516's review left** — the unmeasured *"two reads in three"* figure in `c234e58`'s message and
+   in §516.1, and the abnormal banner printing `0` / `-1` rather than *"—"* for a publishing-but-unprepared
+   analysis — are pre-existing, neither is this cut's subject, and neither changed here.
+
+Raw runs (agent scratch, attached to the release card `t_90ebc65f`): `typecheck-1925.txt`, `npm-test-1925.txt`,
+`offline-check-1925.txt`, `spectrum-proof-1925.txt`.
