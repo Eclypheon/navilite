@@ -243,6 +243,11 @@ The badge table — this is the whole of what the owner sees:
   — *not* a `ctx.render()`: a re-render would drop the scroll offset and the highlighted row, and
   the download control already shows the pattern (`:2178-2184`, repaint your own node only).
   Subscriptions are dropped per render (`clearOfflineSubscriptions`, `:2130-2139`).
+  The registry runs in **registration order**, and the row registers its *text* pass before its mark
+  pass: the mark pass writes the row's `aria-label` *from* `song.title`, and the title is filled by
+  the text pass, so the reverse order left the name one store pass behind the text it carries (the
+  v1.9.23 follow-up, `docs/verification.md` §23 — the row announced as "Play, downloaded" while its
+  title was on the screen).
 - Offline, nothing here fetches: `pathFor` and `playlistBadge` are pure reads of the in-memory
   mirror (§I3).
 

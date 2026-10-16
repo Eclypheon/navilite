@@ -2163,3 +2163,86 @@ Version files touched, per `docs/VERSIONING.md` §3: `package.json` + `package-l
    visit cannot fire hundreds of round trips while the work still finishes; 497 rows in the owner's case are
    named twenty at a time, over passes.
 
+## 23. the v1.9.23 follow-up — the row's accessible name is written after the text it carries (2026-10-16, unreleased)
+
+Sage's SHIP review of v1.9.23 left one minor, non-blocking finding (A11Y-1), filed twice — as the review
+leftover on that card (`t_1ba6144e`, worked here) and as a card of its own (`t_861821f3`); both are the
+same defect and the same acceptance. Nothing owner-visible promised it, no version bump is taken: it rides
+along with the next release that touches this area, per `docs/VERSIONING.md`.
+
+### 23.1 The finding
+
+A row's accessible name is the row's only voice — the row is one tap target (v1.5) and the download glyph
+is `aria-hidden`, so nothing else on it is announced. That name carries the title
+(`` `Play ${song.title}${downloaded ? ', downloaded' : ''}` ``), and it was written by the **mark** pass —
+registered before the **text** pass that fills `song.title` out of the store (`songRow`, `src/ui/app.ts`).
+Inside one store notify the name therefore preceded the title it carries, and a row the *server* names gets
+exactly one notify (no manifest ⇒ `repairFromRecords` has nothing to say ⇒ `repairMetadata`'s only notify
+is the one at the end of the server pass, `src/state/offline.ts:618`) — so the pass that filled the title
+was the last pass, and the name stayed stale. The legacy/manifest path self-heals only because the record
+pass notifies **twice** (`:591`, then `:618`). Sage's probe on the shipped `dist/`: a row whose title
+`Track 1 · 110/330/1320 Hz` and `0:20` were legibly on the screen read
+`"Play , downloaded"` 2 ms after the route drew and 2 s later, unchanged.
+
+Symptom as the owner would hit it: with VoiceOver the row is announced as "Play, downloaded" — no name at
+all — while its title is on the screen, and it heals only on the next unrelated store change.
+
+### 23.2 What changed
+
+| file | change |
+| --- | --- |
+| `src/ui/app.ts` (`songRow`) | the two store-repaint registrations are swapped: `paintText` **before** `paintMark`, so the pass that writes the name runs after the pass that fills the title it carries. Both stay registered and the name is still written on **every** pass (the title can arrive later than the glyph); neither writes the other's node. The comment above the pair says why the order is load-bearing |
+| `tools/offline-check.mjs` | a third v1.9.23 reading (§2e): the one-row, server-named store of §2d, on `#/downloads`, held open (`/__slow`) so the route draws it blank, read **once** as it drew and **once** when the store could name it, **with no navigation between them** — the row's rendered title and its `aria-label` in the same reading |
+| `test/offline-views.test.ts` | the acceptance, asserted on the readings the harness reported (not on its exit code, not on "a repaint was called"): the reading is on `#/downloads`, the row was blank when the route drew, and then `title` is the library's own name and `label` is `` `Play ${title}, downloaded` `` |
+
+### 23.3 The fail-before, and the same check after
+
+The new reading first ran against the **shipped v1.9.23 bundle** (`dist/assets/index-Bnzfna-r.js`, the bytes
+in `artifacts/Navilite-1.9.23-unsigned.ipa`), on the tree before the swap:
+
+```
+$ node --test test/offline-views.test.ts          # exit 1
+FAIL  the row the server named reads as its title and its accessible name in the same reading, on the route (v1.9.23)
+      route #/downloads · as drawn ["","Play , downloaded"] · named ["Track 1 · 110/330/1320 Hz","Play , downloaded"] (the library calls it "Track 1 · 110/330/1320 Hz")
+```
+
+The visible text is right and the name is not — the owner's symptom, reproduced on the screen path, and the
+same command exits 0 after the swap:
+
+```
+$ npm run build                                    # tsc --noEmit, then vite build → dist/assets/index-y2t2BS14.js (sha256 80150e59…f6b)
+$ node tools/offline-check.mjs --app http://127.0.0.1:55768 --online-playlist pl-stress-long --json /tmp/a11y-report.json
+The row the server named, read on the route it was drawn on, with no navigation:
+    as the route drew it: ["","Play , downloaded"]
+    once the store had named it: ["Track 1 · 110/330/1320 Hz","0:20","Play Track 1 · 110/330/1320 Hz, downloaded"]
+ok    the row the server named reads as its title and its accessible name in the same reading, on the route (v1.9.23)
+RESULT: … (exit 0)
+$ node --test test/offline-views.test.ts           # exit 0, 1 pass 0 fail in 32.2 s
+```
+
+The legacy case §22 asserts is unchanged and still correct in the same run: the three rows the record names
+read `3:34` with `ヨルシカ`, and the row nobody can name still draws `""` and `--:--` with no id in it.
+
+### 23.4 The suite, and what this build is
+
+| check | reading |
+| --- | --- |
+| `npm run build` | `tsc --noEmit` clean, `vite build` → `dist/assets/index-y2t2BS14.js` |
+| `node --test test/offline-views.test.ts` | green in 32.2 s (all harness checks `ok`, including §2e) |
+| `npm test` (full suite, once, on this build) | **255 tests, 255 pass, 0 fail, 0 skipped** in 36.4 s — the same count as v1.9.23: this adds assertions to an existing browser test, not a test case |
+
+No version file is touched, so `dist/` is now the follow-up build and **not** the released bundle: the
+1.9.23 IPA keeps `index-Bnzfna-r.js` (sha256 `bb57b25b…0d88`), and this change is source + tests only until
+the next release rebuilds and re-stamps it.
+
+### 23.5 Not verified here, and not claimed
+
+1. **No device and no simulator**, and no screen reader: the reading is Chrome at 393 × 852 against the
+   built `dist/`, and it reads the row's `aria-label` **attribute** — which is what VoiceOver reads out of
+   a `button` — rather than any speech. The owner's phone is the acceptance for the announcement itself.
+2. **The two cards are one defect.** This section records the work of `t_1ba6144e`; `t_861821f3` is the same
+   finding from the same review and was in flight against the same three files at the same minute. Its
+   harness block was removed from the working tree at 15:22:39 leaving this section's §2e reading as the
+   single one; `src/ui/app.ts` was untouched by it. If that card re-applies the same swap, the anchor will
+   no longer match — the order is already `paintText` then `paintMark`.
+
