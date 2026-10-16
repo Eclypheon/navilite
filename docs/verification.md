@@ -2073,6 +2073,9 @@ because this change touches no `src/` file. Then, with the change in place:
    the suite keeps node's default concurrency), and supersedes the v1.9.21 note that said nothing about the
    suite's plumbing would change.
 
-Raw runs behind the tables (agent scratch, attached to `t_744cba0b`): `run1.log`–`run8.log`,
-`pager-holding-pre.log` (the pre-change pass that drove a foreign library), `pager-kill-pre.log` (the pre-change
-failure), `post-fix-4615-squat.mjs` and its output, `plumbing-probe.mjs` and its output, `mock-ports2.txt`.
+Raw runs behind the tables and the two probes, bundled into one file and attached to `t_744cba0b`:
+`t_744cba0b-evidence.txt` — the ten runs' own summary blocks, the two pre-change pager logs in full
+(`pager-holding-pre.log`, the pass that drove a foreign library; `pager-kill-pre.log`, the failure), the
+post-change squat probe's output, `plumbing-probe.mjs`'s output, the sampled mock ports, and the three
+throwaway scripts. The full `npm test` logs for runs 1–10 (the repetitive part) are agent scratch and not
+attached; every number this section quotes is in the bundle.
