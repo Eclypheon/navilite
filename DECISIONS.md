@@ -968,3 +968,76 @@ that card).
    fix, with its fail-before proof, is card `t_4253898e`; the release that may carry it is a later card, per the
    owner's rule of 2026-10-16).
 
+## The pill never reads "spectrum…" again, and the bottom container learns its regions, 2026-10-17 (owner's call, design for v2.0-beta — card `t_66cf0e1f`, unreleased)
+
+The design is `docs/design-v2.0-beta.md`. This entry records the owner's decisions in it and the one that
+**supersedes an earlier entry of his**: §515.4's word, spent on one more transition by §833.3.
+
+1. **The reversal, in his words.** *"The spectrum pill must never read `spectrum…`."* It reads `spectrum`, or one of
+   the other states (`idle`, `paused`, `loading…`) — never the ellipsis word. **This reverses §515.4 (his call of
+   2026-10-16)**, which was: a tap refused for a whole track keeps `spectrum…`, because the engine cannot tell *"will
+   never attach"* from *"still attaching"* without a clock — and a clock is the false capability claim §515 exists to
+   remove. **§833.3's reading of that word is withdrawn with it**: the first-frame window (a track change, a resume,
+   a return from the background, on both paths) is no longer "the spectrum's word"; it is the spectrum.
+2. **What the pill reads in the window where the tap has not answered.** `spectrum`, with the existing **`arming`
+   tone** — the mid colour of `styles.css:.mode-chip.arming`, kept and now computed from the arming fact rather than
+   inferred from the word (`visualiser()`, `src/player/engine.ts:1507`; the term stays at `1426`). **No new word is
+   coined and none is left lying around:** `'spectrum…'` is **deleted from `VisualiserWord`** (`engine.ts:209`), so
+   `tsc --noEmit` names every producer and every test that mentioned it. The consequence is stated where he can read
+   it (`docs/design-v2.0-beta.md` §3.3): from this release **no word on the bar says "the measurement has not
+   answered yet"**; that fact lives in the colour and the chip's tooltip (`spectrumArming`) instead. Making it a word
+   again would be a new call of his, not an inherited one.
+3. **The rule the deletion must not break.** The arming term must keep **short-circuiting the capability branch** of
+   `visualiserWord` (`engine.ts:1524-1557`): `spectrumLive` → *arming* → *this item's own verdict* → *the transport's
+   own state*. Re-wording the branch is the change; removing it would put the window back on `theme` / `native audio`,
+   which is the v1.9.27 defect returned. The assertions that name the old word are **re-pointed, never deleted**
+   (`test/engine-native.test.ts` — the native window, the verdict that outranks it and the resume case;
+   `test/chip-word-browser.test.ts` — both runs), and each keeps the property it was written for: *while an item is
+   playing, no capability word appears*.
+4. **The bottom container's regions (§4 of the design).** A tap in the **transport region** (`.pb-controls` — next,
+   play/pause, previous, *including the gaps and padding between them*) does that button's action and **nothing
+   else**: never navigation, never a container tap, in whatever view is open — pause/play and song changes leave the
+   route, the list and the scroll where they were. The **song block** (`.pb-cover` + `.pb-meta`) is the **only**
+   container tap. The seek row (`.pb-progress`) is the input and two inert labels. Everything else in the bar — the
+   gaps, the footer's padding, the chip, the reason line — is inert. **The defect this replaces, proved by reading:**
+   `app.ts:678-681` guards by *tag* (`closest('button, input')`), so today the elapsed/duration labels (`span`s,
+   `app.ts:516-517`) and the 12 px gap inside `.pb-main` (`styles.css:733`) all navigate to `#/now`.
+5. **The two-tap rule (§4.3).** A tap on the song block: if the view on screen has **no row for the playing song**
+   (`ctx.rows` is cleared per render, `app.ts:1662`; the Library tab lists artists), it opens the now screen, as
+   today. If it has one and that row is **not fully inside the scroll box**
+   (`getBoundingClientRect()` against `.view-scroll`'s), the list scrolls so that row is **centred**, clamped to the
+   scrollable range, and **nothing navigates**. If the row is **already visible in full** — which implies it is the
+   highlighted row, since the highlighted row *is* the playing song's (`app.ts:3223-3249`) — the same tap opens the
+   now screen. So: from afar the first tap centres and the second opens; on the row itself, one tap opens. **And the
+   bar inherits the list's drag refusal** (§4.4): the pager claims gestures that start on `.pb-main`
+   (`src/ui/pager.ts:122`) but only the list has the press/`suppressClickUntil` authority today, so the click a pane
+   swipe leaves behind on the bar would become a list scroll — the same click that opens the spectrum mid-swipe
+   today.
+6. **The refactor: what it is for (§1-2).** The 1 MB IPA is Capacitor's and Xcode's, not ours — our whole web payload
+   inside it is ~222 KB uncompressed and the JS is 204,025 B — so **no release may promise an IPA reduction from
+   this**. What is bloated is the reading cost of `src/player/engine.ts` (3,832 lines, 211 KB ≈ 53k tokens) and
+   `src/ui/app.ts` (3,455 lines, 163 KB ≈ 41k tokens): 44.9 % of the source, read whole by every card that touches
+   them. The slices (one commit each, independently revertable, behaviour pinned by the named existing tests) and the
+   deliberate non-slices (`native.ts`, `offline.ts`, `queue.ts` — untouched, because offline playback and the native
+   path are two of the four properties that must not regress) are in `docs/design-v2.0-beta.md` §2. The **218
+   `*.bak-*` files** in the working tree are untracked and gitignored (`git ls-files | grep -c '\.bak'` = 0) and are
+   deleted as housekeeping, not as a refactor.
+7. **Two card-brief facts corrected, so nobody builds on them:** there is **no `stable-1.9.28` tag** (the only stable
+   tag is `v1.9.11-stable`; the diff point is `v1.9.28` = `8a4b785`), and `src/` is **16,223 lines of TypeScript**,
+   not 15,325 (`find src -name '*.ts' | xargs wc -l`).
+8. **The release identity.** He reads **`2.0-beta`** (changelog heading, tag `v2.0-beta`). The package metadata says
+   **`2.0.0-beta`** because `2.0-beta` is not valid semver (`semver.valid('2.0-beta')` is `null`; npm's
+   `--package-lock-only` accepts it, so the failure would come later and from another tool). iOS
+   `MARKETING_VERSION = 2.0.0` (Xcode's must be numeric), `CURRENT_PROJECT_VERSION = 50`; Android
+   `versionName "2.0.0-beta"`, `versionCode 49`; artifacts are named from `package.json`
+   (`tools/build-ios-ipa.sh:27`), so `Navilite-2.0.0-beta-unsigned.ipa`. **Nothing here is bumped by this card**:
+   the version, the tag and the artifact belong to the release card, after the running fixes SHIP.
+9. **What this entry does not decide, named so the next card meets it deliberately rather than by inheritance.**
+   (a) The **silent-passage** fix (`t_4253898e`, decision §867) and the **native silence verdict** (§515.1) are
+   untouched: this entry is about the *word*, not about what ends a verdict. (b) `t_9c379c56`'s second finding (a
+   suspended `AudioContext` reaching the capability word) stays unrepaired. (c) Whether the arming window should be
+   visible in the **word** rather than only in the colour is a new call of his, and it is not made here.
+10. **Nothing shipped.** `DECISIONS.md` and `docs/design-v2.0-beta.md` only: no version bump, no tag, no artifact,
+    `CHANGELOG.md`'s release headings untouched, `src/` and `test/` untouched. The implementation is card
+    `t_88ee09ab`; the release that carries it is a later card, per his rule of 2026-10-16.
+
