@@ -11,7 +11,7 @@
 import type { EngineStatus } from '../player/engine.ts';
 import type { PlaybackQueue } from '../state/queue.ts';
 import { ICONS, cover, formatTime, icon, playIcon, replace } from './dom.ts';
-import type { AppContext, Shell } from './app.ts';
+import type { AppContext, Shell } from './context.ts';
 
 /**
  * The playing track is marked wherever it appears in a list. Cheap and to the point: one
