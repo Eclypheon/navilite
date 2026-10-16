@@ -8,7 +8,7 @@
  * The bar's *tap* rules live here too (v2.0-beta items 3 and 4): which region of the container is
  * a tap at all, and what a tap on the song block does. See `containerTap`.
  */
-import type { EngineStatus } from '../player/engine.ts';
+import type { EngineStatus } from '../player/engine-contract.ts';
 import type { PlaybackQueue } from '../state/queue.ts';
 import { ICONS, cover, formatTime, icon, playIcon, replace } from './dom.ts';
 import type { AppContext, Shell } from './context.ts';

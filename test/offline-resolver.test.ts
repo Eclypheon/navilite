@@ -22,7 +22,8 @@ import assert from 'node:assert/strict';
 import { Library } from '../src/state/library.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
 import { SubsonicClient } from '../src/api/subsonic.ts';
-import type { AudioEngine, TrackRequest } from '../src/player/engine.ts';
+import type { AudioEngine } from '../src/player/engine.ts';
+import type { TrackRequest } from '../src/player/engine-contract.ts';
 import type { QueueContext, Song } from '../src/api/types.ts';
 
 const song: Song = { id: 'abc123', title: 'A track', artist: 'Someone', duration: 231 };

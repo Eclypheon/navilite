@@ -15,7 +15,8 @@
  * number shown is the position in the order you are actually hearing.
  */
 import type { Song, QueueContext, QueueItem } from '../api/types.ts';
-import type { AudioEngine, PublishedTrack, TrackRequest } from '../player/engine.ts';
+import type { AudioEngine } from '../player/engine.ts';
+import type { PublishedTrack, TrackRequest } from '../player/engine-contract.ts';
 import { updateNowPlaying, updatePlaybackState, updatePositionState, mediaSessionAvailable } from '../player/mediasession.ts';
 import { clearSnapshot, saveSnapshot } from '../storage/session.ts';
 import { ByteRate } from './bitrate.ts';

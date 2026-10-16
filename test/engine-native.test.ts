@@ -25,9 +25,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { AudioEngine, reduce, type EngineOptions, type EngineState, type EngineStatus, type PlayerEvent, type VisualiserTone } from '../src/player/engine.ts';
+import { AudioEngine } from '../src/player/engine.ts';
+import { reduce } from '../src/player/engine-contract.ts';
+import type { EngineOptions, EngineState, EngineStatus, PlayerEvent, VisualiserTone } from '../src/player/engine-contract.ts';
 import type { NativeBridge, NativeBridgeEvents, NativeTrackInfo, NativeTruth } from '../src/player/native.ts';
-import type { TrackRequest } from '../src/player/engine.ts';
+import type { TrackRequest } from '../src/player/engine-contract.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
 import type { Library } from '../src/state/library.ts';
 import type { QueueContext, Song } from '../src/api/types.ts';

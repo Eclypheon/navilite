@@ -17,7 +17,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { PlaybackQueue } from '../src/state/queue.ts';
-import type { AudioEngine, PublishedTrack, TrackRequest } from '../src/player/engine.ts';
+import type { AudioEngine } from '../src/player/engine.ts';
+import type { PublishedTrack, TrackRequest } from '../src/player/engine-contract.ts';
 import type { Library } from '../src/state/library.ts';
 import type { QueueContext, Song } from '../src/api/types.ts';
 

@@ -30,7 +30,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { AudioEngine, type EngineOptions } from '../src/player/engine.ts';
+import { AudioEngine } from '../src/player/engine.ts';
+import type { EngineOptions } from '../src/player/engine-contract.ts';
 import { createAssetLanes, type NativeBridge, type NativeBridgeEvents, type NativeQueueStatement, type NativeTrackInfo } from '../src/player/native.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
 import type { Library } from '../src/state/library.ts';
