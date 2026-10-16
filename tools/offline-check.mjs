@@ -54,6 +54,13 @@
  * read the screen you moved to. Five cases — the album page, the artist page, Favourites, Search, and
  * the router's own failure fallback (an error that lands late) — each with a control that visits the
  * same route and stays, because a view that never paints cannot paint over another one.
+ *
+ * **…and it adds two readings to the same run** (v1.9.21): the Library's own entry row into the
+ * downloaded music is still on the screen with the connection refused — the offline page used to
+ * replace the whole view and take the row with it, against the design's §4.1 ("whether or not the
+ * server answers") — and tapping that row opens `#/downloads`. The grown-playlist arithmetic is
+ * asserted where it can be exact (in `test/offline-browse.test.ts`, against the row's own formatters)
+ * rather than in a browser reading.
  */
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
@@ -71,6 +78,12 @@ const TITLES = ['海底、月明かり', '夜に駆ける', 'A very long unbroke
  */
 const PARTIAL_ID = 'pl-partial-1';
 const PARTIAL_NAME = 'Half downloaded';
+/**
+ * The Library's own entry row into the downloaded music (v1.9.20, §4.1) — the title the app prints
+ * on it. v1.9.21 asserts it survives the *offline* page too, so the title is a constant here rather
+ * than a string typed twice.
+ */
+const ENTRY_TITLE = 'On this phone';
 /**
  * Every track the downloaded-songs view holds in this run: the mirror's three plus the one complete
  * file of the half-downloaded playlist. It is what `#/downloads` must still read *after* another
@@ -677,6 +690,88 @@ async function main() {
           `badge ${library.pill?.visible ?? false} · downloaded ${JSON.stringify(library.downloadedRows)} · leaked ${JSON.stringify(library.leaked)}`,
         );
 
+        /*
+         * **…and its own way into the downloaded music survives that page** (v1.9.21, §4.1's "whether
+         * or not the server answers").
+         *
+         * `renderArtists` draws the entry row synchronously, before it awaits anything — and the
+         * router's `fail` then handed the whole screen to `renderOffline`, which replaced
+         * `shell.view` and took the row with it. Offline, the only other way in was Settings →
+         * `Downloaded music: … →`; the music itself was always reachable from the playlist rows
+         * below, so this is discoverability, missing in exactly the case the view exists for.
+         *
+         * Read as the page reads: the row's own sub-line, its accessible name, and the list it is in
+         * (the same one the downloaded playlists are in — no second rows list).
+         */
+        const entryRow = await evaluate(
+          cdp,
+          `(() => {
+            const row = [...document.querySelectorAll('.view .row')].find(
+              (node) => node.querySelector('.row-title')?.textContent === ${JSON.stringify(ENTRY_TITLE)},
+            );
+            if (!row) return null;
+            const list = row.closest('.list');
+            return {
+              sub: row.querySelector('.row-sub')?.textContent ?? null,
+              label: row.getAttribute('aria-label'),
+              listRows: [...(list ? list.querySelectorAll('.row:not(.song)') : [])].map(
+                (node) => node.querySelector('.row-title')?.textContent ?? null,
+              ),
+            };
+          })()`,
+        );
+        readings.states.libraryEntryRowOffline = entryRow;
+        say(`  its entry row: ${entryRow ? `“${ENTRY_TITLE}” — “${entryRow.sub}” (${entryRow.label})` : 'NOT DRAWN'}`);
+        check(
+          'the Library’s “On this phone” entry row is on the offline page too, in the same list as the downloads (v1.9.21, §4.1)',
+          entryRow !== null &&
+            /^\d+ track/.test(String(entryRow.sub)) &&
+            entryRow.label === `Open ${ENTRY_TITLE}` &&
+            entryRow.listRows.includes(ENTRY_TITLE) &&
+            entryRow.listRows.includes(PLAYLIST_NAME),
+          entryRow === null
+            ? 'the offline page carries no entry row at all'
+            : `sub “${entryRow.sub}” · label “${entryRow.label}” · the list it is in: ${JSON.stringify(entryRow.listRows)}`,
+        );
+
+        const tapped = await evaluate(
+          cdp,
+          `(() => {
+            const row = [...document.querySelectorAll('.view .row')].find(
+              (node) => node.querySelector('.row-title')?.textContent === ${JSON.stringify(ENTRY_TITLE)},
+            );
+            if (!row) return false;
+            row.click();
+            return true;
+          })()`,
+        );
+        /*
+         * Bounded, and *answered* rather than thrown: when the row is not there (which is the defect
+         * this check is for) there is nothing to tap and nothing to wait for, and a thrown wait would
+         * take the rest of the run down with it instead of reporting one failure.
+         */
+        const opened = await (async () => {
+          if (!tapped) return false;
+          const deadline = Date.now() + 5000;
+          for (;;) {
+            if (await evaluate(cdp, `location.hash === '#/downloads'`)) return true;
+            if (Date.now() > deadline) return false;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        })();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const throughEntry = await evaluate(cdp, READING);
+        readings.states.libraryEntryRowTap = throughEntry;
+        check(
+          'and that row taps through to the downloaded music (#/downloads) with no connection',
+          tapped === true &&
+            opened === true &&
+            throughEntry.route === '#/downloads' &&
+            throughEntry.title === ENTRY_TITLE &&
+            JSON.stringify([...throughEntry.rows].sort((a, b) => a.localeCompare(b))) === JSON.stringify(DOWNLOAD_TITLES),
+          `${tapped ? (opened ? 'tapped' : 'tapped but the address did not move') : 'no row to tap'} → address ${throughEntry.route}, h1 “${throughEntry.title}”, ${throughEntry.rows.length} row(s)`,
+        );
+
         await evaluate(cdp, `location.hash = '#/playlist/pl-not-downloaded'`);
         await new Promise((resolve) => setTimeout(resolve, 800));
         const missing = await evaluate(cdp, READING);
@@ -1043,7 +1138,7 @@ async function main() {
   say('');
   say(
     failures.length === 0
-      ? 'RESULT: a downloaded playlist is browsable with no connection, one row per playlist, a mark on what is on this phone, nothing prints a URL at him, and a view left mid-answer does not paint over the screen he moved to.'
+      ? 'RESULT: a downloaded playlist is browsable with no connection, one row per playlist, a mark on what is on this phone, the Library keeps its own door into the downloaded music with no server, nothing prints a URL at him, and a view left mid-answer does not paint over the screen he moved to.'
       : `RESULT: ${failures.length} offline check(s) failed.`,
   );
   for (const failure of failures) say(`  - ${failure}`);

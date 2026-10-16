@@ -259,6 +259,33 @@ test('a downloaded playlist is browsable with no connection, and no view prints 
       `the downloaded-songs view waited ${hungDownloads?.ms} ms for a server that never answered`,
     );
 
+    // **v1.9.21 — the Library keeps its own door to the downloaded music with no connection.** The
+    // offline page replaced the whole view and took the entry row with it, so while offline the only
+    // way into `#/downloads` was Settings. Asserted as the readings: the row is on that page, it is
+    // in the same list as the downloaded playlists, and tapping it opens the view.
+    const libraryOffline = report.states.libraryOffline;
+    assert.ok(
+      (libraryOffline?.downloadedRows ?? []).includes('On this phone'),
+      `the Library’s entry row is not on the offline page: ${JSON.stringify(libraryOffline?.downloadedRows)}`,
+    );
+    const entryRow = report.states.libraryEntryRowOffline as unknown as
+      | { sub: string | null; label: string | null; listRows: Array<string | null> }
+      | undefined;
+    assert.match(String(entryRow?.sub), /^\d+ tracks? · /, 'the entry row does not say how much is on the phone');
+    assert.equal(entryRow?.label, 'Open On this phone', 'the entry row’s accessible name is not the view it opens');
+    assert.ok(
+      (entryRow?.listRows ?? []).includes('Late night driving'),
+      `the entry row is in a list of its own rather than the downloads list: ${JSON.stringify(entryRow?.listRows)}`,
+    );
+    const tappedThrough = report.states.libraryEntryRowTap;
+    assert.equal(tappedThrough?.route, '#/downloads', 'the entry row did not open the downloaded music');
+    assert.equal(tappedThrough?.title, 'On this phone', 'the view the entry row opened is not the downloaded music');
+    assert.deepEqual(
+      [...(tappedThrough?.rows ?? [])].sort(),
+      ['Only this one is here', '夜に駆ける', 'A very long unbroken track title for the 393 px audit', '海底、月明かり'].sort(),
+      'the entry row opened a view without the tracks on the phone',
+    );
+
     // **Item 4** — the cover on disk drove the palette. `DEFAULT_PALETTE.primary` is what the shell
     // wears when no art was read at all, so anything else is the proof that the local cover was
     // fetched and sampled rather than silently fallen back from.

@@ -1730,3 +1730,94 @@ as follow-up rather than edited under a race fix.
 
 Raw runs behind the two tables: `offline-check-RED-v1.9.20-build.txt` and `offline-check-GREEN-fix.txt`,
 attached to this card (t_8de0bddf).
+
+## 19. v1.9.21 — the two gaps v1.9.20's acceptance review left (2026-10-16)
+
+Filed by that review (card t_4009b23a, from t_5581b678) as the two places where v1.9.20's item 2
+("honest for a partial") and item 3 ("there whether or not the server answers") were not fully met.
+Both are in `src/ui/app.ts`; both land **unreleased**, on the branch §18 is on — no version bump,
+changelog entry, tag or IPA is part of this, so nothing carries it to his phone yet.
+
+**Fix 1 — a grown playlist's row prints the playlist's own length as its denominator.** `badge.total`
+is the manifest's length (what was *asked for* when the playlist was downloaded); the row is drawn
+beside the playlist the server has just described, which may be longer. `downloadedFigures()` is now
+the one place that pair comes from (`{ done: badge.done, total: Math.max(badge.total, songCount) }`),
+and **both** the sub-line (`playlistSubLine`) and the accessible name (`playlistRowLabel`) read it, so
+the row and VoiceOver say the same numbers. The playlist page's own control's grown label moved into
+`grownControlLabel()` (same string, one function) so the two screens can be asserted against each
+other rather than against two spellings of the same arithmetic. The numerator is untouched: complete
+files among the manifest's songs.
+
+**Fix 2 — the Library's "On this phone" entry row survives the offline page.** `renderOffline` now
+appends `downloadsEntryRow(ctx)` above the store's playlist rows when `head === 'artists'`: one list,
+no second rows list, and the transport's text is still not rendered. The card's second option (let
+the Library keep its own header + entry row on the unreachable path) was not taken — see the
+`DECISIONS.md` entry for 1.9.21.
+
+**Fix 1, measured on the built app, before and after.** A throwaway probe (agent scratch, not added to
+the repository — the card said no new harness) seeded the app's own offline mirror with a manifest of
+**34** tracks for the server's own 35-track playlist, with the server answering — the owner's shape,
+one track added to a playlist he had downloaded. It read the Playlists row and then the playlist's own
+page, in the same session, on `dist/` built from the same source with only this fix missing:
+
+| | playlists row (`sub` / `aria-label` / mark) | the same playlist's own page |
+| --- | --- | --- |
+| **before** (build of a0d296e) | `35 tracks · 34 of 34 on this phone` / `…, 34 of 34 downloaded` / `partial` | `34 of 35 · retry` |
+| **after** (this change) | `35 tracks · 34 of 35 on this phone` / `…, 34 of 35 downloaded` / `partial` | `34 of 35 · retry` |
+
+One playlist, one pair of numbers after the fix; the reviewer's reproduction (`3 tracks · 1 of 1 on
+this phone` against `1 of 3 · retry`) is the same defect at a smaller size.
+
+**The same figures, asserted in `test/offline-browse.test.ts`** (the card's test, extended): the grown
+case's sub-line and accessible name are asserted as strings, and the pair the row prints is asserted
+against the pair `grownControlLabel` prints for that playlist (`2 of 3 on this phone` vs `2 of 3 · retry`
+on a 2-of-3 store). The test now imports the row's own formatters from `src/ui/app.ts` — which has no
+module-scope DOM access (`boot()` is what draws), so a node test can read the real format strings
+instead of restating them. A second test covers the transient cousin the card named: a playlist whose
+audio has all landed while a lyric is in flight (`done === total`, state `downloading`/`partial`), grown
+to four tracks, prints `4 tracks · 2 of 4 on this phone`. **RED** for those two assertions, with the old
+denominator restored in `downloadedFigures` (then reverted), was exact:
+
+```
+✖ the badge is read from complete files, and a grown playlist is never called complete
+  actual: '3 tracks · 2 of 2 on this phone'   expected: '3 tracks · 2 of 3 on this phone'
+✖ a grown playlist with a lyric still in flight prints the playlist’s own length as well
+  actual: '4 tracks · 2 of 2 on this phone'   expected: '4 tracks · 2 of 4 on this phone'
+```
+
+**Fix 2, measured in the harness, before and after.** Two checks were added to the v1.9.18/1.9.20
+harness's library-offline reading — the entry row is on that screen (title, sub-line, accessible name,
+and the list it shares with the downloads), and tapping it opens `#/downloads`. Both are *answered*
+rather than thrown when the row is missing, so a RED run reports two failures instead of dying in a
+`waitFor` and hiding the rest of the run.
+
+```
+$ node tools/mock-subsonic.mjs --port 4683 --stress --dist dist
+$ node tools/offline-check.mjs --app http://127.0.0.1:4683 --online-playlist pl-stress-long
+```
+
+| | `#/artists` with the API refused | harness result |
+| --- | --- | --- |
+| **RED** (build of a0d296e, checks present) | h1 `Library`, "no connection to your library", **2** rows — `Late night driving`, `Half downloaded`; `its entry row: NOT DRAWN` | 34 ok, **2 FAIL** ("the offline page carries no entry row at all"; "no row to tap") |
+| **GREEN** (this change) | 3 rows, the entry row first: `“On this phone” — “4 tracks · 31 MB” (Open On this phone)`, in the same list as the downloads | **36 checks, 0 failures**, exit 0 |
+
+`npm test` **241/241** (0 skipped, exit 0 — the new store test, and `test/offline-views.test.ts` drives
+the harness and asserts every check it reports plus the new readings: the entry row on the offline
+page, the list it is in, the address it opens and the tracks on that view), `npm run typecheck` clean,
+and `npm run build` clean (a `dist/` rebuilt from the fixed source is what every GREEN reading above
+ran against).
+
+**Not verified here, and not claimed.**
+
+1. **His phone.** All of the above is Chrome at 393 × 852 on this Mac against the mock, with the app's
+   own offline mirror seeded the way the suite seeds it; the refused port is a refused port, not his
+   radio.
+2. **The grown case in the browser, as a *committed* check.** The harness's own fixtures cannot carry
+   it without dismantling v1.9.20's item-1 acceptance (the server's playlist row must stay `complete`
+   for "the downloaded playlist is marked on the one row the server draws for it", and an extra store
+   playlist would change the offline row counts those checks assert). So the browser reading above came
+   from a throwaway probe and the durable assertion is the node test — stated rather than implied.
+3. **No artifact.** See the note at the top of this section: unreleased, so no IPA/APK carries this.
+
+Raw runs: `offline-check-RED-v1.9.21-leftovers.txt`, `offline-check-GREEN-fix.txt`, `npm-test.txt` and
+`grown-row-probe.txt` (both probe readings), attached to this card (t_4009b23a).

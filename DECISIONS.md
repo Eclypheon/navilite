@@ -409,3 +409,32 @@ surfaces at once. Six decisions follow; the long form, the seams and the file:li
    re-baselined criterion's silence about *how* the tail got there is now written down in the section
    above, so no reader takes a pass from that tool for an envelope claim it never made.
 
+## 1.9.21, 2026-10-16 — the two gaps v1.9.20's review left (one playlist, one pair of numbers)
+
+Both were filed by v1.9.20's own acceptance review against item 2's "honest for a partial" and item
+3's "there whether or not the server answers", and both are small. They land unreleased, on the same
+branch as 1.9.21's race fix — no version, changelog or native field is touched by either.
+
+1. **A row's `n of m` is the playlist in front of the owner, not the manifest.** `badge.total` is what
+   was *asked for* when the playlist was downloaded; the row is drawn beside the playlist the server
+   has just described, which may be longer (the owner adds a track to a playlist he downloaded: the
+   row read `270 tracks · 269 of 269 on this phone` under the hollow mark while that playlist's own
+   page said `269 of 270 · retry`). The denominator is therefore `Math.max(badge.total, songCount)` —
+   the server's own length where it has answered, the manifest's otherwise — and the numerator stays
+   the complete files among the manifest's songs, i.e. what actually plays. The **same figures** feed
+   the sub-line and the accessible name (`… of … downloaded` is what VoiceOver reads), because the two
+   disagreeing is the same defect one layer up; and the page's own control's grown label is one
+   function so that a test can assert the row and the page agree on the numbers rather than on two
+   spellings of them.
+2. **The Library's own entry row survives the offline page.** `renderArtists` draws "On this phone"
+   synchronously, before it awaits anything, and the router's `fail` then handed the whole screen to
+   `renderOffline` — so the row the design promises "whether or not the server answers"
+   (`design-downloaded-surfaces.md` §4.1) was thrown away in exactly the case the downloaded music
+   exists for, leaving Settings → `Downloaded music: … →` as the only way in. Of the card's two
+   options, the row is **kept on the offline page for the Library's head** rather than letting the
+   Library keep its own header on the unreachable path: the offline page already *is* the Library
+   degraded (its heading, its badge, its own downloaded playlists), and the entry row is the Library's
+   own door, drawn from the store alone — so nothing about it needs the server to have answered. It is
+   appended **above** the playlists' rows in that page's one list (never a second rows list), and the
+   transport's message is still nowhere on the screen.
+

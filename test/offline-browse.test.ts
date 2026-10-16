@@ -24,6 +24,14 @@ import { OfflineStore } from '../src/state/offline.ts';
 import type { DownloadEvent, DownloadJob, DownloadsBridge, IndexRow } from '../src/state/offline.ts';
 import { loadMirror } from '../src/storage/offline.ts';
 import type { Song } from '../src/api/types.ts';
+/*
+ * **The row's own sentences** (v1.9.21). The three formatters below are what the Playlists row and
+ * the playlist page's own control print, imported from the UI rather than re-spelled here — a test
+ * that restates a format string cannot catch the format string being wrong. `src/ui/app.ts` has no
+ * module-scope DOM access (importing it boots nothing: `boot()` is what draws), so a node test can
+ * read them the way the app does.
+ */
+import { grownControlLabel, playlistRowLabel, playlistSubLine } from '../src/ui/app.ts';
 
 const song = (id: string, size = 1000): Song => ({ id, title: `Track ${id}`, artist: 'Someone', album: 'Something', duration: 10, size });
 
@@ -239,6 +247,37 @@ test('the badge is read from complete files, and a grown playlist is never calle
   // The server now says three tracks: the row must stop claiming to hold everything.
   assert.equal(store.playlistBadge('pl-1', 3).state, 'partial', 'a playlist that grew is not entirely downloaded');
 
+  /*
+   * **The row's own arithmetic, for that playlist** (v1.9.21).
+   *
+   * `badge.total` is the *manifest's* length — what was asked for when it was downloaded — and the
+   * row is drawn beside the playlist the server has just described, which here is one track longer.
+   * The defect: the row printed the manifest's number as the denominator, so this playlist read
+   * `3 tracks · 2 of 2 on this phone` under the hollow mark while its own page said `2 of 3 · retry`
+   * (the owner's shape: `270 tracks · 269 of 269 on this phone`). One fact, two numbers.
+   */
+  const grown = [covered('a', 'cover-a'), covered('b', 'cover-a'), covered('c', 'cover-a')];
+  const grownBadge = store.playlistBadge('pl-1', grown.length);
+  assert.equal(grownBadge.done, 2, 'the numerator is still the files that are here');
+  assert.equal(grownBadge.total, 2, 'and the badge still says what was asked for — the manifest’s length');
+
+  const grownRow = { id: 'pl-1', name: 'Driving', songCount: grown.length };
+  assert.equal(playlistSubLine(grownRow, grownBadge), '3 tracks · 2 of 3 on this phone', 'the row prints the playlist’s own length');
+  assert.equal(playlistRowLabel(grownRow, grownBadge), 'Open Driving, 2 of 3 downloaded', 'and so does the name VoiceOver reads');
+
+  /*
+   * …and **the page's own control prints the same pair** for that playlist: `downloadControl`'s
+   * grown label (`grownControlLabel`, called with the same store's own `missingCount`) is
+   * `2 of 3 · retry`. The two screens are asserting one fact, so the numbers must be the numbers.
+   */
+  const control = grownControlLabel(grown, store.missingCount('pl-1', grown));
+  assert.equal(control, '2 of 3 · retry', 'the playlist page’s own control');
+  assert.equal(
+    /^3 tracks · (\d+ of \d+) on this phone$/.exec(playlistSubLine(grownRow, grownBadge))?.[1],
+    /^(\d+ of \d+) · retry$/.exec(control)?.[1],
+    'the row and the page’s own control agree on the numbers',
+  );
+
   // …and a track that never landed leaves the playlist partial, with the count of what did.
   await store.download('pl-2', [covered('c', 'cover-a'), covered('d', 'cover-a')], { name: 'Stopped' });
   bridge.emit('done', { songId: 'c', path: 'file:///c.mp3', bytes: 1000 });
@@ -248,6 +287,32 @@ test('the badge is read from complete files, and a grown playlist is never calle
 
   await store.remove('pl-1');
   assert.equal(store.playlistBadge('pl-1').state, 'none', 'and a removed download is not marked at all');
+});
+
+/**
+ * The same line's transient cousin (v1.9.21): a playlist whose audio has all landed while one
+ * **lyric** is still in flight. Nothing is missing to download, the record is not `complete`, and
+ * the row reads `n of m on this phone` beside the hollow mark rather than the measured size — so it
+ * is the second shape that flows through the denominator, and it must be the playlist's length here
+ * too, not the manifest's.
+ */
+test('a grown playlist with a lyric still in flight prints the playlist’s own length as well', async () => {
+  const bridge = fakeBridge();
+  const store = new OfflineStore(bridge, { store: memoryStore(), lyricsUrl: () => 'https://music.example/lyrics?path=a' });
+  await store.download('pl-1', [covered('a', 'cover-a'), covered('b', 'cover-a')], { name: 'Driving' });
+  bridge.emit('done', { songId: 'a', path: 'file:///a.mp3', bytes: 1000 });
+  bridge.emit('done', { songId: 'b', path: 'file:///b.mp3', bytes: 1000 });
+  assert.equal(store.record('pl-1')?.state, 'downloading', 'audio in, a lyric still pending');
+
+  // The server reports four tracks: two were downloaded, two were added afterwards.
+  const badge = store.playlistBadge('pl-1', 4);
+  assert.equal(badge.state, 'partial', 'the row carries the hollow mark, not a size');
+  assert.equal(badge.done, badge.total, 'with every file that was asked for on the phone');
+  assert.equal(
+    playlistSubLine({ id: 'pl-1', name: 'Driving', songCount: 4 }, badge),
+    '4 tracks · 2 of 4 on this phone',
+    'the denominator is the playlist in front of the owner, not the manifest',
+  );
 });
 
 test('the downloaded-songs view is one row per complete file, in library order, and answers cold', async () => {

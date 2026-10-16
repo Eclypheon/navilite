@@ -1812,6 +1812,12 @@ const OFFLINE_TITLES: Record<string, string> = {
  * sentence about what does need the server. If nothing is downloaded it says that instead, and says
  * how to fix it. The message the transport produced is not rendered anywhere — it goes to the
  * console, where a developer can still see it.
+ *
+ * `head` is the route that failed, and it decides one more thing (v1.9.21): when it is the Library's
+ * own head, the Library's entry row into the downloaded music is drawn here as well, at the top of
+ * the same list. That row is not a degrade of anything — it is the Library's own door to what is on
+ * this phone, promised "whether or not the server answers" (design §4.1), and it is drawn from the
+ * store alone; without it the only way in while offline was Settings → `Downloaded music: … →`.
  */
 function renderOffline(ctx: AppContext, shell: Shell, head: string, error: unknown): void {
   console.warn('[navilite] a view that needs the server was reached with no server', error);
@@ -1831,6 +1837,16 @@ function renderOffline(ctx: AppContext, shell: Shell, head: string, error: unkno
   );
   const host = h('div', { class: 'list' });
   shell.view.append(host);
+  /*
+   * v1.9.21 — the Library's own entry row into the downloaded music stays on this page.
+   *
+   * `renderArtists` draws it synchronously, before it awaits anything, and this page used to be
+   * `shell.view` replaced whole — so the row the design promises "whether or not the server answers"
+   * (design §4.1) was thrown away in exactly the case the downloaded music exists for, and the only
+   * other way in was Settings → `Downloaded music: … →`. It goes above the playlists in this page's
+   * own list — never a second rows list, and the transport's message is still not on the screen.
+   */
+  if (head === 'artists') host.append(downloadsEntryRow(ctx));
   host.append(h('h2', { class: 'section', text: 'Downloaded' }));
   if (downloaded.length === 0) {
     host.append(
@@ -1853,7 +1869,7 @@ function renderOffline(ctx: AppContext, shell: Shell, head: string, error: unkno
  * (§2.2): the server supplies `songCount`/`duration`/`coverArt` online, and the store's manifest
  * supplies the same three offline.
  */
-interface PlaylistRowInput {
+export interface PlaylistRowInput {
   id: string;
   name: string;
   /** The playlist's length: the server's `songCount`, or the manifest's length offline. */
@@ -1884,24 +1900,60 @@ function storePlaylistInput(ctx: AppContext, entry: DownloadedPlaylist): Playlis
 }
 
 /**
+ * The figures a download row prints: **n of m**, where `n` is what is actually on the phone and `m`
+ * is the playlist in front of the owner.
+ *
+ * `badge.total` is the **manifest's** length — what was asked for when the playlist was downloaded —
+ * and the row is drawn beside the playlist the server has just described, which may be longer: the
+ * owner adds a track to a playlist he downloaded, and the row read `270 tracks · 269 of 269 on this
+ * phone` under the hollow mark while that same playlist's own page said `269 of 270 · retry`. One
+ * fact, two numbers (v1.9.21). So the denominator is the playlist's own length — the server's
+ * `songCount` where the server has answered, the manifest's otherwise — and the numerator is
+ * unchanged: the complete files among the manifest's songs, which is what actually plays from here.
+ *
+ * Both the row's sub-line and its accessible name read their numbers from here, because `… of …
+ * downloaded` is also what VoiceOver says out loud. `test/offline-browse.test.ts` asserts this pair
+ * against the one the playlist page's own control prints for the same playlist.
+ */
+export function downloadedFigures(badge: PlaylistBadge, songCount?: number): { done: number; total: number } {
+  return { done: badge.done, total: Math.max(badge.total, songCount ?? badge.total) };
+}
+
+/**
  * A playlist row's sub-line, from the store's verdict and the figures in hand.
  *
  * `complete` prints the **measured** size and says where it is (`on this phone`); a partial or live
  * download says `n of m on this phone` instead, which is the one sentence the owner's screenshot
- * needed and did not have. Nothing here ever prints `record.bytes` — that is a ceiling for a
- * download that has not happened, which is exactly the confusion the screenshot shows (`5 GB` next
- * to `269 on this phone`).
+ * needed and did not have — with `m` the playlist's own length, never the manifest's alone
+ * (`downloadedFigures`). Nothing here ever prints `record.bytes` — that is a ceiling for a download
+ * that has not happened, which is exactly the confusion the screenshot shows (`5 GB` next to
+ * `269 on this phone`).
  */
-function playlistSubLine(input: PlaylistRowInput, badge: PlaylistBadge): string {
+export function playlistSubLine(input: PlaylistRowInput, badge: PlaylistBadge): string {
   const tracks = input.songCount ?? badge.total;
   const tracksText = `${tracks} track${tracks === 1 ? '' : 's'}`;
   if (badge.state === 'complete') {
     return [tracksText, formatDuration(input.duration), `${formatBytes(badge.bytes)} on this phone`].filter(Boolean).join(' · ');
   }
   if (badge.state === 'partial' || badge.state === 'downloading') {
-    return `${tracksText} · ${badge.done} of ${badge.total} on this phone`;
+    const { done, total } = downloadedFigures(badge, input.songCount);
+    return `${tracksText} · ${done} of ${total} on this phone`;
   }
   return [tracksText, formatDuration(input.duration)].filter(Boolean).join(' · ');
+}
+
+/**
+ * The row's accessible name — the same figures as the sub-line, spoken.
+ *
+ * A row with nothing of it here is a plain `Open <name>`; a marked one says whether the whole
+ * playlist is here (`downloaded`) or how much of it is (`n of m downloaded`, from
+ * `downloadedFigures`, so the number VoiceOver reads is the number on the row).
+ */
+export function playlistRowLabel(input: PlaylistRowInput, badge: PlaylistBadge): string {
+  if (badge.state === 'none') return `Open ${input.name}`;
+  if (badge.state === 'complete') return `Open ${input.name}, downloaded`;
+  const { done, total } = downloadedFigures(badge, input.songCount);
+  return `Open ${input.name}, ${done} of ${total} downloaded`;
 }
 
 /** The mark's glyph: solid when the file is here, hollow when part of it is or it is on its way. */
@@ -1935,12 +1987,7 @@ function playlistRow(ctx: AppContext, input: PlaylistRowInput): HTMLElement {
     const marked = badge.state !== 'none';
     mark.className = marked ? `row-dl${badge.state === 'complete' ? '' : ' partial'}` : 'row-dl hidden';
     replace(mark, ...(marked ? [downloadMarkIcon(badge.state === 'complete' ? 'complete' : 'partial')] : []));
-    row.setAttribute(
-      'aria-label',
-      marked
-        ? `Open ${input.name}, ${badge.state === 'complete' ? 'downloaded' : `${badge.done} of ${badge.total} downloaded`}`
-        : `Open ${input.name}`,
-    );
+    row.setAttribute('aria-label', playlistRowLabel(input, badge));
   };
   paint();
   trackDownloadMark(paint);
@@ -2441,6 +2488,19 @@ function clearOfflineSubscriptions(): void {
 }
 
 /**
+ * The playlist page's own control, for a playlist that grew after it was downloaded: **n of m · retry**,
+ * with `m` the playlist in front of the owner and `n` what the download covers.
+ *
+ * It is one function because the Playlists row prints the *same* pair (`n of m on this phone`, from
+ * `downloadedFigures`) about the same playlist, and two screens disagreeing about one fact is the
+ * defect both of these exist to prevent (v1.9.21). `test/offline-browse.test.ts` asserts that the row
+ * and this agree.
+ */
+export function grownControlLabel(songs: Song[], missing: number): string {
+  return `${songs.length - missing} of ${songs.length} · retry`;
+}
+
+/**
  * The playlist page's download control (v1.9.12): one compact button in the header action row that
  * shows the total size and drives the §5 state machine. It renders its label from the index
  * synchronously and updates only its own label from the store's change listener — never a poll, and
@@ -2480,7 +2540,7 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
         return `${record.done} of ${record.total} · retry`;
       case 'complete': {
         // The playlist changed after it was downloaded: not complete any more, and it says so.
-        if (missing() > 0) return `${songs.length - missing()} of ${songs.length} · retry`;
+        if (missing() > 0) return grownControlLabel(songs, missing());
         // All the music is here, a cover is not: one tap fetches the covers and nothing else.
         if (missingCovers() > 0) return `✓ ${sizeLabel()} · ↓ covers`;
         return `✓ ${sizeLabel()}`;
