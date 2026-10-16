@@ -688,7 +688,10 @@ export class AudioEngine {
     el.addEventListener('timeupdate', () => {
       if (this.backend !== 'web') return;
       this.emit();
-      this.onProgress?.(this.el.currentTime * 1000, this.el.duration * 1000);
+      /* The element's own numbers, and the duration the rest of the app would show (`durationMs`):
+       * a ticker that hands an estimate the library contradicts to the lock screen's position state
+       * would be the same 70:01 through a second door (`t_972b8fc5`). */
+      this.onProgress?.(this.el.currentTime * 1000, this.durationMs());
     });
     el.addEventListener('ended', () => {
       if (this.backend !== 'web') return;
@@ -818,8 +821,7 @@ export class AudioEngine {
    * duration at all.
    */
   private reportIsAtEnd(facts: NativePlaybackFacts | undefined): boolean {
-    const measured = this.factsDurationMs(facts);
-    const durationMs = measuredDurationIsBelievable(this.track?.durationMs ?? 0, measured) ? measured : 0;
+    const durationMs = this.believableMeasuredMs(this.factsDurationMs(facts));
     if (durationMs <= 0) return this.nativeAtEnd();
     // A track shorter than the slack cannot be judged this way, and says so rather than guessing.
     if (durationMs <= NATIVE_END_SLACK_MS) return false;
@@ -1016,27 +1018,42 @@ export class AudioEngine {
   }
 
   /**
-   * Duration in ms: the native player's own when it reports one **the track's own duration does not
+   * The transport's own measurement of this item, as far as the app will take it (`t_644f6085`,
+   * `t_972b8fc5`).
+   *
+   * One spelling of the rule for the checks that judge a measurement — {@link measuredDurationIsBelievable}
+   * carries the whole of it and the files it was measured on — so a number the library contradicts
+   * reads 0 here whichever transport reported it, and the caller falls back to the track's own
+   * duration. Zero is not a duration, it is the absence of a believable measurement.
+   */
+  private believableMeasuredMs(measuredMs: number): number {
+    return measuredDurationIsBelievable(this.track?.durationMs ?? 0, measuredMs) ? measuredMs : 0;
+  }
+
+  /**
+   * Duration in ms: the transport's own when it reports one **the track's own duration does not
    * contradict**, the track metadata otherwise.
    *
-   * `t_644f6085` — the measurement is not automatically the better number, and here it is the worse
-   * one: see {@link measuredDurationIsBelievable}, which carries the whole of the rule and the four
-   * files it was measured on. What this function adds is that the rule is applied *where the number
-   * is read*, so the bar's label, the clock's clamp, the end-of-item tests and the spectrum's
-   * near-end window all get the same answer from the same place.
+   * `t_644f6085` — the measurement is not automatically the better number, and on the iOS transport
+   * it is the worse one: see {@link measuredDurationIsBelievable}, which carries the whole of the rule
+   * and the four files it was measured on. What this function adds is that the rule is applied *where
+   * the number is read*, so the bar's label, the clock's clamp, the end-of-item tests and the
+   * spectrum's near-end window all get the same answer from the same place.
    *
-   * The web path is deliberately not gated: there `el.duration` is read from the very media the
-   * browser is decoding — it is the container's own last-granule answer (Chrome reads 210.3475 s for
-   * this same file), and it is what the element's own end is judged against.
+   * **And the web path is gated by the same rule (`t_972b8fc5`), because its transport lies too.**
+   * `t_d3de2a88` measured the shipped bytes over HTTP on the three real Opus files: Chrome reads the
+   * container exactly (210.3475 s for `Tank!.opus`), but WebKit-on-iOS answers **4201.84 s** for that
+   * same file, 296.08 s and 190.14 s for the other two, MP3/FLAC within 30 ms — *digit for digit the
+   * three numbers the AVFoundation transport returns on the native path* — and the app painted 70:01
+   * on the bar and on the now screen. `el.duration` is therefore not the container's own last-granule
+   * answer as a rule; it is a measurement, and it is checked like one. Chrome's exact readings, and any
+   * track whose own duration is unknown (a stream, a blank row), keep the element's number unchanged.
    */
   private durationMs(): number {
     if (this.backend === 'native') {
-      const known = this.track?.durationMs ?? 0;
-      if (measuredDurationIsBelievable(known, this.nativeDurationMs)) return this.nativeDurationMs;
-      return known;
+      return this.believableMeasuredMs(this.nativeDurationMs) || (this.track?.durationMs ?? 0);
     }
-    if (Number.isFinite(this.el.duration) && this.el.duration > 0) return this.el.duration * 1000;
-    return this.track?.durationMs ?? 0;
+    return this.believableMeasuredMs(this.el.duration * 1000) || (this.track?.durationMs ?? 0);
   }
 
   status(): EngineStatus {

@@ -617,6 +617,12 @@ function installFakes(): {
    * chip word had no name for.
    */
   setSilent(silent: boolean): void;
+  /**
+   * The element's own `duration`, which only the browser's decoder answers (`t_972b8fc5`). Chrome
+   * reads the container exactly (210.3475 s for `Tank!.opus`); WebKit-on-iOS returns an *estimate* —
+   * 4201.84 s for that same file — which is what makes the web transport a second one that can lie.
+   */
+  setDuration(seconds: number): void;
   finishTrack(): void;
   currentSrc(): string | null;
 } {
@@ -731,6 +737,9 @@ function installFakes(): {
     },
     setSilent: (value: boolean) => {
       silence.value = value;
+    },
+    setDuration: (seconds: number) => {
+      for (const element of elements) element.duration = seconds;
     },
     finishTrack: () => {
       for (const element of elements) element.finish();
@@ -3330,6 +3339,125 @@ test('the slack separates every measurement that works from every one that does 
     const believed = measuredDurationIsBelievable(item.file, item.measured);
     say(`${item.what}: file ${item.file} ms, the transport says ${item.measured} ms → ${believed ? 'believed' : 'refused'}`);
     assert.equal(believed, item.believed, item.what);
+  }
+});
+
+/* ------------------------- the same rule on the web path (t_972b8fc5) */
+
+const webEngine = (record: Recording): AudioEngine =>
+  new AudioEngine({
+    platform: { os: 'web', native: false },
+    nativeFactory: fakeBridge(record) as unknown as EngineOptions['nativeFactory'],
+  });
+
+/**
+ * **The web transport is a second transport, and it lies the same way.** Measured by `t_d3de2a88` on
+ * the shipped `dist/` served over HTTP — `/rest/stream` answering these files, `getSong`'s duration the
+ * file's own — at 393x852, in Chrome and in WebKit (iPhone 15 Pro Simulator, iOS 18.7, WebKit 605):
+ *
+ * | file | the file (ffprobe) & `getSong` | Chrome `el.duration` | **WebKit `el.duration`** |
+ * |---|---|---|---|
+ * | `tank.opus`   | 210.3475 s | 210.3475 s | **4201.84 s** |
+ * | `other1.opus` | 210.6275 s | 210.6275 s | **296.08 s** |
+ * | `other2.opus` | 219.2875 s | 219.2875 s | **190.14 s** |
+ * | `a.mp3`       | 180.6667 s | 180.6667 s | 180.696 s |
+ * | `a.flac`      | 206.0732 s | 206.0732 s | 206.08 s |
+ *
+ * The three WebKit numbers are **digit for digit the three §1 of the duration entry measured through
+ * the vendored iOS transport** (4201.84 / 296.08 / 190.14), so Safari-on-iOS and AVFoundation share the
+ * estimator, and in WebKit the app painted *70:01* on the bar and on the now screen. `status()`
+ * answered `el.duration * 1000` for every file, which is exactly what these cases hold it to — so the
+ * recorded claim that the web path needs no gate is the one the numbers retire.
+ */
+test('a browser that calls an Opus track twenty times its length does not become the duration the app shows', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const web = webEngine(record);
+    engines.push(web);
+    const ended = new Promise<boolean>((resolve) => {
+      web.onEnded = () => resolve(true);
+    });
+    /* WebKit's own reading of the three real files, each beside the duration its own row carries. */
+    const cases: Array<{ what: string; fileMs: number; elementMs: number }> = [
+      { what: 'Tank!.opus — the owner’s track', fileMs: 210_347.5, elementMs: 4_201_840 },
+      { what: '以朋友的身份.opus', fileMs: 210_627.5, elementMs: 296_080 },
+      { what: '那些你不能给我的.opus', fileMs: 219_287.5, elementMs: 190_140 },
+    ];
+    for (const item of cases) {
+      await web.play({ ...TRACK, id: `song-${item.elementMs}`, title: item.what, durationMs: item.fileMs });
+      fakes.setDuration(item.elementMs / 1000);
+      const status = web.status();
+      say(
+        `${item.what}: the element measures ${item.elementMs} ms and the track's own duration is ${Math.round(item.fileMs)} ms → ` +
+          `the bar prints "${formatTime(status.durationMs / 1000)}" (the app holds ${Math.round(status.durationMs)} ms)`,
+      );
+      assert.equal(
+        Math.round(status.durationMs),
+        Math.round(item.fileMs),
+        `${item.what}: the track's own duration is the number the bar prints`,
+      );
+      assert.notEqual(
+        Math.round(status.durationMs),
+        item.elementMs,
+        `${item.what}: the element's own estimate is not the number the bar prints`,
+      );
+    }
+    /*
+     * And the end of the item is still heard, on the same element holding the same 4201.84 s: the
+     * boundary on this path is the element's own `ended` — a fact about the stream it decoded — and
+     * never a comparison against the number the element guessed.
+     */
+    fakes.finishTrack();
+    const heard = await Promise.race([ended, settle(200).then(() => false)]);
+    const resting = web.status();
+    say(`and the element's own \`ended\` on that same 4201840 ms element: ${heard ? 'the end was reported' : 'no end'} — the machine rests on "${resting.state}"`);
+    assert.equal(heard, true, 'the end of the track is reported to the queue');
+    assert.equal(resting.state, 'ended', 'and the machine is on the end of the track');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * The other half of the same rule: **it is a separation, not a preference.** Chrome reads the container
+ * exactly on all three Opus files (and MP3/FLAC within 30 ms), and a track whose own duration is
+ * unknown — a stream, a blank row — has nothing to check against: both keep the element's own number,
+ * which is what v1.9.5 wanted the player's number for in the first place (a re-encode is not the
+ * advertised length).
+ */
+test('a browser that reads the container exactly keeps its own number — the gate is a separation, not a preference', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const web = webEngine(record);
+    engines.push(web);
+    const cases: Array<{ what: string; fileMs: number; elementMs: number }> = [
+      { what: 'Tank!.opus', fileMs: 210_347.5, elementMs: 210_347.5 },
+      { what: '以朋友的身份.opus', fileMs: 210_627.5, elementMs: 210_627.5 },
+      { what: '那些你不能给我的.opus', fileMs: 219_287.5, elementMs: 219_287.5 },
+      { what: 'a.mp3 (CBR)', fileMs: 180_666.7, elementMs: 180_696 },
+      { what: 'a.flac (lossless)', fileMs: 206_073.2, elementMs: 206_080 },
+    ];
+    for (const item of cases) {
+      await web.play({ ...TRACK, id: `song-${item.elementMs}`, title: item.what, durationMs: item.fileMs });
+      fakes.setDuration(item.elementMs / 1000);
+      const status = web.status();
+      say(`${item.what}: the element says ${item.elementMs} ms, the track's own is ${item.fileMs} ms → the app holds ${Math.round(status.durationMs)} ms`);
+      assert.equal(Math.round(status.durationMs), Math.round(item.elementMs), `${item.what}: the element's own reading is the one used`);
+    }
+    /* Nothing to check against: the measurement is all there is, however wild it looks. */
+    await web.play({ ...TRACK, id: 'song-stream', title: 'a stream', durationMs: 0 });
+    fakes.setDuration(4_201.84);
+    const stream = web.status();
+    say(`a track with no duration of its own: the element says 4201840 ms → the app holds ${Math.round(stream.durationMs)} ms`);
+    assert.equal(Math.round(stream.durationMs), 4_201_840, 'a stream keeps the element’s own number');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
   }
 });
 

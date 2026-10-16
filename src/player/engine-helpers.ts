@@ -88,8 +88,9 @@ export const MEASURED_DURATION_SLACK_RATIO = 0.02;
  * which is what turned 3:30 into 70:01 on the bar **and** stopped every Opus track from ever being
  * judged finished — `reportIsAtEnd` compared a position of 210 s against a "duration" of 4202 s.
  *
- * **The rule, stated once:** a number the player reports is used when the track has no duration of
- * its own, or when the two agree. When they disagree beyond the slack the *library's* number stands
+ * **The rule, stated once:** a number the transport reports — the native player's, or the browser
+ * element's — is used when the track has no duration of its own, or when the two agree. When they
+ * disagree beyond the slack the *library's* number stands
  * — Navidrome's duration is computed from the file's own container (`media_file.duration` = 210.34 s
  * for this track), and the player's is what its transport could work out about a remote item.
  *
@@ -97,6 +98,17 @@ export const MEASURED_DURATION_SLACK_RATIO = 0.02;
  * within 30 ms of its file and every wrong one is out by 13% or 1900%, so nothing real sits
  * anywhere near it. `knownMs <= 0` is the one case with nothing to check against — a stream, a
  * radio item, a row whose duration is blank — and there the measurement is all there is.
+ *
+ * **The same three numbers come back through the web transport (`t_972b8fc5`).** `t_d3de2a88` measured
+ * the shipped bytes served over HTTP, `/rest/stream` answering the real files, in a browser at 393x852:
+ * Chrome reads the container exactly for all five files, but **WebKit-on-iOS (18.7, WebKit 605) answers
+ * 4201.84 / 296.08 / 190.14 s for those same three Opus files** — digit for digit the column above —
+ * with MP3/FLAC within 30 ms, and the app painted 70:01 from `el.duration`. So Safari-on-iOS shares the
+ * estimator with AVFoundation, `el.duration` is a *measurement* and not automatically the container's
+ * own answer, and this rule is applied on the web path as well: `engine.durationMs()` gates the
+ * element's number, and `el.duration` never reaches the bar, the now screen or the lock screen's
+ * position state unjudged. What it is *not* is a boundary: the web path's end of an item is the
+ * element's own `ended`, a fact about the stream it decoded, so no measurement gates it either way.
  */
 export function measuredDurationIsBelievable(knownMs: number, measuredMs: number): boolean {
   if (!Number.isFinite(measuredMs) || measuredMs <= 0) return false;
