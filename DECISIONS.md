@@ -1040,3 +1040,58 @@ The design is `docs/design-v2.0-beta.md`. This entry records the owner's decisio
 10. **Released as v2.0-beta.** The word set and the regions above are what ships: item 2 is `279cfce` and items 3-4 are `6305608`, landed on `main` unreleased on 2026-10-17 with the refactor slices around them (`9e74ca7`, `3c054d4`, `30ead77`, `deafea9`, `f10ec06`, `3ba040c`, and the P3/P4 probe `5efc3ac`). The cut is card `t_b97b252b` — the version bump, the "What's new" entry, the tag `v2.0-beta` and the artifact in one commit. What the cut does **not** touch: `CHANGELOG.md`'s earlier headings, `docs/verification.md` §30-§32 (history), and §515.4 / §833.3, which stay as written and are superseded by this entry rather than edited.
 11. **One correction the cut made to this design's own drafted words.** §6's optional housekeeping bullet claimed *"the two giant files everything else had to be read through are now a handful of small ones"* — **false, and it does not ship as written**: after the mandatory slices `src/ui/app.ts` is **2,250 lines** and `src/player/engine.ts` is **3,448**, both still the two largest files in `src/`, and the split only claims what happened — seven modules came out of them (`player-bar.ts` 351, `context.ts` 112, `now-screen.ts` 429, `shell.ts` 522, `engine-contract.ts` 358, `engine-helpers.ts` 55, `warm-pool.ts` 110). The bullet that ships says the code was split into more, smaller files and promises nothing about the two big ones being gone. Nothing else about §3.3 changes: from this release the arming window is still invisible **in the word** (colour `arming` + the chip's `spectrumArming` tooltip only), which is the narrowing §3.3 itself states.
 
+## The duration the app trusts: the library's number, not the transport's estimate, 2026-10-17 (card `t_644f6085` — unreleased)
+
+His report, his words: *"The song Tank! initially appears to be 3:30 long but when it ends or i try to seek on
+it it suddenly becomes 70:01 long — not sure how this error even came about."*
+
+1. **It was two numbers, and only one of them was about the file.** The metadata duration is right — Navidrome's
+   own row for the track (`media_file.duration` = `210.339996337891` s) agrees with the file's container
+   (`ffprobe` 210.3475 s, last Ogg page granule 10096680 at 48 kHz) and with this Mac's CoreAudio
+   (`afinfo`: "estimated duration: 210.340000"). The player's number was **4201.84 s** — the owner's *70:01*,
+   seconds-truncated — and it is not a measurement of anything: it is `AVPlayerItem.duration` for an
+   `AVURLAsset` built with **`AVURLAssetPreferPreciseDurationAndTimingKey: false`**, which is the value *this
+   project writes* (`tools/patch-native-audio.mjs`, patch `ios-precise-duration`, v1.9.2, for time to first
+   sound). With precise duration off AVFoundation estimates instead of reading the container, and for Ogg/Opus
+   — the one container it cannot index from the header — the estimate is fiction.
+2. **Which side is wrong, plainly: the measurement, and the app for trusting it.** Measured here through the
+   vendored transport's own classes (a Swift probe on this machine's AVFoundation, over HTTP with range
+   requests), with the flag this project ships and with it flipped:
+
+   | file | the file (ffprobe) | shipped (`precise: false`) | `precise: true` |
+   |---|---|---|---|
+   | `01 - Tank!.opus` | 210.3475 s | **4201.84 s** | 210.3335 s |
+   | `以朋友的身份.opus` | 210.6275 s | 296.08 s | 210.6135 s |
+   | `那些你不能给我的.opus` | 219.2875 s | 190.14 s | 219.2735 s |
+   | `a.mp3` (CBR) | 180.6667 s | 180.696 s | 180.6667 s |
+   | `a.flac` (lossless) | 206.0732 s | 206.080 s | 206.0732 s |
+
+   **The estimate is only wrong for Opus, and it is wrong in both directions** (20× long for one track, 13 %
+   *short* for another), while MP3 and FLAC come back within 30 ms. So "Opus files are the affected class, and
+   MP3/FLAC are not" is measured, not assumed.
+3. **What the wrong number cost, which was more than the label.** v1.9.5's rule was "the player's own numbers
+   replace our guesses about them", and it ran unqualified: the estimate was adopted on the first state report
+   (`nativeDurationMs`) and again on every seek (`sync()` → `getDuration`), so the bar's total read 70:01 beside
+   a 3:30 track — *"when i try to seek on it it suddenly becomes 70:01"* — **and `reportIsAtEnd` compared a
+   position of 210 s against a "duration" of 4202 s, so the not-playing report at every Opus track's true end
+   was read as an *interruption* and the queue never moved on.** The reported symptom and a boundary that never
+   fired are the same defect.
+4. **The rule, and it is stated once** (`src/player/engine-helpers.ts:measuredDurationIsBelievable`, applied
+   where the number is read — `engine.durationMs()` — and where the facts are judged — `engine.reportIsAtEnd`):
+   *a duration the player reports is used when the track has no duration of its own, or when the two agree
+   within the larger of 1 s and 2 %; otherwise the library's number stands, and the reason line says both
+   numbers so the next device report explains itself.* The slack is a **separation, not a preference**: every
+   working measurement above is within 30 ms of its file and every wrong one is out by 13 % or 1900 %, so
+   nothing real sits near it. The player's own number is still kept verbatim in `pluginState` — the phone's
+   account stays the phone's account — and nothing about the patch in §1 changes: **precise duration stays
+   off**, because re-enabling it is a full-file read before playback, which is the regression the card forbids.
+5. **What is deliberately *not* gated: the web path.** There `el.duration` is read from the very media the
+   browser is decoding (Chrome reads 210.3475 s for this same file, exactly) and it is what the element's own
+   end is judged against. Calling that "less trustworthy than the metadata" would be false, and v1.9.5's
+   reason for preferring the player's number (the advertised length of a re-encode) still holds on that path.
+6. **Unreleased, as the card requires**: no version bump, no tag, no artifact. Proof on the harness that owns
+   these numbers (`test/engine-native.test.ts`, 3 tests added; `npm test` 266/266, `npm run typecheck` and
+   `npm run build` clean): with the transport reporting 4201.84 s for a 210.3475 s track the bar's number stays
+   **3:30** (`pluginState` still carrying the phone's `4201.8`), a seek that answers 4201840 ms does not bring
+   it in either, and **the end of that track is still reported to the queue** — the machine rests on `ended`
+   rather than on an interruption.

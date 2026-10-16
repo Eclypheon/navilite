@@ -46,7 +46,7 @@ import { platformInfo, type OsName } from '../platform.ts';
 import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativePlaybackFacts, type NativeSpectrumFrame } from './native.ts';
 import { STOPPED_WORD, reduce } from './engine-contract.ts';
 import type { EngineOptions, EngineState, EngineStatus, PlaybackBackend, PlayerEvent, QueueStatement, TrackRequest, VisualiserTone, VisualiserWord } from './engine-contract.ts';
-import { askedRate, spectrumChecksum, withDeadline } from './engine-helpers.ts';
+import { askedRate, measuredDurationIsBelievable, spectrumChecksum, withDeadline } from './engine-helpers.ts';
 import { WarmPool } from './warm-pool.ts';
 
 /**
@@ -806,9 +806,20 @@ export class AudioEngine {
    * `duration`, which is the only pair of numbers that describe the item actually being held.
    * Without them the app falls back to what it has (`nativeAtEnd`: its own position reading
    * against its own duration), which is the reading v1.9.0 introduced.
+   *
+   * **And a report that contradicts the track's own duration is not evidence about this item
+   * (`t_644f6085`).** The pair of numbers in the facts describes whatever the *transport* believes
+   * the item to be, and on the iOS build the transport's duration is an estimate AVFoundation makes
+   * about a container it was told not to read (`AVURLAssetPreferPreciseDurationAndTimingKey: false`):
+   * 4201.84 s for this 210.35 s Opus track. Compared against that, a real end never lands — so the
+   * not-playing report at the end of every Opus track was read as an *interruption*, and the queue
+   * never moved on. A measurement the track's own duration contradicts is therefore dropped here, and
+   * the app's own reading (`nativeAtEnd`) decides instead, exactly as it does when the plugin sent no
+   * duration at all.
    */
   private reportIsAtEnd(facts: NativePlaybackFacts | undefined): boolean {
-    const durationMs = this.factsDurationMs(facts);
+    const measured = this.factsDurationMs(facts);
+    const durationMs = measuredDurationIsBelievable(this.track?.durationMs ?? 0, measured) ? measured : 0;
     if (durationMs <= 0) return this.nativeAtEnd();
     // A track shorter than the slack cannot be judged this way, and says so rather than guessing.
     if (durationMs <= NATIVE_END_SLACK_MS) return false;
@@ -1004,9 +1015,26 @@ export class AudioEngine {
     return duration > 0 ? Math.min(position, duration) : position;
   }
 
-  /** Duration in ms: the native player's own when it reports one, the track metadata otherwise. */
+  /**
+   * Duration in ms: the native player's own when it reports one **the track's own duration does not
+   * contradict**, the track metadata otherwise.
+   *
+   * `t_644f6085` — the measurement is not automatically the better number, and here it is the worse
+   * one: see {@link measuredDurationIsBelievable}, which carries the whole of the rule and the four
+   * files it was measured on. What this function adds is that the rule is applied *where the number
+   * is read*, so the bar's label, the clock's clamp, the end-of-item tests and the spectrum's
+   * near-end window all get the same answer from the same place.
+   *
+   * The web path is deliberately not gated: there `el.duration` is read from the very media the
+   * browser is decoding — it is the container's own last-granule answer (Chrome reads 210.3475 s for
+   * this same file), and it is what the element's own end is judged against.
+   */
   private durationMs(): number {
-    if (this.backend === 'native') return this.nativeDurationMs || this.track?.durationMs || 0;
+    if (this.backend === 'native') {
+      const known = this.track?.durationMs ?? 0;
+      if (measuredDurationIsBelievable(known, this.nativeDurationMs)) return this.nativeDurationMs;
+      return known;
+    }
     if (Number.isFinite(this.el.duration) && this.el.duration > 0) return this.el.duration * 1000;
     return this.track?.durationMs ?? 0;
   }
@@ -1459,8 +1487,25 @@ export class AudioEngine {
            * different master, a stream that ends early). Everything that asks "are we at the end"
            * asked that question against the wrong number. The player answers it itself now, in
            * every state report, and that answer is the one used from here on.
+           *
+           * **Except where that answer is not about this item at all (`t_644f6085`).** The number is
+           * still kept here, verbatim, because `pluginState` is the phone's own account and the
+           * account is what makes a device-only failure readable — but a measurement the track's own
+           * duration contradicts never reaches the screen: `durationMs()` reads the same rule
+           * (`measuredDurationIsBelievable`) when it decides what to show, and says so here while it
+           * is doing it, which is what tells a reader of the reason line that the 70:01 beside the
+           * 3:30 came from the transport and not from the library.
            */
-          if (factDurationMs > 0) this.nativeDurationMs = factDurationMs;
+          if (factDurationMs > 0) {
+            const knownMs = this.track?.durationMs ?? 0;
+            if (!measuredDurationIsBelievable(knownMs, factDurationMs) && knownMs > 0) {
+              this.modeReason =
+                `the player measures this item at ${(factDurationMs / 1000).toFixed(1)} s and the track's own ` +
+                `duration is ${(knownMs / 1000).toFixed(1)} s — the track's is the number shown, the player's is an ` +
+                `estimate about a container its transport never read`;
+            }
+            this.nativeDurationMs = factDurationMs;
+          }
           if (Number.isFinite(facts?.currentTime)) this.setNativePosition(Math.max(0, (facts?.currentTime as number) * 1000));
           /*
            * **The end of a track is decided from the facts, not from one spelling of one state

@@ -30,6 +30,8 @@ import { reduce } from '../src/player/engine-contract.ts';
 import type { EngineOptions, EngineState, EngineStatus, PlayerEvent, VisualiserTone } from '../src/player/engine-contract.ts';
 import type { NativeBridge, NativeBridgeEvents, NativeTrackInfo, NativeTruth } from '../src/player/native.ts';
 import type { TrackRequest } from '../src/player/engine-contract.ts';
+import { measuredDurationIsBelievable } from '../src/player/engine-helpers.ts';
+import { formatTime } from '../src/ui/dom.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
 import type { Library } from '../src/state/library.ts';
 import type { QueueContext, Song } from '../src/api/types.ts';
@@ -3197,6 +3199,137 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
   } finally {
     fakes.restore();
     await stopAll(engines);
+  }
+});
+
+/* ------------------------- the duration the app trusts (t_644f6085) */
+
+/**
+ * The owner, 2026-10-17:
+ *
+ *   *"The song Tank! initially appears to be 3:30 long but when it ends or i try to seek on it it
+ *   suddenly becomes 70:01 long — not sure how this error even came about."*
+ *
+ * It came about on the iOS transport. `RemoteAudioAsset` builds its item from an `AVURLAsset` with
+ * `AVURLAssetPreferPreciseDurationAndTimingKey: false` — a value this project writes
+ * (`tools/patch-native-audio.mjs`, for time to first sound) — so AVFoundation estimates the duration
+ * instead of reading the container, and for Opus (an Ogg container it cannot index from the header)
+ * the estimate is fiction: **4201.84 s for this 210.3475 s file**, 296.08 s for a 210.63 s one,
+ * 190.14 s for a 219.29 s one; MP3 and FLAC come back within 30 ms. The rules under test are the two
+ * readings that adopted it: the state report (`durationMs()`), and the seek's own answer (`sync()`).
+ */
+test('a transport that measures an Opus track at twenty times its length does not become the duration the app shows', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    /* The track Navidrome serves: `media_file.duration` 210.33999 s, ffprobe 210.3475 s. */
+    const TANK: TrackRequest = { ...TRACK, title: 'Tank!', durationMs: 210_347.5 };
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TANK);
+    await settle(120);
+    assert.equal(engine.status().state, 'playing');
+
+    /*
+     * The plugin's own state report for this item, verbatim: what the phone says the item is. From
+     * the first report on, v1.9.5 lets the player's numbers replace the app's — and until this card
+     * that meant the bar's duration label became 70:01 while the sound was 3:30.
+     */
+    record.events?.onState('playing', true, { currentTime: 12.4, duration: 4201.84, reason: 'playing' });
+    await settle(120);
+    const playing = engine.status();
+    say(
+      `the transport reports 4201.84 s for the 210.3475 s track: the bar would print ` +
+        `"${formatTime(playing.durationMs / 1000)}" — the app holds ${Math.round(playing.durationMs)} ms — and the reason line reads "${playing.modeReason}"`,
+    );
+    assert.equal(Math.round(playing.durationMs), 210_348, 'the track’s own duration is the number the app shows');
+    assert.ok(
+      (playing.pluginState ?? '').includes('4201.8'),
+      `and the phone's own number is still said, verbatim, in the account of what it said: ${playing.pluginState}`,
+    );
+
+    /* The seek path: the same answer, this time to a direct question (`sync()` → `getDuration`). */
+    record.truth = { playing: true, positionMs: 40_000, durationMs: 4_201_840 };
+    await engine.seek(40_000);
+    await settle(120);
+    const afterSeek = engine.status();
+    say(
+      `and after a seek, with the player answering 4201840 ms: ${Math.round(afterSeek.durationMs)} ms — ` +
+        `position ${Math.round(afterSeek.positionMs)} ms (${afterSeek.modeReason})`,
+    );
+    assert.equal(Math.round(afterSeek.durationMs), 210_348, 'a seek does not bring the estimate in either');
+    assert.ok(afterSeek.positionMs >= 39_000, 'while the seek itself still lands where it was asked to');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * The other half of the same defect, and the one that cost him more than the label: **the track never
+ * ended.** `reportIsAtEnd` compared the item's own position (210 s) against the transport's estimate
+ * (4201.84 s), decided the item was in the middle, and read the not-playing report at the true end as
+ * an *interruption* — so the queue stayed parked on that track for ever.
+ */
+test('the end of an Opus track is heard even though the transport says the item is twenty times longer', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    const TANK: TrackRequest = { ...TRACK, title: 'Tank!', durationMs: 210_347.5 };
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    const ended = new Promise<boolean>((resolve) => {
+      const previous = engine.onEnded;
+      engine.onEnded = () => {
+        previous?.();
+        resolve(true);
+      };
+    });
+    await engine.play(TANK);
+    /* No transport of our own after this, so nothing is muted as "describing our request". */
+    await settle(1700);
+    /* AVFoundation's own end of the item: position 210.33 s, and the same 4201.84 s estimate. */
+    record.truth = { playing: false, positionMs: 210_333, durationMs: 4_201_840 };
+    record.events?.onState('paused', false, { currentTime: 210.33, duration: 4201.84, reason: 'stopped' });
+    const heard = await Promise.race([ended, settle(400).then(() => false)]);
+    const resting = engine.status();
+    say(
+      `the item's own end, with the transport calling itself ${(4201.84).toFixed(1)} s long: ` +
+        `${heard ? 'the end was reported' : 'no end'} — the machine rests on "${resting.state}"`,
+    );
+    assert.equal(heard, true, 'the end of the track is reported to the queue');
+    assert.equal(resting.state, 'ended', 'and the machine is on the end of the track, not interrupted');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * The rule itself, on the numbers it was measured against — so a future change to the slack has to
+ * face the files that motivated it. Every `measured` value below is what this machine's AVFoundation
+ * answered through the vendored transport, over HTTP with range requests, with the flag this project
+ * writes; every `file` value is that file's own duration (ffprobe, and Navidrome's `media_file` row
+ * agrees to the millisecond for the first one).
+ */
+test('the slack separates every measurement that works from every one that does not', () => {
+  const cases: Array<{ what: string; file: number; measured: number; believed: boolean }> = [
+    { what: 'Tank!.opus — the owner’s track', file: 210_347.5, measured: 4_201_840, believed: false },
+    { what: '以朋友的身份.opus', file: 210_627.5, measured: 296_080, believed: false },
+    { what: '那些你不能给我的.opus', file: 219_287.5, measured: 190_140, believed: false },
+    { what: 'a.mp3 (CBR)', file: 180_666.7, measured: 180_696, believed: true },
+    { what: 'a.flac (lossless)', file: 206_073.2, measured: 206_080, believed: true },
+    /* The one case with nothing to check against: a stream, a radio item, a blank row. */
+    { what: 'a track whose own duration is unknown', file: 0, measured: 4_201_840, believed: true },
+    /* And a player that has not answered yet is not a measurement. */
+    { what: 'a player that has said nothing', file: 210_347.5, measured: 0, believed: false },
+  ];
+  for (const item of cases) {
+    const believed = measuredDurationIsBelievable(item.file, item.measured);
+    say(`${item.what}: file ${item.file} ms, the transport says ${item.measured} ms → ${believed ? 'believed' : 'refused'}`);
+    assert.equal(believed, item.believed, item.what);
   }
 });
 
