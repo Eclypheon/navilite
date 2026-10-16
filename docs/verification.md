@@ -3226,3 +3226,179 @@ Raw runs (this machine's agent scratch, `/Users/neokester/.hermes/profiles/nerd/
 `typecheck-1926.txt`, `npm-test-1926.txt`, `offline-check-1926.txt`, `spectrum-proof-1926.txt`,
 `ipa-build-1926.txt`; the readings they hold are condensed into `release-1.9.26-evidence.txt`, attached to the
 release card `t_77e69a9b`.
+
+## 30. the browser's own first-frame window was wearing the capability word — the web half of §515's word (2026-10-16, card `t_71dc787e`, unreleased)
+
+**No version is bumped, no IPA/APK is built, no tag is written and the `CHANGELOG.md` release heading is
+untouched.** This is the fix, its two harnesses, `DECISIONS.md` §t_71dc787e and this record — an unreleased fix
+like its predecessor (`d769fd4`), whose release was its own card.
+
+### 30.1 The defect
+
+Sage, verifying `t_9329e3b0`, read the real app in Chrome at 393 x 852 over the mock library (`d769fd4`) and
+printed the probe's own word list — **every distinct word the chip wore, with the state it wore it in**:
+
+```
+384 ms  "theme"      (the chip changed, state playing)
+512 ms  "spectrum"   (the chip changed, state playing)
+```
+
+`theme` is the amber `fallback` tone and it means *"this browser has no Web Audio, or this item's samples are not
+real"*. The transport was **playing**, the graph was built, and the bars arrived 128 ms later — so the app was
+announcing the loss of a capability it has. At `8689a2e` the same window is 99 ms, i.e. pre-existing, not a
+regression from the v1.9.26 fix.
+
+The licence it was reached by is the second one in `visualiserWord`:
+
+```
+if (this.state === 'playing') return this.backend === 'native' ? 'native audio' : 'theme';
+```
+
+— taken whenever the bars were not being fed. The native path has a word for "installed, not answered yet"
+(`arming`, v1.9.6, which v1.9.26 made the chip's own); the web path had **no window at all** between
+`createMediaElementSource` and the analyser's first real frame, so that window fell through to the capability
+claim. The same window exists on the web path at a **resume** (the meter's first sample after `playing` returns),
+which the card did not name and this record does: at `d769fd4` the pre-fix run wore `3139 ms "theme"` →
+`3254 ms "spectrum"` at the resume, i.e. 115 ms of amber on a stream that was measuring fine.
+
+### 30.2 What changed
+
+| file | why |
+| --- | --- |
+| `src/player/engine.ts` | **the web path's arming window, from its own register** — `analyserArming()` is true when the backend is `web`, an analyser exists, `spectrumLive` is false and fewer than `ZERO_FRAMES_BEFORE_THEME` (18) frames have come back unusable; `status()` computes `spectrumArming` as *playing* AND (`spectrumArming` \|\| `analyserArming()`), the same question asked of the two ways of measuring, and never true while `spectrum` is true. `startWeb` clears `zeroFrames` / `identicalFrames` / `lastChecksum` for the item that is starting — the web half of `forgetTapFrames` (v1.9.24) — so a new item's window and verdict are its own. `visualiserWord`'s playing branch (the licence) is now reached on this path only by the item's own verdict, and the comment there says so. No word was added and no word was removed |
+| `README.md` | one sentence: `spectrum…` is worn *"while the tap or the analyser is still answering for it"* — it said *native tap* only |
+| `test/engine-native.test.ts` | the fake analyser can now answer **nothing** (`setSilent`), and the new case drives the window, that item's own verdict, the verdict surviving a pause and a resume, the bars and the word coming back on a real frame, and a track change onto an unmeasurable item wearing *its own* window |
+| `test/chip-word-browser.test.ts` | the probe can be asked to **linger** on the last item, the word list now carries the reason at each change, the ordinary run asserts **no capability word while `state === 'playing'`**, and a **second run** over a library the app is cross-origin with (`--no-cors-stream`) asserts the other half: `spectrum…` first, then the item's own verdict as `theme`, with the sentence that names it |
+
+### 30.3 The fail-before, and the same checks after
+
+Both harnesses first ran against the tree as it stood before the fix (`HEAD`, `28e7e91`).
+
+**The engine, on the fake analyser** — the window, with an analyser that has answered nothing:
+
+```
+$ node --test --test-name-pattern 'web path wears the spectrum' test/engine-native.test.ts   # before
+    1. web, playing, the analyser has answered nothing: state playing, spectrum false, arming false — the chip reads "theme"
+✖ the web path wears the spectrum’s own word until its analyser has answered for the item, and the capability word only when it has (t_71dc787e)
+  AssertionError: the spectrum is coming — not the word for a browser that cannot measure this item
+  + 'theme'
+  - 'spectrum…'
+ℹ tests 1 · pass 0 · fail 1
+```
+
+and after:
+
+```
+    1. web, playing, the analyser has answered nothing: state playing, spectrum false, arming true — the chip reads "spectrum…"
+    2. 700 ms later, still answering nothing: arming true — the chip reads "spectrum…"
+    3. the item’s own verdict: spectrum false, arming false — the chip reads "theme" (the analyser returned silence — a tainted cross-origin stream gives zeroes with no error)
+    4. paused and resumed: the chip reads "theme"
+    5. the analyser answers: spectrum true, arming false — the chip reads "spectrum"
+    6. a change onto an item whose samples answer nothing: state playing, arming true — the chip reads "spectrum…"
+✔ the web path wears the spectrum’s own word until its analyser has answered for the item, and the capability word only when it has (t_71dc787e)
+ℹ tests 1 · pass 1 · fail 0
+```
+
+**The real app in Chrome, the ordinary run** (`dist/` rebuilt from each tree; the same probe, the same screen):
+
+```
+$ node --test --test-name-pattern 'the chip’s word on the screen he photographed' test/chip-word-browser.test.ts   # before
+      every distinct word the chip wore (18):
+           313 ms  "loading…"   (the chip changed, state loading)
+           343 ms  "theme"      (the chip changed, state playing)      ← the defect, on the screen
+           466 ms  "spectrum"   (the chip changed, state playing)
+           ...
+          3139 ms  "theme"      (the chip changed, state playing)      ← and again at the resume
+          3254 ms  "spectrum"   (the chip changed, state playing)
+      and worn while it WAS playing: ["theme","spectrum"]
+✖ the chip’s word on the screen he photographed: a paused track on a playlist page is not a capability claim
+  AssertionError: and no capability word is worn while the item playing can be measured — the window in front of the item’s first frame is the spectrum’s own word
+```
+
+```
+# after
+      every distinct word the chip wore (18):
+           281 ms  "loading…"    (the chip changed, state loading)
+           315 ms  "spectrum…"   (the chip changed, state playing)     ← the window, in the arming tone
+           447 ms  "spectrum"    (the chip changed, state playing)
+           ...
+          3271 ms  "spectrum…"   (the chip changed, state playing)     ← the resume, same word
+          3384 ms  "spectrum"   (the chip changed, state playing)
+      distinct words across the run: ["loading…","spectrum…","spectrum","paused"]
+      of those, worn while the transport was not playing: ["loading…","paused"] (8 changes)
+      and worn while it WAS playing: ["spectrum…","spectrum"]
+✔ the chip’s word on the screen he photographed: a paused track on a playlist page is not a capability claim
+```
+
+The window is 132 ms wide here and wears the word §515.4 gave it; before, those 123 ms were the amber
+capability word. The readings at each named state (`paused` on a playlist page and on the playlists screen, the
+now-playing screen's one node, `spectrum` after a resume and after a change) are unchanged by this card.
+
+### 30.4 The second run: a stream the browser will not hand over
+
+The card's second acceptance clause — *on a stream that genuinely cannot be measured, `theme` still appears and
+still names the verdict* — cannot be produced by the ordinary run, because that mock serves the app **and** the
+library from one origin, so `client.isCrossOrigin` is false and every stream is measurable. The file therefore
+drives the same probe a second time, with two changes that are the app's own decision path rather than a fixture
+invention:
+
+- the page is fetched from `127.0.0.1` and the settings name `localhost` — different origins, so
+  `isCrossOrigin` is true and the element asks for `crossOrigin="anonymous"`;
+- the mock runs `--no-cors-stream`, so `/rest/stream` answers without `Access-Control-Allow-Origin` while the API
+  keeps its CORS headers. That is §4's case, measured by hand on 2026-10-11, here on a harness.
+
+Before, on this run, the app concluded from the first paint and never asked:
+
+```
+           344 ms  "error"     (the chip changed, state error) — the library refused cross-origin sample access for this stream, so the analyser ...
+           373 ms  "theme"     (the chip changed, state playing) — the library refused cross-origin sample access ...
+      while playing: ["theme","theme","theme","theme","theme","theme","theme","theme","theme"] — first "spectrum…" at never, first "theme" at 344 ms
+✖ on a stream the browser will not hand over, the chip still reaches the capability word and names the verdict (t_71dc787e)
+```
+
+After — and this run is also what shows the register is **per item** (each change starts that item's own 1.8 s):
+
+```
+      while playing: ["spectrum…","spectrum…","spectrum…","spectrum…","spectrum…","spectrum…","spectrum…","spectrum…","theme","theme"] — first "spectrum…" at 348 ms, first "theme" at 5274 ms
+      and the item watched on (7508 ms): chip "theme" · spectrum false · arming false — the analyser returned silence — a tainted cross-origin stream gives zeroes with no error
+✔ on a stream the browser will not hand over, the chip still reaches the capability word and names the verdict (t_71dc787e)
+```
+
+So on the surface that can produce it, the capability word is still reachable, still names the verdict, and now
+arrives **after** the window rather than instead of it. The reason line is the app's own `silenceReason`.
+
+### 30.5 The suite, and what is not claimed
+
+```
+$ npm run typecheck                       # clean
+$ npm test                                # 262 tests, 262 pass, 0 fail, 0 cancelled, 0 skipped, 36.3 s
+$ npm run build                           # dist/ rebuilt from this tree before the browser runs
+$ node --test test/chip-word-browser.test.ts   # 2 runs of the probe, both pass (5.3 s + 8.1 s)
+```
+
+Two more tests than v1.9.26's 260, and one more Chrome run: the two new cases are the engine's window/verdict
+case and the tainted-stream run of the same probe.
+
+1. **His phone is not touched and not claimed.** This card changes no native behaviour: the file's native half
+   (`hasSpectrumTap`, `arming`, `ZERO_POLLS_BEFORE_THEME`, every verdict) is byte-for-byte what Sage verified on
+   `t_1c2d1c51`. What he would see differently is on the web page / PWA only, and only as `spectrum…` where an
+   amber `theme` used to flash — a claim about the code path, not a reading off his screen.
+2. **The native path's resume window is found, measured, and NOT fixed here** — `state playing, spectrum false,
+   arming false` the instant `resume()` is called on the fake bridge, i.e. the word is `native audio` for one
+   bridge round trip on an item that was measuring a moment ago. It needs a third fact (this item's verdict) so
+   that re-arming does not overwrite §515's silence verdict, and it needs his phone to verify; it is filed as this
+   card's follow-up rather than folded in. `DECISIONS.md` §t_71dc787e.5.
+3. **The ~1.8 s per item on a genuinely unmeasurable stream is a decision, and it is stated**: each item earns its
+   own verdict (18 analyser frames of its own), which is what "per item" costs. Nothing here claims a faster
+   verdict, and no clock was introduced to get one.
+4. **`theme` is still reachable while playing** — by design, on an item whose own samples have answered. The
+   ordinary browser run's word list is clean of it because that library's streams are measurable; that is a fact
+   about the fixture, stated here rather than used as evidence about the word.
+5. **No artifact, no version, no tag, nothing about the APK or the IPA.** §29's artifact is untouched and the
+   `dist/` this card rebuilt is a build of the working tree, not a release.
+
+Raw runs (this machine's agent scratch, `/Users/neokester/.hermes/profiles/nerd/cache/scratch/runs-t_71dc787e/`):
+`engine-web-window-before.txt`, `engine-web-window-after.txt`, `chip-word-browser-before.txt`,
+`chip-word-browser-after.txt`, `tainted-probe-first-pass.txt` (the tainted run's first pass, kept because it is
+what showed the verdict needs the item's own 1.8 s), `npm-test-after.txt`, `typecheck.txt`.
+

@@ -699,3 +699,73 @@ The owner, on the v1.9.24 build he had just installed, with a track loaded and *
    of `docs/VERSIONING.md` §3, the changelog entry in his terms in both copies, the IPA, and §29 of
    `docs/verification.md`. The fix commit itself carried none of those; the code in it is unchanged by the cut.
 
+## The browser's own first-frame window is the spectrum's word, not a capability verdict, 2026-10-16 (card `t_71dc787e` — unreleased)
+
+Sage, out of the verification of `t_9329e3b0`/`t_1c2d1c51`, measured in Chrome at 393 x 852 over the mock library
+(the real app at `d769fd4`), reading `test/chip-word-browser.test.ts`'s own word list:
+
+```
+384 ms  "theme"      (the chip changed, state playing)
+512 ms  "spectrum"   (the chip changed, state playing)
+```
+
+`theme` — the amber `fallback` tone, the word for *"this browser has no Web Audio, or the samples are not real"* —
+for 128 ms at the start of a track, while the transport was **playing** and the Web Audio graph was built and
+working. Same at `8689a2e` (99 ms), so it is pre-existing, not a regression from the v1.9.26 fix. The licence it was
+reached by is the second one in `visualiserWord` (`if (this.state === 'playing') return native ? 'native audio' :
+'theme'`), taken whenever the bars were not being fed; the native path has a word for "the tap has not answered yet"
+(`arming`, v1.9.6) and the web path had none, so its own first-frame window fell through to the claim that the app
+cannot measure the item it is measuring. **By the invariant's own words that is a defect**: at that moment the app
+*does* have the capability and the chip says it does not. It is user-visible on the web page / PWA — the third way
+he uses the app — not on the phone, and not the word in his screenshot, hence its own card rather than a SEND BACK.
+
+1. **The decision, first, because the vocabulary has a trap in it: no new word was needed, and the capability word
+   was not replaced.** `spectrum…` already means exactly this — *"an item is playing and the thing that measures it
+   has not answered for it yet"* (§515.4, the owner's call of 2026-10-16, unchanged) — so **no new vocabulary was
+   added and no owner's call was required for one.** The trap: a blanket `theme` → `spectrum…` while playing would
+   delete the statement the word exists for. A cross-origin stream the library will not hand over, or an analyser
+   producing silence for ever, *is* "the spectrum cannot run on this item" and must keep saying `theme`. So the two
+   states are separated by the register the web path already keeps for its verdict — `zeroFrames` — and not by the
+   transport or by a clock.
+2. **The rule, in one place:** `analyserArming()` — `backend === 'web'`, an analyser exists, `spectrumLive` is
+   false, and fewer than `ZERO_FRAMES_BEFORE_THEME` (18, at the meter's 100 ms) frames have come back unusable.
+   `status()` computes `spectrumArming` as *the transport is playing* AND (`spectrumArming` || `analyserArming()`),
+   which is the same question asked of the two ways of measuring — *has the thing that measures this item answered
+   for it yet?* The field is exact: it is never true while `spectrum` is true (a live frame resets the counter, so
+   the `spectrumLive` check is half the question and the first half), and `visualiserWord` still checks `spectrum`
+   first. The playing branch at the bottom of `visualiserWord` — the licence — is now reached on this path **only**
+   by the item's own verdict: `ZERO_FRAMES_BEFORE_THEME` analyser frames of silence (the tainted cross-origin
+   stream, or an analyser producing nothing) or one frozen frame over and over, with `silenceReason` naming which.
+3. **The register is per item, which is the web half of `tapFramesForItem`** (v1.9.24's rule on the native side):
+   `startWeb` clears `zeroFrames`, `identicalFrames` and `lastChecksum` for the item that is starting, before the
+   element plays. Read as this item's own answer, an item that has just started an unmeasurable stream wears its
+   own `spectrum…` first and then its own verdict — never the verdict the previous item's samples left behind. The
+   cost is named rather than hidden: a genuinely unmeasurable stream is announced ~1.8 s into *each* item; the
+   alternative is a verdict about one item spent on another, which is the class of defect the last three releases
+   have been about.
+4. **What it does not change.** The silenced / frozen / tainted verdicts still reach `theme` and still name the
+   case (measured below, in a browser). The v1.9.26 words are otherwise untouched: the transport's own word for
+   every stopped state, one source (`EngineStatus.visualiser`), and the **native path is not modified at all** —
+   `hasSpectrumTap`, `arming`, `ZERO_POLLS_BEFORE_THEME` and every native verdict behave exactly as Sage verified
+   them. The chip's UI file is untouched: it prints the engine's field and nothing else.
+5. **A window of the same class was found on the native path while fixing this one, and it is deliberately NOT
+   fixed here — it is its own card.** On the native path a **resume** reaches `playing` with no frame in hand and
+   with `spectrumArming` left false (the flag is only set by a load, an adoption, or a poll that found nothing), so
+   `visualiserWord` is reached by the licence for one bridge round trip. Measured on the fake bridge
+   (`test/engine-native.test.ts`), the instant `resume()` is called:
+
+   ```
+   state playing, spectrum false, arming false — the chip reads "native audio"
+   ```
+
+   Fixing it is **not** the one-line `spectrumArming = true`: on the native path `(spectrumLive, spectrumArming) =
+   (false, false)` while playing is also how a *reached verdict* looks (a tap that has read silence or one frozen
+   frame for the whole track), and re-arming there would re-open "the spectrum is coming" over an item the engine
+   has already ruled out — §515's silence verdict, which the owner has asked for twice. It needs a third fact
+   (this item's verdict, as a field) and it needs his phone to verify, so it is filed as `t_71dc787e`'s follow-up
+   card rather than folded in here. On the **web** path the same window is already closed by this entry, because
+   the register that decides the verdict is the register the window is read from.
+6. **Unreleased, like its predecessor.** No version bump, no `CHANGELOG.md` heading, no artifact, no tag: the fix,
+   its harnesses, this entry and §30 of `docs/verification.md` are the commit. The release that carries it is its
+   own card, after review.
+

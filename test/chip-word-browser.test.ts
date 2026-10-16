@@ -25,11 +25,23 @@
  * run says "one node, one field" — not "both surfaces show the word".
  *
  * What a browser cannot show, said here rather than implied: this build's backend is `web`, so the
- * capability word this path reaches is `theme` (no WebAssembly-free Web Audio, or a stream the
- * browser will not hand over) — **not** the `native audio` in his screenshot, which belongs to the
- * Capacitor shell's own engine. That word is reproduced on the fake-bridge harness
+ * capability word this path reaches is `theme` (no Web Audio at all, or a stream the browser will not
+ * hand over) — **not** the `native audio` in his screenshot, which belongs to the Capacitor shell's
+ * own engine. That word is reproduced on the fake-bridge harness
  * (`test/engine-native.test.ts`, the v1.9.26 case), where the native backend exists. The finding is
  * the same one on both paths: a stopped transport reaching the branch that is about capability.
+ *
+ * The file drives the probe **twice** (v1.9.27, card `t_71dc787e`), because the web path has two
+ * halves of one rule and only the first of them can be produced by a same-origin mock:
+ *
+ *   1. the ordinary run — a library the app is same-origin with, so every stream is measurable. Its
+ *      word list must show **no capability word while the item is playing**: the window in front of
+ *      the analyser's first frame is `spectrum…`, not the amber `theme` it used to wear for ~128 ms
+ *      at every track start;
+ *   2. the second run — the app on `127.0.0.1`, the settings naming `localhost`, and
+ *      `--no-cors-stream`: a cross-origin library that will not hand the stream over. There the
+ *      capability word must still arrive, as **this item's own verdict**, after that window and with
+ *      the reason naming the case.
  *
  * Needs Chrome and a built `dist/`, so it skips (with the reason printed) when either is missing.
  */
@@ -88,6 +100,8 @@ interface Readings {
   resumed: Reading;
   midChange: Reading;
   afterChange: Reading;
+  /** Only present when the run was asked to linger: the same item, watched on (v1.9.27). */
+  lingered?: Reading;
   nowScreen: Reading & {
     chips: string[];
     /** The tag of whatever is painted at the bar's chip centre there — the overlay, measured. */
@@ -100,14 +114,20 @@ interface Readings {
 /** What the page hands back: the readings at each state, and every distinct word it wore. */
 interface Probed {
   out: Readings;
-  /** Every distinct word the chip wore, in order, as it wore it. */
-  words: { ms: number; label: string; chip: string | null; onScreen: string | null; state: string }[];
+  /** Every distinct word the chip wore, in order, as it wore it, with the reason at that moment. */
+  words: { ms: number; label: string; chip: string | null; onScreen: string | null; state: string; reason: string }[];
 }
 
 /**
  * The whole sequence in one page evaluation, on a playlist page because that is where the owner was.
+ *
+ * `lingerMs` is how long the run keeps watching the chip **after the last step** — 0 for the ordinary
+ * run, and a few seconds for the second one, whose subject is a stream the analyser never sees: the
+ * verdict for a track is `ZERO_FRAMES_BEFORE_THEME` samples (1.8 s of playing) into *that track*, and
+ * this probe's sequence pauses and changes tracks before that has elapsed. Watching on is the same
+ * probe reading the same chip, not a second harness.
  */
-const PROBE = `(async () => {
+const PROBE = (lingerMs: number): string => `(async () => {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const waitFor = async (fn, ms) => {
     const started = performance.now();
@@ -252,30 +272,50 @@ const PROBE = `(async () => {
   await sleep(700);
   out.afterChange = note('the new track playing');
 
+  /*
+   * And, when the caller asks for it, keep watching the same chip on the same item until its own
+   * samples have answered (the second run's whole point: the verdict is per item and takes its own
+   * time to be earned).
+   */
+  if (${lingerMs} > 0) {
+    await sleep(${lingerMs});
+    out.lingered = note('the same item, ${lingerMs} ms later');
+  }
+
   return {
     out,
-    words: seen.map((r) => ({ ms: r.ms, label: r.label, chip: r.chip, onScreen: r.onScreen, state: r.state })),
+    words: seen.map((r) => ({ ms: r.ms, label: r.label, chip: r.chip, onScreen: r.onScreen, state: r.state, reason: r.reason })),
   };
 })()`;
 
-test('the chip’s word on the screen he photographed: a paused track on a playlist page is not a capability claim', async (t) => {
-  const chrome = findChrome();
-  if (!chrome) {
-    t.skip('no Chrome/Chromium binary found');
-    return;
-  }
-  if (!existsSync('dist/index.html')) {
-    t.skip('no built dist/ — run `npm run build` first');
-    return;
-  }
-  const mock = await startMockLibrary({ stress: true, dist: 'dist', extra: ['--user', USER, '--password', PASSWORD] });
+/**
+ * One whole run of the probe over one mock library — the setup this file has always done, in one
+ * place, so the second run below (a stream the browser genuinely cannot hand over) drives the *same*
+ * probe against the same app rather than a second harness.
+ *
+ * `libraryHost` is the host the app's settings name, and it is the one knob that changes the run:
+ *
+ *   - left alone, the settings name the mock's own address and the page was fetched from it, so the
+ *     library is **same-origin** — the app never sets `crossOrigin="anonymous"`, every stream is
+ *     visible to the analyser, and this is the ordinary run;
+ *   - `'localhost'`, while the page was fetched from `127.0.0.1`, makes `client.isCrossOrigin` true
+ *     (`src/api/subsonic.ts` compares origins), which is the only way this app ever asks the browser
+ *     for sample access — and with `--no-cors-stream` the mock sends no `Access-Control-Allow-Origin`
+ *     on `/rest/stream`, which is the cross-origin stream the research and §4 of
+ *     `docs/verification.md` call *"the one the library will not hand over"*.
+ */
+async function probeTheChip(options: { libraryHost?: string; lingerMs?: number } = {}): Promise<Probed> {
+  const flags = ['--user', USER, '--password', PASSWORD];
+  if (options.libraryHost) flags.push('--no-cors-stream');
+  const mock = await startMockLibrary({ stress: true, dist: 'dist', extra: flags });
+  const library = options.libraryHost ? mock.base.replace('127.0.0.1', options.libraryHost) : mock.base;
   try {
-    const probed = (await withChromePage(async ({ cdp }) => {
+    return (await withChromePage(async ({ cdp }) => {
       await navigate(cdp, mock.base);
       await evaluate(
         cdp,
         `(() => {
-          localStorage.setItem('navilite.settings', JSON.stringify({ serverUrl: ${JSON.stringify(mock.base)}, username: ${JSON.stringify(USER)} }));
+          localStorage.setItem('navilite.settings', JSON.stringify({ serverUrl: ${JSON.stringify(library)}, username: ${JSON.stringify(USER)} }));
           localStorage.setItem('navilite.subsonic-password', ${JSON.stringify(PASSWORD)});
           return true;
         })()`,
@@ -308,8 +348,25 @@ test('the chip’s word on the screen he photographed: a paused track on a playl
           throw new Error('no playlist row to open');
         })()`,
       );
-      return await evaluate(cdp, PROBE);
+      return await evaluate(cdp, PROBE(options.lingerMs ?? 0));
     })) as unknown as Probed;
+  } finally {
+    mock.stop();
+  }
+}
+
+test('the chip’s word on the screen he photographed: a paused track on a playlist page is not a capability claim', async (t) => {
+  const chrome = findChrome();
+  if (!chrome) {
+    t.skip('no Chrome/Chromium binary found');
+    return;
+  }
+  if (!existsSync('dist/index.html')) {
+    t.skip('no built dist/ — run `npm run build` first');
+    return;
+  }
+  {
+    const probed = await probeTheChip();
 
     const r = probed.out;
     const say = (label: string, reading: Reading): void => {
@@ -392,24 +449,136 @@ test('the chip’s word on the screen he photographed: a paused track on a playl
 
     /*
      * The flashing, as a list: every distinct word this bar wore across a play, a pause, two screens
-     * and a track change — with the transport state it wore it in. The invariant is a statement
-     * about the sequence, not about one state: **while the transport is not playing, the chip may
-     * not wear a capability word.** (What this probe does not claim: on the web path a *playing*
-     * item whose analyser has not yet produced its first frame wears `theme` for ~90 ms — the
-     * pre-existing verdict window, unchanged by this card, and the reason the filter below is on the
-     * transport state rather than on the whole run.)
+     * and a track change — with the transport state it wore it in. Two invariants, and both are
+     * statements about the sequence rather than about one state:
+     *
+     *   - while the transport is not playing, the chip may not wear a capability word;
+     *   - **and while it IS playing it may not wear one either** (t_71dc787e) — the reading this
+     *     probe was extended for. `theme` while playing used to be reached for ~128 ms at every
+     *     track start (`384 ms "theme"` → `512 ms "spectrum"`, measured at `d769fd4`), not because
+     *     this browser could not measure the item — the graph was built and the bars came in a moment
+     *     later — but because the licence the chip's word reached the capability through was *"the
+     *     transport is playing and the bars are not being fed"*, and the analyser's own first-frame
+     *     window is inside that. The word for that window is §515.4's `spectrum…`: **no frame for
+     *     this item yet** is not **frames for this item that are not real**. The item's own verdict
+     *     (silence for `ZERO_FRAMES_BEFORE_THEME`, or one frozen frame over and over) is the only
+     *     thing that may spend `theme`, and the second run in this file — a library whose stream the
+     *     browser will not hand over — is where that half is read off a screen, not argued from code.
      */
     const words = [...new Set(probed.words.map((w) => w.onScreen))];
     const notPlaying = probed.words.filter((w) => w.state !== 'playing');
+    const playingCapability = probed.words.filter(
+      (w) => w.state === 'playing' && (w.onScreen === 'theme' || w.onScreen === 'native audio'),
+    );
     console.log(`      distinct words across the run: ${JSON.stringify(words)}`);
     console.log(
       `      of those, worn while the transport was not playing: ${JSON.stringify([...new Set(notPlaying.map((w) => w.onScreen))])} (${notPlaying.length} changes)`,
+    );
+    console.log(
+      `      and worn while it WAS playing: ${JSON.stringify([...new Set(probed.words.filter((w) => w.state === 'playing').map((w) => w.onScreen))])}`,
     );
     assert.ok(
       notPlaying.every((w) => w.onScreen !== 'theme' && w.onScreen !== 'native audio'),
       `no state of a stopped transport is a capability claim (${JSON.stringify(notPlaying.map((w) => `${w.onScreen}@${w.state}`))})`,
     );
-  } finally {
-    mock.stop();
+    assert.deepEqual(
+      playingCapability.map((w) => `${w.onScreen}@${w.ms}ms`),
+      [],
+      'and no capability word is worn while the item playing can be measured — the window in front of the item’s first frame is the spectrum’s own word',
+    );
   }
+});
+
+/**
+ * **The other half of the same rule, on the surface that can produce it: a stream the browser
+ * genuinely will not hand over** (card `t_71dc787e`). The run above is a library the app is
+ * same-origin with, so its streams are always measurable and `theme` is never licensed there; this
+ * run serves the app from `127.0.0.1` and names `localhost` in the settings, which is what makes
+ * `client.isCrossOrigin` true, the element ask for `crossOrigin="anonymous"`, and
+ * `--no-cors-stream`'s missing `Access-Control-Allow-Origin` bite (§4 of `docs/verification.md`,
+ * measured by hand on 2026-10-11; this is the same case on a harness).
+ *
+ * What the word list must show, in order, while the transport is playing:
+ *
+ *   1. `spectrum…` — the analyser is attached, the item is playing, and its samples have not answered
+ *      yet. Before the fix this was `theme`, amber, from the first paint — the capability claim the
+ *      card is about, on a stream that *does* turn out to be unmeasurable, which is exactly why the
+ *      fix may not be a blanket replacement;
+ *   2. `theme` — the item's own verdict, after `ZERO_FRAMES_BEFORE_THEME` analyser frames of silence,
+ *      with the reason line naming the case. That is the statement the word is licensed for, and it
+ *      must survive: the app has not lost this capability, this item's samples are not real.
+ */
+test('on a stream the browser will not hand over, the chip still reaches the capability word and names the verdict (t_71dc787e)', async (t) => {
+  const chrome = findChrome();
+  if (!chrome) {
+    t.skip('no Chrome/Chromium binary found');
+    return;
+  }
+  if (!existsSync('dist/index.html')) {
+    t.skip('no built dist/ — run `npm run build` first');
+    return;
+  }
+  const probed = await probeTheChip({ libraryHost: 'localhost', lingerMs: 3000 });
+  const r = probed.out;
+
+  console.log('  the same probe, over a library the app is cross-origin with and whose stream sends no ACAO:');
+  for (const w of probed.words) {
+    console.log(`        ${String(w.ms).padStart(6)} ms  "${w.onScreen}"   (${w.label}, state ${w.state}) — ${w.reason}`);
+  }
+
+  const playing = probed.words.filter((w) => w.state === 'playing');
+  const firstComing = playing.findIndex((w) => w.onScreen === 'spectrum…');
+  const firstVerdict = playing.findIndex((w) => w.onScreen === 'theme');
+  console.log(
+    `      while playing: ${JSON.stringify(playing.map((w) => w.onScreen))} — first "spectrum…" at ${firstComing === -1 ? 'never' : `${playing[firstComing].ms} ms`}, first "theme" at ${firstVerdict === -1 ? 'never' : `${playing[firstVerdict].ms} ms`}`,
+  );
+  console.log(
+    `      and the item watched on (${r.lingered ? `${r.lingered.ms} ms` : 'no lingered reading'}): chip "${r.lingered?.onScreen}" · spectrum ${r.lingered?.spectrum} · arming ${r.lingered?.arming} — ${r.lingered?.reason}`,
+  );
+
+  /*
+   * 1. The window: on this run the stream *is* unmeasurable, and the app still does not say so before
+   *    it has asked. The word while the item plays and the analyser has answered nothing is the
+   *    spectrum's own — this is the half the fix is about, and on this run it is what the amber word
+   *    used to be worn over.
+   */
+  assert.ok(
+    firstComing !== -1,
+    'the item is playing, its analyser is attached and its samples have not answered: the spectrum is coming',
+  );
+
+  /*
+   * 2. The verdict, earned by this item's own samples and read on the surface: 18 analyser frames of
+   *    silence, the reason naming the case. This is the statement `theme` is licensed for, and the
+   *    reason the fix could not be a blanket replacement of the word.
+   */
+  assert.ok(r.lingered, 'the run watched the same item on, as it was asked to');
+  assert.equal(
+    r.lingered.onScreen,
+    'theme',
+    'the browser will not hand this stream over, and the chip names it — the only thing the word may mean',
+  );
+  assert.equal(r.lingered.state, 'playing', 'while the item is playing, on its own samples’ verdict');
+  assert.match(
+    String(r.lingered.reason),
+    /silence|samples|tainted|cross-origin|Access-Control/i,
+    'and the sentence behind it names the case, rather than a browser that cannot do this at all',
+  );
+
+  /*
+   * 3. And the order is the point: the capability word is the *verdict*, reached after the window —
+   *    never instead of it. Before the fix this run wore `theme` from the first paint (373 ms) and
+   *    nothing else, which is a correct conclusion reached without asking the item.
+   */
+  assert.ok(firstVerdict !== -1, 'the capability word is still reachable on this path');
+  assert.ok(
+    firstVerdict > firstComing,
+    'the capability word is the item’s verdict, reached after the window — never instead of it',
+  );
+
+  // And a stopped transport is still the transport's own word, on this run too.
+  assert.ok(
+    r.paused.onScreen === 'paused',
+    `and no state of a stopped transport is a capability claim (read "${r.paused.onScreen}")`,
+  );
 });

@@ -567,9 +567,23 @@ interface Connections {
  * the audio graph recorded as an edge list so the *shape* can be asserted — a graph that is never
  * built on the native path being the point of the "one engine" check.
  */
-function installFakes(): { connections: Connections; restore: () => void; setFrame(v: number): void; finishTrack(): void; currentSrc(): string | null } {
+function installFakes(): {
+  connections: Connections;
+  restore: () => void;
+  setFrame(v: number): void;
+  /**
+   * v1.9.27 (card `t_71dc787e`) — make the analyser answer **nothing** (`max` 0 on every frame), the
+   * one state in which this item's own samples have not answered: a tainted cross-origin stream, or
+   * an analyser producing silence. The window between that and the verdict is what the web path's
+   * chip word had no name for.
+   */
+  setSilent(silent: boolean): void;
+  finishTrack(): void;
+  currentSrc(): string | null;
+} {
   const connections: Connections = { edges: [], gainValues: [] };
   const frame = { value: 128 };
+  const silence = { value: false };
   const globals = globalThis as unknown as Record<string, unknown>;
   const previous = {
     Audio: globals.Audio,
@@ -642,6 +656,11 @@ function installFakes(): { connections: Connections; restore: () => void; setFra
         connect: (node: { name?: string }) => connections.edges.push(`analyser->${node?.name ?? 'node'}`),
         disconnect: () => undefined,
         getByteFrequencyData: (data: Uint8Array) => {
+          // v1.9.27 (t_71dc787e) — an analyser that answers nothing: silence, not a level.
+          if (silence.value) {
+            data.fill(0);
+            return;
+          }
           for (let i = 0; i < data.length; i += 1) data[i] = (frame.value + i) % 200;
         },
       };
@@ -670,6 +689,9 @@ function installFakes(): { connections: Connections; restore: () => void; setFra
     connections,
     setFrame: (value: number) => {
       frame.value = value;
+    },
+    setSilent: (value: boolean) => {
+      silence.value = value;
     },
     finishTrack: () => {
       for (const element of elements) element.finish();
@@ -2703,6 +2725,143 @@ test('the chip’s word is the transport’s when the transport is the reason �
      * the tap's synchronous paint, v1.9.0), so nothing on the screen moves for a load.
      */
     assert.equal(chipWord(loading), 'loading', 'a track that is being fetched is loading — not a build that cannot measure it');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
+
+/**
+ * **The web path's own arming window** (card `t_71dc787e`, unreleased) — §515.4's word on the
+ * analyser, and the capability word only where *this item's own samples* have ruled it out.
+ *
+ * The defect, measured by Sage in Chrome at 393x852 over the mock library (real app at `d769fd4`),
+ * read off `test/chip-word-browser.test.ts`'s own word list:
+ *
+ * ```
+ *     384 ms  "theme"    (the chip changed, state playing)
+ *     512 ms  "spectrum" (the chip changed, state playing)
+ * ```
+ *
+ * `theme` — the amber `fallback` tone, the word for *"this browser has no Web Audio, or the samples
+ * are not real"* — for 128 ms at the start of a track, while the transport was `playing` and the
+ * analyser was attached and working. The licence the engine reached it by was the second one in
+ * `visualiserWord` (`if (this.state === 'playing') return native ? 'native audio' : 'theme'`),
+ * taken whenever the bars were not being fed — including the window in which the analyser has
+ * simply not produced this item's first frame yet. The native path has a word for that window
+ * (v1.9.6's `arming` → `spectrum…`); the web path had none, so it fell through to the claim that
+ * the app cannot measure the item it is measuring.
+ *
+ * What may still spend `theme` while a web item plays is a verdict **about that item's samples**:
+ * `ZERO_FRAMES_BEFORE_THEME` frames of silence from the analyser (a tainted cross-origin stream, or
+ * an analyser producing nothing) or one frozen frame over and over. What may not is a frame that has
+ * not been asked for yet. Both halves are asserted here on the fake analyser — the word while the
+ * analyser has answered nothing, that item's own verdict when it has, the verdict surviving a pause
+ * and a resume, the bars and the word coming back on a real frame, and a track change onto another
+ * item wearing *that* item's window rather than the register the previous item left behind (the web
+ * half of `forgetTapFrames`).
+ */
+test('the web path wears the spectrum’s own word until its analyser has answered for the item, and the capability word only when it has (t_71dc787e)', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const web = new AudioEngine({ platform: { os: 'web', native: false } as EngineOptions['platform'] });
+    engines.push(web);
+
+    /*
+     * 1. The window the defect was measured in: the item is playing, the graph is built and the
+     *    analyser is in front of the destination — and it has answered nothing for this item yet.
+     *    Before the fix the chip read `theme` here (the amber capability word); the honest word is
+     *    the one a native tap that has not answered gets, and it is what the owner gets on the web
+     *    page and the PWA.
+     */
+    fakes.setSilent(true);
+    await web.play(TRACK);
+    const opened = web.status();
+    say(
+      `1. web, playing, the analyser has answered nothing: state ${opened.state}, spectrum ${opened.spectrum}, arming ${opened.spectrumArming} — the chip reads "${chipWord(opened)}"`,
+    );
+    assert.equal(opened.state, 'playing', 'the item is playing');
+    assert.equal(opened.spectrum, false, 'and nothing is being measured yet, which is true');
+    assert.equal(
+      chipWord(opened),
+      'spectrum…',
+      'the spectrum is coming — not the word for a browser that cannot measure this item',
+    );
+
+    /*
+     * 2. And it stays that word while the answer is still outstanding: the app does not decide that a
+     *    silent analyser cannot be measured on the first sample it reads, and the amber word may not
+     *    come back in the meantime (the flashing the owner reported, in its web form).
+     */
+    await settle(700);
+    const waiting = web.status();
+    say(`2. 700 ms later, still answering nothing: arming ${waiting.spectrumArming} — the chip reads "${chipWord(waiting)}"`);
+    assert.equal(waiting.state, 'playing', 'the track is still playing');
+    assert.equal(chipWord(waiting), 'spectrum…', 'and the word is still the spectrum’s, not a verdict');
+
+    /*
+     * 3. The verdict, from this item's own samples: `ZERO_FRAMES_BEFORE_THEME` (18, at a 100 ms
+     *    meter) analyser frames of silence is the app's answer that the samples are not real. This is
+     *    the state `theme` is licensed for, and it must still be reachable — it is what a tainted
+     *    cross-origin stream looks like, and the reason the card exists rather than a blanket
+     *    replacement of `theme` by `spectrum…`.
+     */
+    await settle(1600);
+    const verdict = web.status();
+    say(`3. the item’s own verdict: spectrum ${verdict.spectrum}, arming ${verdict.spectrumArming} — the chip reads "${chipWord(verdict)}" (${verdict.modeReason})`);
+    assert.equal(verdict.state, 'playing', 'the track never stopped playing');
+    assert.equal(chipWord(verdict), 'theme', 'this item’s samples are not real — the one thing the word may mean');
+    assert.match(verdict.modeReason, /analyser returned silence|no samples|not a measurement/, 'and the reason names the verdict');
+
+    /*
+     * 4. The verdict is about the item, not about a moment: a pause and a resume do not re-open it
+     *    (the registers that decide it are the item's, and nothing reset them).
+     */
+    await web.pause();
+    await settle(150);
+    assert.equal(chipWord(web.status()), 'paused', 'paused is the transport’s own word, as everywhere');
+    await web.resume();
+    await settle(350);
+    const afterResume = web.status();
+    say(`4. paused and resumed: the chip reads "${chipWord(afterResume)}"`);
+    assert.equal(afterResume.state, 'playing', 'it resumed');
+    assert.equal(chipWord(afterResume), 'theme', 'and the verdict about this item stands — a resume is not evidence about the samples');
+
+    /*
+     * 5. And a real frame is the end of it, in both directions: the analyser answers, so the bars and
+     *    the word both come back (§515's rule, unchanged by this card).
+     */
+    fakes.setSilent(false);
+    await settle(300);
+    const recovered = web.status();
+    say(`5. the analyser answers: spectrum ${recovered.spectrum}, arming ${recovered.spectrumArming} — the chip reads "${chipWord(recovered)}"`);
+    assert.equal(chipWord(recovered), 'spectrum', 'the bars are being fed by the item in hand, and the word says so');
+    assert.equal(
+      recovered.spectrumArming,
+      false,
+      'and the arming field is false while the bars are live — "spectrum: true, spectrumArming: true" would be the debug line contradicting itself',
+    );
+
+    /*
+     * 6. **A track change wears the new item's window, never the last item's verdict.** The register
+     *    the samples are judged on is per item (the web half of `forgetTapFrames`, v1.9.24's rule on
+     *    the native side): the item that has just started an unmeasurable stream gets its own
+     *    `spectrum…`, not the `theme` the register was left on by the item before it.
+     */
+    fakes.setSilent(true);
+    await web.play(OTHER_TRACK);
+    const changed = web.status();
+    say(`6. a change onto an item whose samples answer nothing: state ${changed.state}, arming ${changed.spectrumArming} — the chip reads "${chipWord(changed)}"`);
+    assert.equal(changed.state, 'playing', 'the new item is the one playing');
+    assert.equal(
+      chipWord(changed),
+      'spectrum…',
+      'the item that just started has not worn the previous item’s verdict',
+    );
+    // And that item reaches its own verdict in its own time.
+    await settle(2200);
+    assert.equal(chipWord(web.status()), 'theme', 'and then its own samples answer, as item 1’s did');
   } finally {
     fakes.restore();
     await stopAll(engines);

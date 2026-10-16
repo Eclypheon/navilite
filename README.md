@@ -127,10 +127,10 @@ that and never pretends:
 | Audio context suspended (iOS background) | Album-art theme while the app is out of sight; the music is native and keeps playing; the visualiser re-arms on the way back in. |
 
 The mode chip on the player bar names what the visualiser is doing for the track in hand — the live
-`spectrum`, `spectrum…` while a native tap is still answering for it, `native audio` / the album-art
-theme **only** where the bars genuinely cannot run on that track, and the transport's own word
-(`paused`, `ended`, `loading…`) when nothing is playing — with the reason underneath it. The word is
-computed once, in the engine (`EngineStatus.visualiser`), and the bar prints it: one source, so no
+`spectrum`, `spectrum…` while the tap or the analyser is still answering for it, `native audio` / the
+album-art theme **only** where the bars genuinely cannot run on that track, and the transport's own
+word (`paused`, `ended`, `loading…`) when nothing is playing — with the reason underneath it. The word
+is computed once, in the engine (`EngineStatus.visualiser`), and the bar prints it: one source, so no
 two surfaces can disagree about the mode. (The bar's chip is the app's only one, and the now-playing
 screen has no chip **visible** at all: it lost its own in v1.1 and replaces the bar with a
 full-screen overlay that paints over the bar's — the node stays in the DOM there, behind the

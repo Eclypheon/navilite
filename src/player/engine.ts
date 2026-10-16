@@ -181,9 +181,13 @@ export interface TrackRequest extends NativeTrackInfo {
  * So the word is one fact about the item in hand, computed here, once:
  *
  *   - `spectrum` — the bars are being fed by that item, now.
- *   - `spectrum…` — a native item is playing and its tap has not answered for the item yet. This is
- *     the same word a tap refused for a whole track keeps (§515.4, the owner's call of 2026-10-16:
- *     the engine cannot tell *"will never attach"* from *"still attaching"* without a clock).
+ *   - `spectrum…` — the item in hand is playing and the thing that measures it has not answered for
+ *     it yet: a native tap that is installed and to give its first frame, or (v1.9.27, card
+ *     `t_71dc787e`) a web analyser that is attached and has not produced this item's first frame.
+ *     This is the same word a tap refused for a whole track keeps (§515.4, the owner's call of
+ *     2026-10-16: the engine cannot tell *"will never attach"* from *"still attaching"* without a
+ *     clock), and the same word for the browser's own first-frame window — **no frame for this item
+ *     yet** is not the same statement as **frames for this item that are not real**.
  *   - the transport's own words — `idle`, `loading`, `paused`, `ended`, `interrupted`, `error` —
  *     worn when **the only reason nothing is being measured is that nothing is playing**. This is
  *     the state he was reading a capability claim in, and it is stated as what it is.
@@ -193,7 +197,8 @@ export interface TrackRequest extends NativeTrackInfo {
  *     mean is that the spectrum cannot run on the item in hand.** A build without a tap wears it in
  *     every transport state, because that is a fact about the build and not about a moment.
  *   - `theme` — the same statement on the web path: this browser has no Web Audio, or this stream's
- *     own verdict says the samples are not real.
+ *     own verdict says the samples are not real (`ZERO_FRAMES_BEFORE_THEME` analyser frames of
+ *     silence, or one frozen frame over and over — `silenceReason` names which).
  *
  * What a *stopped* transport must never do is reach the capability words, and that is the whole of
  * this type: the same rule for `native audio` and for `theme`, because they are the same claim.
@@ -241,9 +246,9 @@ export interface EngineStatus {
   /** True only when the visualiser is being fed real frames right now. */
   spectrum: boolean;
   /**
-   * True while a native track is playing and the engine has **no answer from the tap for this item
-   * yet** (v1.9.6, narrowed in v1.9.24) — the window in which `spectrum` is false and the spectrum
-   * is not lost.
+   * True while a track is playing and the engine has **no answer from the thing that measures it
+   * for this item yet** (v1.9.6, narrowed in v1.9.24, both paths since v1.9.27) — the window in
+   * which `spectrum` is false and the spectrum is not lost.
    *
    * The chip needs three words, not two. `spectrum` is false for a fraction of a second at every
    * track change, until the track that was handed over to produces its first live frame, and calling
@@ -257,6 +262,13 @@ export interface EngineStatus {
    * or a build with no tap at all. A tap that is late, refused, or still on the item the player has
    * left keeps the third word, with `modeReason` naming that state, because the alternative is the
    * capability claim the owner was reading at every track change.
+   *
+   * **v1.9.27 (card `t_71dc787e`) — and the web path has the same window, from its own register.**
+   * `analyserArming` reads it there (`zeroFrames` below the verdict, per item since that card), and
+   * `status()` reports this field as the OR of the two, because it is the same question — *has the
+   * thing that measures this item answered for it yet?* — asked of the two ways of measuring. Before
+   * it, a browser's first-frame window had no word of its own and spent the amber `theme` for ~128 ms
+   * at the start of every track, on a build whose graph was built and working.
    */
   spectrumArming: boolean;
   /**
@@ -1356,8 +1368,15 @@ export class AudioEngine {
      * no frames coming — and what it says about that is the transport's own word, never
      * *native audio* (v1.9.26; see {@link VisualiserWord}). Computed once, here, and handed to both
      * the field and the word below so the two cannot disagree.
+     *
+     * **Two registers answer for the two paths (v1.9.27).** The native tap has had a window for
+     * "installed and not answered yet" since v1.9.6; the web path had none, so the same state — an
+     * analyser that is attached and has not produced this item's first frame — fell through to the
+     * capability word `theme` (`t_71dc787e`). `analyserArming` is that window, read from the web
+     * path's own per-item register, so both paths answer the question with a fact about the item in
+     * hand rather than with an elimination.
      */
-    const arming = this.spectrumArming && this.backend === 'native' && this.state === 'playing';
+    const arming = this.state === 'playing' && (this.spectrumArming || this.analyserArming());
     return {
       state: this.state,
       backend: this.backend,
@@ -1470,11 +1489,18 @@ export class AudioEngine {
      *   - the transport is not playing — nothing is heard, so there is nothing to be a picture of.
      *     The word is the transport's own, whatever the last verdict was: a pause is not evidence
      *     about the samples, and this is the state the owner was reading a capability claim in;
-     *   - the transport *is* playing, so the words are the ones §515 and §516 settled, unchanged:
-     *     this item's tap reading silence, the same frozen frame over and over, or samples the
-     *     browser will not hand over. (A path that is still `unknown` while the transport plays is
-     *     not reachable — both starts build their path before the player is asked to play — and if
-     *     it ever were, this line is the honest word.)
+     *   - the transport *is* playing, and this item's own measurement has given its verdict: this
+     *     item's tap reading silence, the same frozen frame over and over, or samples the browser
+     *     will not hand over. (A path that is still `unknown` while the transport plays is not
+     *     reachable — both starts build their path before the player is asked to play — and if it
+     *     ever were, this line is the honest word.)
+     *
+     * **v1.9.27 — the window that is neither of those is above this line, not here** (card
+     * `t_71dc787e`). A playing item whose measurement has not answered *yet* — a native tap in
+     * flight, an analyser that has not produced this item's first frame — is `spectrum…`, which is
+     * what `arming` says and what this branch used to be reached by instead: on a browser it spent
+     * `theme` (the amber capability word) for ~128 ms at the start of every track, on a build whose
+     * Web Audio graph was built and working. What is left here is only the item's own verdict.
      */
     if (this.state === 'playing') return this.backend === 'native' ? 'native audio' : 'theme';
     return STOPPED_WORD[this.state];
@@ -1512,6 +1538,54 @@ export class AudioEngine {
     const bridge = this.native;
     if (bridge === null) return 'unknown';
     return this.hasSpectrumTap() ? 'tap' : 'none';
+  }
+
+  /**
+   * **The web path's own arming window** (v1.9.27, card `t_71dc787e`) — §515.4's word, on the
+   * analyser: the item in hand is playing, the graph exists and the analyser has **not answered for
+   * this item yet**, because it has not been given
+   * {@link ZERO_FRAMES_BEFORE_THEME} frames it could use.
+   *
+   * The defect it closes, measured in Chrome at 393x852 over the mock library (`d769fd4`, read off
+   * `test/chip-word-browser.test.ts`'s own word list):
+   *
+   * ```
+   * 384 ms  "theme"    (the chip changed, state playing)
+   * 512 ms  "spectrum" (the chip changed, state playing)
+   * ```
+   *
+   * The amber capability word for 128 ms at the start of a track, on a browser whose Web Audio graph
+   * was built and working: the licence `visualiserWord` reached it by said *"if the transport is
+   * playing and the bars are not being fed, the spectrum cannot run on this item"*, and the window
+   * between `createMediaElementSource` and the analyser's first real frame was inside that. On this
+   * path there are two very different reasons for "no frames", and the register that separates them
+   * is the one the meter already keeps for the verdict:
+   *
+   *   - **no frame for this item yet** (`zeroFrames` below the verdict) — the spectrum is coming.
+   *     This method, and the chip's `spectrum…`.
+   *   - **frames for this item that are not real** (the verdict passed: `ZERO_FRAMES_BEFORE_THEME`
+   *     analyser frames of silence, or one frozen frame over and over) — a genuinely unmeasurable
+   *     item, which is the *only* thing `theme` may mean (`sample()` writes that verdict, and
+   *     `silenceReason` names the case).
+   *
+   * The register is **per item** — `startWeb` clears it for the item that is starting, exactly as
+   * `forgetTapFrames` clears the native tap's count (v1.9.24) — so an item that has just started an
+   * unmeasurable stream wears its own `spectrum…` before its own verdict, and never the verdict the
+   * previous item's samples left behind. A graph that could not be built is not this window and is
+   * not asked about here: that is an evidenced `none` (`measuringPathForTheItem`), which spends the
+   * capability word from the first paint.
+   *
+   * **`spectrumLive` is half the question, and it is the first half.** A register that has counted
+   * nothing because a real frame keeps arriving is not a window — it is the bars being drawn (the
+   * counter is reset by every frame the analyser answers with, so `zeroFrames === 0` is true in both
+   * states). As a *field* on the status this has to be exact: `EngineStatus.spectrumArming` means
+   * "`spectrum` is false and the spectrum is not lost", and a status that said both `spectrum: true`
+   * and `spectrumArming: true` would be the debug line contradicting itself.
+   */
+  private analyserArming(): boolean {
+    if (this.backend !== 'web' || this.analyser === null) return false;
+    if (this.spectrumLive) return false;
+    return this.zeroFrames < ZERO_FRAMES_BEFORE_THEME;
   }
 
   /**
@@ -2475,6 +2549,21 @@ export class AudioEngine {
   private async startWeb(track: TrackRequest, startMs: number): Promise<void> {
     this.backend = 'web';
     this.el.pause();
+    /*
+     * **v1.9.27 (card `t_71dc787e`) — the analyser's register is this item's, and it starts empty.**
+     *
+     * `zeroFrames`, `identicalFrames` and `lastChecksum` are the web path's judgement about the
+     * samples: how many frames in a row came back unusable (the verdict), how many were the same
+     * frame (the frozen rule), and which frame was last seen. They are per item for exactly the
+     * reason the native tap's frame count is (v1.9.24, `forgetTapFrames`): a count left over from
+     * the item that just ended is **the previous item's answer**, and reading it as this one's is
+     * how a new item could be spent a verdict before a single sample of it had been read. Cleared
+     * here — before the element plays, so the first sample of the new item is the first one counted
+     * — the new item wears its own `spectrum…` until its own samples answer.
+     */
+    this.zeroFrames = 0;
+    this.identicalFrames = 0;
+    this.lastChecksum = -1;
     // crossOrigin must be set before src, otherwise the request is already in flight and the
     // element stays tainted for the life of the load.
     this.el.crossOrigin = track.crossOrigin ? 'anonymous' : null;
