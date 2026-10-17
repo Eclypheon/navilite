@@ -327,3 +327,8 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - The song in the bottom bar takes you to the right row again. Tapping it used to throw the list upward by a random chunk — often all the way to the top — and the song you asked for was left wherever it landed. The list now moves to the row it is showing as the one playing, and puts that row in the middle of the screen.
 - And a second tap gets you the spectrum again. On a playlist you have downloaded, the second tap used to nudge the list and go nowhere at all: it now opens the spectrum for that song whenever that song's row is on the screen. When the row is already on the screen, one tap goes straight there; and at the top or the bottom of a list, where the app cannot put the row in the middle, the tap takes you to the spectrum as well.
+
+## 2.0-beta.4 — 2026-10-17
+
+- The app starts at the top of the screen again. A first launch could open with a wide empty band above the top bar — up to a seventh of the screen — and only closing and reopening it put that right; a long spell in the background could do the same. The app no longer adds the screen’s own safe-area twice, so the band is gone and the first frame is already right.
+- One tap downloads the whole playlist, covers and all. A big playlist used to stop part-way — the 269-track one stopped at 254 — and sit there until you tapped retry, and the covers of the albums past that point waited for a tap of their own. The download now runs to the end in one go, re-asks a track that fails on its own, and fetches every cover as part of the same job.

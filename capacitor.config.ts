@@ -23,7 +23,17 @@ const config: CapacitorConfig = {
   },
   ios: {
     backgroundColor: '#0b0b10',
-    contentInset: 'always',
+    /*
+     * `never` (v2.0.0-beta.4). This was `always`, which is `UIScrollView.contentInsetAdjustmentBehavior
+     * = .always` on the web view — UIKit then pads the *scroll view* for the safe area on top of the
+     * `env(safe-area-inset-top)` the CSS already pads `.topbar` and `.now` with, so the app began
+     * 2 × 59 px down (measured: 118 px, 13.8 % of 852 — the owner's "large gap at the top") and only
+     * a relaunch, which re-laid the scroll view, put it back. Capacitor's own default is `never`, and
+     * it is the only correct value for a `viewport-fit=cover` app whose insets are the CSS's job:
+     * one authoritative source, no native pixel value to cache. `tools/inset-gap.mjs` reads the band
+     * both ways at 393 × 852.
+     */
+    contentInset: 'never',
   },
   plugins: {
     NativeAudio: {

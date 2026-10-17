@@ -220,6 +220,41 @@ export const LYRICS_MISS_TTL_MS = 5 * 60 * 1000;
 /** §5: leave this much headroom over the estimate before a download is allowed to start. */
 const FREE_SPACE_MARGIN = 250 * 1024 * 1024;
 const MAX_CONCURRENT = 3;
+
+/**
+ * v2.0.0-beta.4 — the bounds the enqueue loop itself was missing.
+ *
+ * A download's song list was handed to the bridge one transfer at a time, `await`ed, uncaught and
+ * unbounded. The first call that rejected — or that simply never answered — ended the enumeration
+ * where it stood: the owner's 269-track playlist stopped at 254 with nothing on screen to say why,
+ * and the covers of the albums past that point were never asked for at all, which is the second tap
+ * he described. Each call is now bounded and retried, and its failure cannot end the loop.
+ */
+const ENQUEUE_ATTEMPTS = 3;
+const ENQUEUE_RETRY_MS = 400;
+/** The self-completion pump's backoff, one entry per round; the last entry repeats. */
+const PUMP_BACKOFF_MS = [1500, 4000, 10000, 20000];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One bridge call, bounded: a Capacitor promise that never settles is a hang, not a slow answer. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('enqueue timed out')), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 /**
  * How many rows **one** `repairMetadata` pass may ask the server about (v1.9.23).
  *
@@ -383,6 +418,12 @@ export class OfflineStore {
   private readonly unlisteners: Array<() => void> = [];
   private readonly changeListeners = new Set<() => void>();
   private listening = false;
+  /** How long one bridge `enqueue` may take before it is treated as a failure (v2.0.0-beta.4). */
+  private readonly enqueueTimeoutMs: number;
+  /** The self-completion pump: one timer per playlist, and the backoff round that timer is on. */
+  private readonly pumpTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly pumpRounds = new Map<string, number>();
+  private disposed = false;
   /** A repair pass is running; a second caller joins the first rather than starting another. */
   private repairing = false;
   /** The ids this session has already asked the server about, so a blank row is asked once. */
@@ -443,6 +484,14 @@ export class OfflineStore {
        * {@link repairMetadata} for a row the download's own record cannot name.
        */
       songLookup?: (songId: string) => Promise<Song | null>;
+      /**
+       * How long one bridge `enqueue` call may take before it counts as failed (v2.0.0-beta.4).
+       *
+       * A Capacitor call that never answers used to hang the whole enumeration — the 254-of-269
+       * stop — so the wait is bounded and the job is retried. Injectable so a test does not wait
+       * 2.5 s to prove it.
+       */
+      enqueueTimeoutMs?: number;
       store?: MirrorStore;
     } = {},
   ) {
@@ -454,6 +503,7 @@ export class OfflineStore {
     this.artUrl = options.artUrl ?? (() => null);
     this.toLocalSrc = options.toLocalSrc ?? ((fileUrl) => fileUrl);
     this.songLookup = options.songLookup ?? (async () => null);
+    this.enqueueTimeoutMs = options.enqueueTimeoutMs ?? 2500;
     // Seed the in-memory map from the mirror synchronously, so the resolver answers local on the
     // very first start of a session — before `hydrate()` has had a chance to talk to the plugin.
     const mirror = loadMirror(this.store);
@@ -1157,7 +1207,7 @@ export class OfflineStore {
         }
       } else {
         this.addRef(song.id, playlistId, song);
-        await this.bridge.enqueue({
+        await this.safeEnqueue({
           songId: song.id,
           url: this.downloadUrl(song),
           suffix: song.suffix ?? 'mp3',
@@ -1170,12 +1220,16 @@ export class OfflineStore {
           // The row's cover id travels with the audio job, so the native index knows it from the
           // song's birth and the art fan-out can match by cover — not only by the `coverOf` list.
           coverArt: song.coverArt ?? song.albumId,
+        }, () => {
+          const failed = this.rows.get(song.id);
+          if (failed) failed.state = 'failed';
+          this.schedulePump(playlistId);
         });
       }
       // The lyric rides its own transfer, in the same lane, keyed by its own kind.
-      await this.enqueueLyrics(song);
+      await this.enqueueLyrics(playlistId, song);
       // …and so does the cover, one transfer per distinct cover id, keyed by the cover (§5.4).
-      await this.enqueueArt(song, songs);
+      await this.enqueueArt(playlistId, song, songs);
     }
   }
 
@@ -1189,6 +1243,7 @@ export class OfflineStore {
       await this.bridge.cancel(song.id);
       this.dropRef(song.id, playlistId);
     }
+    this.clearPump(playlistId);
     record.state = record.done > 0 ? 'partial' : 'failed';
     // A cancelled manifest is never resumed by boot; only the owner's tap asks again.
     const manifest = this.manifests.get(playlistId);
@@ -1202,6 +1257,7 @@ export class OfflineStore {
     const record = this.playlists.get(playlistId);
     if (!record) return;
     for (const song of record.songs) await this.dropRef(song.id, playlistId);
+    this.clearPump(playlistId);
     this.playlists.delete(playlistId);
     this.manifests.delete(playlistId);
     this.saveMirror();
@@ -1236,6 +1292,8 @@ export class OfflineStore {
   }
 
   dispose(): void {
+    this.disposed = true;
+    for (const playlistId of [...this.pumpTimers.keys()]) this.clearPump(playlistId);
     for (const remove of this.unlisteners) {
       try {
         remove();
@@ -1248,6 +1306,84 @@ export class OfflineStore {
   }
 
   /* --------------------------------------------------------------- internals */
+
+  /**
+   * The one place a job reaches the bridge (v2.0.0-beta.4).
+   *
+   * Bounded, retried, and never throwing: the loop that builds a playlist's transfer list goes on to
+   * the next track whatever this one does. `giveUp` runs only after every attempt has failed, and it
+   * is the hook that records the failure *and* asks for the pump.
+   */
+  private async safeEnqueue(job: DownloadJob, giveUp: () => void): Promise<boolean> {
+    if (!this.bridge) return false;
+    for (let attempt = 1; attempt <= ENQUEUE_ATTEMPTS; attempt += 1) {
+      try {
+        await withTimeout(this.bridge.enqueue(job), this.enqueueTimeoutMs);
+        return true;
+      } catch {
+        if (attempt < ENQUEUE_ATTEMPTS) await delay(ENQUEUE_RETRY_MS * attempt);
+      }
+    }
+    giveUp();
+    return false;
+  }
+
+  /**
+   * Self-completion, without a human tap: a download that is not finished asks again on its own,
+   * with a backoff, up to `PUMP_BACKOFF_MS.length` rounds.
+   *
+   * One timer per playlist while a pass is scheduled; a pass re-runs the same idempotent enumeration
+   * the owner's tap does — complete audio, resolved lyrics and settled covers are skipped — so it
+   * costs a walk of the list and the few transfers that are actually missing.
+   */
+  private schedulePump(playlistId: string): void {
+    if (!this.bridge || this.disposed || playlistId === '') return;
+    if (this.pumpTimers.has(playlistId)) return;
+    const round = this.pumpRounds.get(playlistId) ?? 0;
+    if (round >= PUMP_BACKOFF_MS.length) return;
+    this.pumpRounds.set(playlistId, round + 1);
+    const timer = setTimeout(() => {
+      this.pumpTimers.delete(playlistId);
+      void this.pump(playlistId);
+    }, PUMP_BACKOFF_MS[Math.min(round, PUMP_BACKOFF_MS.length - 1)]);
+    // A pending pump must not keep a process that is not a browser alive (tests, tools).
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.pumpTimers.set(playlistId, timer);
+  }
+
+  private clearPump(playlistId: string): void {
+    const timer = this.pumpTimers.get(playlistId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.pumpTimers.delete(playlistId);
+    this.pumpRounds.delete(playlistId);
+  }
+
+  /** One pump pass — `download()`'s own enumeration, re-run. */
+  private async pump(playlistId: string): Promise<void> {
+    const record = this.playlists.get(playlistId);
+    const manifest = this.manifests.get(playlistId);
+    if (!record || !manifest || this.disposed || !this.bridge) return;
+    if (record.state === 'complete' || record.state === 'idle') {
+      this.pumpRounds.delete(playlistId);
+      return;
+    }
+    record.state = 'downloading';
+    this.saveMirror();
+    this.notify();
+    await this.enqueueSongs(playlistId, manifest.songs);
+    this.reconcileRecord(playlistId);
+    this.saveMirror();
+    this.notify();
+  }
+
+  /** Every row that names this cover reads `failed`, so the next pass re-asks it (art gates nothing). */
+  private markArtFailed(cover: string): void {
+    const art: ArtRow = { state: 'failed', bytes: 0, fetchedAt: Date.now() };
+    for (const row of this.rows.values()) {
+      if (row.coverArt !== cover) continue;
+      row.art = art;
+    }
+  }
 
   private ensureListening(): void {
     if (this.listening || !this.bridge) return;
@@ -1319,6 +1455,12 @@ export class OfflineStore {
       row.lyrics = { state: 'failed', bytes: 0, fetchedAt: Date.now() };
     } else {
       row.state = 'failed';
+      /*
+       * v2.0.0-beta.4: a failed transfer used to sit there until the owner tapped retry. It goes
+       * back through the pump instead, with a backoff, so one flaky track cannot hold a 269-track
+       * playlist one short of done for ever.
+       */
+      for (const playlistId of row.refs) this.schedulePump(playlistId);
     }
     for (const playlistId of row.refs) this.reconcileRecord(playlistId);
     this.saveMirror();
@@ -1391,7 +1533,7 @@ export class OfflineStore {
    * transfer is already in flight (`pending`), so calling this for every track of an album enqueues
    * exactly one transfer. A `failed` row is re-asked: the only way this runs is a tap the owner made.
    */
-  private async enqueueArt(song: Song, songs: Song[]): Promise<void> {
+  private async enqueueArt(playlistId: string, song: Song, songs: Song[]): Promise<void> {
     if (!this.bridge) return;
     const row = this.rows.get(song.id);
     if (!row) return;
@@ -1413,7 +1555,7 @@ export class OfflineStore {
         sibling.art = { state: 'pending', bytes: 0 };
       }
     }
-    await this.bridge.enqueue({
+    await this.safeEnqueue({
       songId: cover,
       url,
       suffix: 'art',
@@ -1427,6 +1569,14 @@ export class OfflineStore {
       durationSec: 0,
       coverArt: cover,
       coverOf,
+    }, () => {
+      /*
+       * The cover was never asked for. `failed` — not `pending` — is what makes the pump's next pass
+       * re-ask it: a `pending` row is skipped by design, and that skip is why these covers used to
+       * need a second tap.
+       */
+      this.markArtFailed(cover);
+      this.schedulePump(playlistId);
     });
   }
 
@@ -1439,7 +1589,7 @@ export class OfflineStore {
    * caller's `sameSong` guard), and so is a track the route answers `404` for — see `onFailed`.
    * Both empty → `none`, a recorded miss.
    */
-  private async enqueueLyrics(song: Song): Promise<void> {
+  private async enqueueLyrics(playlistId: string, song: Song): Promise<void> {
     if (!this.bridge) return;
     const row = this.rows.get(song.id);
     if (!row) return;
@@ -1451,7 +1601,7 @@ export class OfflineStore {
       return;
     }
     row.lyrics = { state: 'pending', bytes: 0 };
-    await this.bridge.enqueue({
+    await this.safeEnqueue({
       songId: song.id,
       url,
       suffix: 'lyrics',
@@ -1470,6 +1620,10 @@ export class OfflineStore {
       // The lyric row is an index row too, so it carries the cover id (v1.9.20): whichever of the
       // three transfers writes this song's row first, the row knows its cover.
       coverArt: song.coverArt ?? song.albumId,
+    }, () => {
+      const stuck = this.rows.get(song.id);
+      if (stuck) stuck.lyrics = { state: 'failed', bytes: 0, fetchedAt: Date.now() };
+      this.schedulePump(playlistId);
     });
   }
 
