@@ -1077,6 +1077,49 @@ export function downloadControlLabel(facts: DownloadControlFacts): string {
   }
 }
 
+/** What a tap on the download control does, in one word, before any of it is carried out. */
+export type DownloadTapAction = 'none' | 'download' | 'cancel' | 'remove';
+
+/**
+ * **The tap, bound to the same facts the sentence is printed from** (v2.0.0-beta.5).
+ *
+ * The defect Sage sent back, verbatim: *"in the stalled case the control says \"retry\" but the tap
+ * calls cancel()"*. The label and the action were two readings of two different questions — the
+ * sentence asked `stallOf`, the click handler only looked at the record's state name, and a stalled
+ * job is still a `downloading` record, so the retry cancelled it. `cancel()` then writes the
+ * manifest `partial` (offline.ts, `cancel`), and only a `downloading` manifest is resumed at boot:
+ * the tap that said retry ended the download *and* took it out of the boot resume.
+ *
+ * So the action is a function of `DownloadControlFacts` — the exact struct `downloadControlLabel`
+ * takes — and there is no way left to print one thing and do another:
+ *
+ *   - `stalled` → **download**, which is a resume: `download()` skips every `complete` row, so no
+ *     finished track and no resolved lyric is fetched twice, and it re-marks the manifest
+ *     `downloading` so the next boot picks the job up too. Never a cancel, never a fresh start.
+ *   - working (not stalled) → **cancel**, which is what a running job's tap has always meant.
+ *   - `complete` → nothing to fetch: a grown playlist or a missing cover is a resume (`download`),
+ *     a playlist the download still covers in full is a **remove**.
+ *   - no songs → nothing at all.
+ */
+export function downloadTapAction(facts: DownloadControlFacts): DownloadTapAction {
+  if (facts.songs.length === 0) return 'none';
+  // A `complete` record whose playlist has grown, or whose covers are not on disk, is a resume.
+  if (facts.state === 'complete') {
+    return facts.missing > 0 || facts.missingCovers > 0 ? 'download' : 'remove';
+  }
+  switch (facts.state) {
+    case 'none':
+    case 'idle':
+    case 'failed':
+    case 'partial':
+      return 'download';
+    case 'downloading':
+    case 'estimating':
+      // The one line the defect was: a stalled job's tap asks again, it does not cancel.
+      return facts.stalled ? 'download' : 'cancel';
+  }
+}
+
 /**
  * A playlist row's sub-line, from the store's verdict and the figures in hand.
  *
@@ -1707,12 +1750,12 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
   const NO_ACTIVITY: DownloadActivity = { bytes: 0, total: 0, at: 0, pending: 0 };
   const activity = (): DownloadActivity => offline?.activityOf(playlistId) ?? NO_ACTIVITY;
   /**
-   * The button's own sentence — the state machine lives in `downloadControlLabel`, which is a
-   * function of these facts alone so the same sentence can be read in a test.
+   * Every fact the control reports on, resolved from the store and the playlist in front of the
+   * owner — the struct the sentence is printed from and the tap is decided by.
    */
-  const label = (): string => {
+  const facts = (): DownloadControlFacts => {
     const record = offline?.record(playlistId);
-    return downloadControlLabel({
+    return {
       state: record?.state ?? 'none',
       done: record?.done ?? 0,
       total: record?.total ?? 0,
@@ -1723,8 +1766,15 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
       activity: activity(),
       // The one question behind `retry`: has the job said anything inside the stall window?
       stalled: offline?.stallOf(playlistId).stalled ?? true,
-    });
+    };
   };
+  /*
+   * The button's own sentence — the state machine lives in `downloadControlLabel`, which is a
+   * function of these facts alone so the same sentence can be read in a test. **The tap resolves
+   * `downloadTapAction(facts())` — the same struct, at the moment of the tap** — which is what
+   * makes "it says retry and cancels" unrepresentable rather than merely corrected.
+   */
+  const label = (): string => downloadControlLabel(facts());
   /*
    * The indicator: the byte figure is in the sentence, and the bar is the same fraction of the same
    * total, so a glance says "moving" and a long stare says how far. It lives inside the button, so
@@ -1736,10 +1786,12 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
   bar.append(fill);
   const button = h('button', { class: 'button dl-control', 'aria-label': '' }, [text, bar]);
   const paint = (): void => {
-    const record = offline?.record(playlistId);
+    const now = facts();
     const sentence = label();
     const current = activity();
-    const running = record?.state === 'downloading' || record?.state === 'estimating';
+    // A stalled job is not working: no bar, and no "downloading" in the accessible name — the same
+    // verdict the sentence reads, so a silent job cannot paint as a moving one.
+    const running = (now.state === 'downloading' || now.state === 'estimating') && !now.stalled;
     text.textContent = sentence;
     button.setAttribute('aria-label', running ? `${sentence}, downloading` : sentence);
     button.disabled = songs.length === 0;
@@ -1750,35 +1802,31 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
   paint();
   button.addEventListener('click', () => {
     if (!offline || songs.length === 0) return;
-    const record = offline.record(playlistId);
-    // A `complete` record whose playlist has grown is a resume, not a removal.
-    const grown = record?.state === 'complete' && missing() > 0;
     /*
-     * …and a `complete` record with a cover missing is a **covers-only** fetch (v1.9.20): the tap
-     * goes through the same `download()`, which skips every `complete` audio row and every resolved
-     * lyric, so no music byte is re-fetched and the label returns to `✓ 312 MB` when the covers land.
+     * **The tap is the label's own facts, read again at the moment of the tap.** Everything the
+     * branches below used to decide by hand (grown, covers-only, `downloading` → cancel) is the
+     * state machine in `downloadTapAction`, so a stalled job — whose record is still `downloading`
+     * — resumes instead of cancelling itself out of the boot resume (v2.0.0-beta.5, Sage's send-back).
      */
-    const coversOnly = record?.state === 'complete' && !grown && missingCovers() > 0;
-    if (
-      !record ||
-      record.state === 'idle' ||
-      record.state === 'failed' ||
-      record.state === 'partial' ||
-      grown ||
-      coversOnly
-    ) {
+    const action = downloadTapAction(facts());
+    if (action === 'none') return;
+    if (action === 'download') {
       void (async () => {
         // Wi-Fi only by default: the native side enforces `allowsCellularAccess = false`.
         // The name goes with the request: it is the one fact about this download that cannot be
         // rebuilt from the files afterwards, and the offline browse list needs it (v1.9.18).
+        // A resume lands here too: `download()` keeps every `complete` row and re-marks the
+        // manifest `downloading`, so neither a byte nor the boot resume is lost.
         const result = await offline.download(playlistId, songs, { allowsCellular: false, name });
         if (result.kind === 'no-space') ctx.toast(`Not enough free space — ${formatBytes(result.needed)} needed`, 'error');
       })();
-    } else if (record.state === 'downloading' || record.state === 'estimating') {
-      void offline.cancel(playlistId);
-    } else if (record.state === 'complete') {
-      void offline.remove(playlistId);
+      return;
     }
+    if (action === 'cancel') {
+      void offline.cancel(playlistId);
+      return;
+    }
+    void offline.remove(playlistId);
   });
   subscribeOffline(offline, paint);
   return button;

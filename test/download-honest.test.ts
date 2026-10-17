@@ -23,7 +23,8 @@ import {
   type DownloadsBridge,
   type IndexRow,
 } from '../src/state/offline.ts';
-import { downloadControlLabel, type DownloadControlFacts } from '../src/ui/app.ts';
+import { downloadControlLabel, downloadTapAction, type DownloadControlFacts, type DownloadTapAction } from '../src/ui/app.ts';
+import { loadMirror, type MirrorStore } from '../src/storage/offline.ts';
 import type { Song } from '../src/api/types.ts';
 
 const TRACKS = 40;
@@ -108,10 +109,10 @@ function store(bridge: FakeBridge): OfflineStore {
 }
 
 /** The button's sentence, read from the store's own facts — the control's `label()` in one line. */
-function labelOf(offline: OfflineStore, playlistId: string, songList: Song[] = songs): string {
+function labelOf(offline: OfflineStore, playlistId: string, songList: Song[] = songs, now = Date.now()): string {
   const record = offline.record(playlistId);
   const activity = offline.activityOf(playlistId);
-  const stalled = offline.stallOf(playlistId).stalled;
+  const stalled = offline.stallOf(playlistId, now).stalled;
   const facts: DownloadControlFacts = {
     state: record?.state ?? 'none',
     done: record?.done ?? 0,
@@ -303,4 +304,113 @@ test('the control repaints while bytes move, and its figure only ever grows', as
   assert.ok(offline.activityOf('pl-1').bytes >= 4_000_000, 'the newest byte count is the one on screen');
   assert.ok(paints > start, 'the control was repainted by the progress events, not only by a transfer finishing');
   offline.dispose();
+});
+
+/* ------------------------------------------------------------------ 6. the tap seam */
+
+/**
+ * **The tap, read exactly as `downloadControl`'s click handler reads it** — the same
+ * `DownloadControlFacts` the sentence is printed from, through `downloadTapAction`. Sage's
+ * send-back was that the sentence and the tap were two different questions; this is the one place
+ * both are answered, so a test can drive ready → working → stalled and see the action in each.
+ *
+ * `now` is threaded through so the stall window can be crossed without waiting the real 20 s: the
+ * window is the shipped constant, only the clock is the test's.
+ */
+function tapOf(offline: OfflineStore, playlistId: string, now = Date.now(), songList: Song[] = songs): DownloadTapAction {
+  const record = offline.record(playlistId);
+  const activity = offline.activityOf(playlistId);
+  return downloadTapAction({
+    state: record?.state ?? 'none',
+    done: record?.done ?? 0,
+    total: record?.total ?? 0,
+    songs: songList,
+    size: formatSize(activity.total > 0 ? activity.total : (record?.bytes ?? 0)),
+    missing: offline.missingCount(playlistId, songList),
+    missingCovers: offline.missingCovers(songList),
+    activity,
+    stalled: offline.stallOf(playlistId, now).stalled,
+  });
+}
+
+test('the tap follows the sentence: ready → working → stalled, and a stalled tap resumes — never cancels', async () => {
+  const bridge = fakeBridge();
+  const memory = memoryStore();
+  const offline = new OfflineStore(bridge, { store: memory, artUrl: (cover) => `rest/getCoverArt?id=${cover}` });
+
+  // READY — nothing was ever asked of this playlist: the tap starts the job.
+  assert.equal(tapOf(offline, 'pl-1'), 'download', 'ready: the tap downloads');
+  assert.match(labelOf(offline, 'pl-1'), /^↓ /, 'ready: and the sentence offers a download');
+
+  await offline.download('pl-1', songs, { name: 'Jap' });
+  await settle();
+
+  // WORKING — bytes are arriving: the sentence must not say retry, and the tap is still cancel.
+  bridge.emit('progress', { songId: 's0', bytes: 1_000_000, total: SONG_BYTES });
+  await settle();
+  assert.equal(tapOf(offline, 'pl-1'), 'cancel', 'working: the tap cancels');
+  assert.doesNotMatch(labelOf(offline, 'pl-1'), /retry/i, 'working: no retry while it moves');
+
+  // 25 of the 40 land, then the connection goes quiet and never says anything again.
+  for (const job of audioJobs(bridge).slice(0, 25)) {
+    bridge.emit('done', { songId: job.songId, path: `file:///${job.songId}.opus`, bytes: SONG_BYTES });
+  }
+  await settle();
+
+  // STALLED — past the window the sentence offers the tap… and the tap must ASK AGAIN.
+  const cold = Date.now() + STALL_MS + 1_000;
+  assert.equal(offline.stallOf('pl-1', cold).stalled, true, 'silent past the window');
+  assert.match(labelOf(offline, 'pl-1', songs, cold), /retry/i, 'stalled: the control says retry');
+  assert.equal(
+    tapOf(offline, 'pl-1', cold),
+    'download',
+    'stalled: the tap resumes — this is the defect: it said retry and called cancel()',
+  );
+
+  // …and the resume keeps everything that already landed, byte for byte.
+  const audioBefore = audioJobs(bridge).length;
+  const bytesBefore = offline.activityOf('pl-1').bytes;
+  await offline.download('pl-1', songs, { name: 'Jap' }); // what the tap does on 'download'
+  await settle();
+  assert.equal(audioJobs(bridge).length - audioBefore, TRACKS - 25, 'only the 15 missing tracks are asked for');
+  for (let index = 0; index < 25; index += 1) {
+    assert.equal(bridge.attempts.get(`audio:s${index}`), 1, `s${index} was already here and was not fetched twice`);
+  }
+  assert.equal(offline.activityOf('pl-1').bytes, bytesBefore, 'no byte thrown away by the resume');
+
+  // …and the manifest is left `downloading`, which is the only state the next boot resumes. A
+  // cancel here would have written `partial` (offline.ts `cancel`) and taken the job out of it.
+  const mirror = loadMirror(memory as MirrorStore);
+  assert.equal(
+    mirror?.playlists?.['pl-1']?.state,
+    'downloading',
+    'the resumed job stays resumable in the mirror',
+  );
+  offline.dispose();
+});
+
+test('a finished download taps to a removal, a grown one to a resume, and an empty playlist to nothing', () => {
+  const facts = (state: DownloadControlFacts['state'], extra: Partial<DownloadControlFacts> = {}): DownloadControlFacts => ({
+    state,
+    done: 0,
+    total: 0,
+    songs,
+    size: '1.0 MB',
+    missing: 0,
+    missingCovers: 0,
+    activity: { bytes: 0, total: 0, at: 0, pending: 0 },
+    stalled: false,
+    ...extra,
+  });
+  assert.equal(downloadTapAction(facts('none')), 'download', 'a playlist with no record downloads');
+  assert.equal(downloadTapAction(facts('idle')), 'download');
+  assert.equal(downloadTapAction(facts('failed')), 'download');
+  assert.equal(downloadTapAction(facts('partial')), 'download');
+  assert.equal(downloadTapAction(facts('complete')), 'remove', 'nothing left to fetch: the tap removes');
+  assert.equal(downloadTapAction(facts('complete', { missing: 2 })), 'download', 'a grown playlist resumes');
+  assert.equal(downloadTapAction(facts('complete', { missingCovers: 1 })), 'download', 'a missing cover resumes');
+  assert.equal(downloadTapAction(facts('downloading', { stalled: true })), 'download', 'stalled is never a cancel');
+  assert.equal(downloadTapAction(facts('estimating', { stalled: true })), 'download', 'nor is a stalled estimate');
+  assert.equal(downloadTapAction(facts('complete', { songs: [] })), 'none', 'nothing to download, nothing to do');
+  assert.equal(downloadTapAction(facts('none', { songs: [] })), 'none');
 });
