@@ -22,7 +22,7 @@ import { platformInfo } from '../platform.ts';
 import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
-import { OfflineStore, estimateBytes, formatBytes, type DownloadedPlaylist, type PlaylistBadge, type PlaylistDownloadState, type SizeEstimate } from '../state/offline.ts';
+import { OfflineStore, estimateBytes, formatBytes, formatSize, type DownloadActivity, type DownloadedPlaylist, type PlaylistBadge, type PlaylistDownloadState, type SizeEstimate } from '../state/offline.ts';
 import { fillSong } from '../state/song-metadata.ts';
 import { createDownloadsBridge, localFileSrc } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
@@ -997,12 +997,20 @@ export interface DownloadControlFacts {
   total: number;
   /** The playlist in front of the owner, which may be longer than the manifest. */
   songs: Song[];
-  /** The size the button prints, already formatted (`up to 312 MB` / `312 MB`). */
+  /** The size the button prints, already formatted to one decimal (`4.8 GB` — never `up to 4.8 GB`). */
   size: string;
   /** Tracks this download does not cover (`missingCount`). */
   missing: number;
   /** Covers this download has not got (`missingCovers`). */
   missingCovers: number;
+  /** Bytes that have arrived, and the figure they are a fraction of — the live indicator's numbers. */
+  activity: DownloadActivity;
+  /**
+   * The store's stall verdict (`OfflineStore.stallOf`) — `retry` is printed only when this is true,
+   * which is the owner's "the retry should not appear if the download is still actively working"
+   * made into a fact the sentence depends on rather than a guess about the state name.
+   */
+  stalled: boolean;
 }
 
 /**
@@ -1038,22 +1046,34 @@ export function downloadControlLabel(facts: DownloadControlFacts): string {
   if (state === 'none' || state === 'idle') {
     return facts.songs.length === 0 ? 'Nothing to download' : `↓ ${facts.size}`;
   }
+  /* The running sentence: **n of m · 1.2 GB of 4.8 GB**, the figure climbing to the same total the
+   * finished control prints. It is the byte count the owner asked to see, driven by the job's own
+   * `progress` events, and it is what the button says for as long as the job is alive — never
+   * `retry`, which now needs `facts.stalled` to be true (v2.0.0-beta.5). */
+  const running = (): string => `${controlFigures(facts)} · ${formatSize(facts.activity.bytes)} of ${facts.size}`;
   switch (state) {
     case 'estimating':
       return '…';
     case 'downloading':
-      return `${controlFigures(facts)} · ${facts.size}`;
+      return facts.stalled ? `${controlFigures(facts)} · retry` : running();
     case 'partial':
-      return `${controlFigures(facts)} · retry`;
+      // One transfer short, and the pump is probably already re-asking it: the tap is offered only
+      // once the job has been silent for the stall window — but the pair is still worth printing.
+      return `${controlFigures(facts)} · ${facts.stalled ? 'retry' : `${formatSize(facts.activity.bytes)} of ${facts.size}`}`;
     case 'complete': {
       // The playlist changed after it was downloaded: not complete any more, and it says so.
       if (facts.missing > 0) return grownControlLabel(facts.songs, facts.missing);
-      // All the music is here, a cover is not: one tap fetches the covers and nothing else.
-      if (facts.missingCovers > 0) return `✓ ${facts.size} · ↓ covers`;
+      /*
+       * v2.0.0-beta.5 — **the finish is a tick and a size, and nothing else.** This branch used to
+       * print `✓ 4.8 GB · ↓ covers` whenever a cover was not on disk — which, because the record
+       * finished on audio alone, was every playlist whose covers were still in flight. The covers
+       * are now part of the same job (`reconcileRecord`), so a finished job has nothing left to
+       * offer, which is the owner's "no further actions are required".
+       */
       return `✓ ${facts.size}`;
     }
     case 'failed':
-      return 'Retry';
+      return facts.stalled ? 'Retry' : running();
   }
 }
 
@@ -1659,31 +1679,33 @@ export function grownControlLabel(songs: Song[], missing: number): string {
 }
 
 /**
- * The playlist page's download control (v1.9.12): one compact button in the header action row that
- * shows the total size and drives the §5 state machine. It renders its label from the index
- * synchronously and updates only its own label from the store's change listener — never a poll, and
- * never a re-render of the list behind it. The estimate is recomputed inside `paint()`, not captured
- * at render: the same page reads `up to 312 MB` before a download and the exact figure after it.
+ * The playlist page's download control (v1.9.12; v2.0.0-beta.5 for the three things the owner asked
+ * for): one compact button in the header action row that shows the exact size, a live bar while the
+ * job runs, and drives the §5 state machine.
+ *
+ * It renders its sentence from the index synchronously and repaints only itself from the store's
+ * change listener — never a poll of the network, never a re-render of the list behind it. The store
+ * now emits a change for the job's own `progress` events (throttled to 250 ms), which is what makes
+ * the byte figure and the bar move while a transfer is in flight; the estimate is recomputed inside
+ * `paint()`, so the number the control prints before a download and after it are the same arithmetic
+ * and differ only in what has actually arrived.
  */
 function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], name: string): HTMLElement {
   const offline = ctx.offline;
   const estimate = (): SizeEstimate => (offline ? offline.estimate(songs) : estimateBytes(songs));
-  const button = h('button', { class: 'button', 'aria-label': '' });
-  const sizeLabel = (): string => {
-    const current = estimate();
-    const prefix = current.exact ? '' : 'up to ';
-    return `${prefix}${formatBytes(current.total)}`;
-  };
+  /*
+   * v2.0.0-beta.5 — **one decimal, and no `up to`.** The owner: "show the exact filesize to one
+   * decimal point eg. 4.8 GB rather than an Up to 5 GB". `formatSize` is the control's own formatter
+   * for exactly that reason; `formatBytes` still serves the settings line and the row's sub-line,
+   * where a whole number is the readable thing.
+   */
+  const sizeLabel = (): string => formatSize(estimate().total);
   /** Tracks the downloaded set does not cover — a playlist a song was added to afterwards. */
   const missing = (): number => offline?.missingCount(playlistId, songs) ?? 0;
-  /**
-   * Covers this playlist's download has not got (v1.9.20, §5.8).
-   *
-   * This is what gives a playlist downloaded by 1.9.19 — one with its audio and lyrics but no art —
-   * a way back to a cover that costs one tap and no audio: the label says `↓ covers` and the tap
-   * calls the same `download()`, which re-enqueues only what is absent.
-   */
+  /** Covers this playlist's download has not got — no longer a label of its own (v2.0.0-beta.5). */
   const missingCovers = (): number => offline?.missingCovers(songs) ?? 0;
+  const NO_ACTIVITY: DownloadActivity = { bytes: 0, total: 0, at: 0, pending: 0 };
+  const activity = (): DownloadActivity => offline?.activityOf(playlistId) ?? NO_ACTIVITY;
   /**
    * The button's own sentence — the state machine lives in `downloadControlLabel`, which is a
    * function of these facts alone so the same sentence can be read in a test.
@@ -1698,13 +1720,32 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
       size: sizeLabel(),
       missing: missing(),
       missingCovers: missingCovers(),
+      activity: activity(),
+      // The one question behind `retry`: has the job said anything inside the stall window?
+      stalled: offline?.stallOf(playlistId).stalled ?? true,
     });
   };
+  /*
+   * The indicator: the byte figure is in the sentence, and the bar is the same fraction of the same
+   * total, so a glance says "moving" and a long stare says how far. It lives inside the button, so
+   * there is no second tap target and nothing in the header row changes height.
+   */
+  const text = h('span', { class: 'dl-text' });
+  const bar = h('span', { class: 'dl-bar hidden', 'aria-hidden': 'true' });
+  const fill = h('span', { class: 'dl-fill' });
+  bar.append(fill);
+  const button = h('button', { class: 'button dl-control', 'aria-label': '' }, [text, bar]);
   const paint = (): void => {
-    const text = label();
-    button.textContent = text;
-    button.setAttribute('aria-label', text);
+    const record = offline?.record(playlistId);
+    const sentence = label();
+    const current = activity();
+    const running = record?.state === 'downloading' || record?.state === 'estimating';
+    text.textContent = sentence;
+    button.setAttribute('aria-label', running ? `${sentence}, downloading` : sentence);
     button.disabled = songs.length === 0;
+    bar.classList.toggle('hidden', !running);
+    const fraction = current.total > 0 ? Math.min(1, Math.max(0, current.bytes / current.total)) : 0;
+    fill.style.width = `${Math.round(fraction * 100)}%`;
   };
   paint();
   button.addEventListener('click', () => {

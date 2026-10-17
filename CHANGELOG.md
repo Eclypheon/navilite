@@ -332,3 +332,10 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - The app starts at the top of the screen again. A first launch could open with a wide empty band above the top bar — up to a seventh of the screen — and only closing and reopening it put that right; a long spell in the background could do the same. The app no longer adds the screen’s own safe-area twice, so the band is gone and the first frame is already right.
 - One tap downloads the whole playlist, covers and all. A big playlist used to stop part-way — the 269-track one stopped at 254 — and sit there until you tapped retry, and the covers of the albums past that point waited for a tap of their own. The download now runs to the end in one go, re-asks a track that fails on its own, and fetches every cover as part of the same job.
+
+## 2.0-beta.5 — 2026-10-17
+
+- One tap downloads the playlist and its covers, and then it is finished: the button goes to the tick and the exact size and never asks you for the covers as a second step. A cover still arriving was what the old button read as "download covers".
+- The size on the download button is exact, to one decimal: 4.8 GB rather than "up to 5 GB".
+- You can see the download working. The button shows the bytes that have arrived against the total, with a bar that fills as they land, updated while the download runs.
+- Retry appears only when the download has actually stopped moving, never while it is still working, and a retry carries on from where it was: the files already on the phone are not downloaded again.

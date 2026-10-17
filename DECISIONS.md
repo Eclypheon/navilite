@@ -1218,3 +1218,35 @@ both are what a later change must not undo.
    duration fix stays where it shipped (`v2.0.0-beta.2`) instead of being carried a second time. Proof on the
    harness that owns this rule (`tools/container-tap-check.mjs`, pinned in `npm test` as
    `test/container-tap.test.ts`) and on the bytes that ship: `docs/verification.md` §34.
+
+
+## The stall window (v2.0.0-beta.5)
+
+The owner: *"the retry should not appear if the download is still actively working"*. So `retry` is
+no longer a function of the record's state name; it is a function of whether the job has said
+anything recently, and the sentence is built from that verdict (`OfflineStore.stallOf`,
+`DownloadControlFacts.stalled`).
+
+- **N = 20 s**, exported as `STALL_MS` in `src/state/offline.ts`. A job that has recorded a signal
+  (a `progress` event from any of its transfers — native emits one per chunk — a transfer settling,
+  or a reconcile from a pass of its own) inside that window is working, and the control prints
+  `n of m · 1.2 GB of 4.8 GB` instead of `· retry`.
+- **A pump pass it scheduled for itself counts as working.** The self-completion pump's backoff
+  reaches 20 s (1.5 → 4 → 10 → 20), and a tap on a download the pump is already re-asking would
+  re-enqueue over it (native `enqueue` cancels the task it replaces). A scheduled pass therefore
+  withholds `retry` even when the clock is past the window.
+- **A cancelled download has recorded no signal** (`cancel` is not a signal), so it reads as stalled
+  the moment it is cancelled: nothing is running, so there is nothing to wait for.
+- **Nothing left to fetch is never stalled**, and a `complete` record is never stalled, whatever the
+  clock says.
+- The same window answers the live indicator: the control repaints from the job's own
+  `progress` events, throttled to one repaint per 250 ms (`PROGRESS_NOTIFY_MS`), so the byte figure
+  and the bar move about as fast as the eye can use them without a download becoming a render loop.
+
+**The covers are part of the finish, not a second step.** `reconcileRecord` used to declare a
+playlist `complete` as soon as its audio was in, which — because the art transfers it had just
+enqueued were still `pending` — made `missingCovers() > 0` true for a job that was still running and
+printed `✓ 4.8 GB · ↓ covers`. A cover in flight now holds the record on `downloading` exactly as a
+`staging` track does, and art events reconcile the record (`onArtDone`/`onArtFailed`). A cover that
+settled `none` or genuinely `failed` does not hold it: a missing picture must never leave a playlist
+on `· retry` for ever, and a failed cover is re-asked by the pump.

@@ -316,9 +316,16 @@ test('the badge is read from complete files, and a grown playlist is never calle
     done: partialRecord.done,
     total: partialRecord.total,
     songs: grownSongs,
-    size: 'up to 24 MB',
+    size: '24.0 MB',
     missing: store.missingCount('pl-2', grownSongs),
     missingCovers: store.missingCovers(grownSongs),
+    /*
+     * v2.0.0-beta.5 — `retry` is printed only for a **stalled** job, so this case (the point of
+     * which is the pair of numbers, not the liveness) is handed the stalled verdict explicitly.
+     * Without it the control prints `1 of 3 · 0 B of 24.0 MB`, the live sentence a running job has.
+     */
+    activity: { bytes: 0, total: 0, at: 0, pending: 0 },
+    stalled: true,
   });
   assert.equal(partialControl, '1 of 3 · retry', 'the control reads the playlist’s own length, never the manifest’s');
   assert.equal(
@@ -370,14 +377,17 @@ test('a grown playlist with a lyric still in flight prints the playlist’s own 
     done: grownRecord.done,
     total: grownRecord.total,
     songs: grownSongs,
-    size: 'up to 24 MB',
+    size: '24.0 MB',
     missing: store.missingCount('pl-1', grownSongs),
     missingCovers: store.missingCovers(grownSongs),
+    // Stalled explicitly: what this case is about is the `2 of 4` pair, not whether the job is alive.
+    activity: { bytes: 0, total: 0, at: 0, pending: 0 },
+    stalled: true,
   });
-  assert.equal(control, '2 of 4 · up to 24 MB', 'the playlist page’s own control, while a lyric is still in flight');
+  assert.equal(control, '2 of 4 · retry', 'the playlist page’s own control, for a grown playlist');
   assert.equal(
     /· (\d+ of \d+) on this phone$/.exec(playlistSubLine({ id: 'pl-1', name: 'Driving', songCount: 4 }, badge))?.[1],
-    /^(\d+ of \d+) · up to 24 MB$/.exec(control)?.[1],
+    /^(\d+ of \d+) · retry$/.exec(control)?.[1],
     'the row and the page’s own control agree while a lyric is still in flight, too',
   );
 });

@@ -154,7 +154,16 @@ test('one tap queues all 269 tracks and all 23 covers, and the refused call is r
     bridge.emit('done', { songId: job.songId, path: `file:///${job.songId}.opus`, bytes: 5_000_000 });
   }
   await settle();
-  assert.equal(offline.record('pl-1')?.state, 'complete', 'the job finishes on its own');
+  /*
+   * v2.0.0-beta.5 — the covers of the same tap are still in flight, and that is exactly the state the
+   * owner was offered a second tap in. They are part of this job now, so it stays open until they land.
+   */
+  assert.equal(offline.record('pl-1')?.state, 'downloading', 'the covers of the same tap hold the job open');
+  for (const job of artJobs(bridge)) {
+    bridge.emit('done', { songId: job.songId, kind: 'art', bytes: 200_000 });
+  }
+  await settle();
+  assert.equal(offline.record('pl-1')?.state, 'complete', 'the job finishes on its own, covers included');
   assert.equal(offline.record('pl-1')?.done, TRACKS);
   offline.dispose();
 });

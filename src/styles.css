@@ -1420,3 +1420,34 @@ img {
     gap: 24px;
   }
 }
+
+/*
+ * v2.0.0-beta.5 — the download control's live indicator. The bar sits under the button's own
+ * sentence and inside the same button: no second tap target, no height change in the header row,
+ * and its fill is the job's own byte fraction (`OfflineStore.activityOf`).
+ */
+.dl-control {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.dl-bar {
+  display: block;
+  width: 100%;
+  min-width: 64px;
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(127, 127, 127, 0.3);
+}
+.dl-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: currentColor;
+  transition: width 220ms linear;
+}
+.dl-bar.hidden {
+  display: none;
+}

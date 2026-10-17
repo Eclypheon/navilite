@@ -585,7 +585,8 @@ test('a cover fails without gating anything, and a 404 is a recorded fact', asyn
   const songs = [covered('a', 'cover-1')];
   await store.download('pl-1', songs, { name: 'Driving' });
   landAudioAndLyrics(bridge, songs);
-  assert.equal(store.record('pl-1')?.state, 'complete');
+  // v2.0.0-beta.5 — the cover is a transfer of this same job, and it is still in flight.
+  assert.equal(store.record('pl-1')?.state, 'downloading', 'the cover holds the one job open');
 
   bridge.emit('failed', { songId: 'cover-1', kind: 'art', status: 500, error: 'HTTP 500' });
   assert.equal(store.record('pl-1')?.state, 'complete', 'a missing picture never puts a playlist on `· retry`');

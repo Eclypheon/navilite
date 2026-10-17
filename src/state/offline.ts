@@ -235,6 +235,27 @@ const ENQUEUE_RETRY_MS = 400;
 /** The self-completion pump's backoff, one entry per round; the last entry repeats. */
 const PUMP_BACKOFF_MS = [1500, 4000, 10000, 20000];
 
+/**
+ * v2.0.0-beta.5 — **the stall window**: how long a download may say nothing at all before the
+ * control is allowed to offer a `retry`.
+ *
+ * The owner, verbatim: "the retry should not appear if the download is still actively working". A
+ * job is working whenever anything has happened for it inside this window — a `progress` event from
+ * any of its transfers (native emits one per chunk, `didProgress`), a transfer settling, or a pump
+ * pass the job scheduled for itself. Twenty seconds is deliberately longer than the pump's own
+ * longest backoff (20 s) plus a slow start on a tailnet, and it is the one state in which a human
+ * tap is genuinely the only thing left. `DECISIONS.md`, "The stall window (v2.0.0-beta.5)".
+ */
+export const STALL_MS = 20_000;
+
+/**
+ * How often a running download may repaint its control. Native reports bytes per chunk, which on a
+ * fast connection is far more often than a screen can use; the owner asked for "updating every
+ * second", and a quarter-second ceiling keeps the label honest without turning a download into a
+ * render loop.
+ */
+const PROGRESS_NOTIFY_MS = 250;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -361,6 +382,54 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * **The download control's own figure** (v2.0.0-beta.5): one decimal, always, and never a range.
+ *
+ * The owner: "show the exact filesize to one decimal point eg. 4.8 GB rather than an Up to 5 GB".
+ * `formatBytes` above rounds a big number to whole units and a small one to a tenth, which is right
+ * for a settings line and wrong for the one number he checks against his phone: `5 GB` is a claim
+ * about a playlist, `4.8 GB` is a figure. This formatter is used by the control and by nothing else,
+ * so the rest of the app's sizes stay in `formatBytes`'s shorter shape.
+ *
+ * Where the estimate is not byte-equal to the sum of `Content-Length` (`estimateBytes`'s `exact`
+ * flag: an entry with no `size`, an unresolved lyric or cover), the number is still printed to a
+ * tenth and still climbs to the measured total as files land — the honest fix is the figure he can
+ * compare, not a `up to` hedge he has to interpret.
+ */
+export function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  if (unit === 0) return `${Math.round(value)} B`;
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/**
+ * What a running download has to show (v2.0.0-beta.5): bytes, the figure they are a fraction of, and
+ * when the job last said anything.
+ *
+ * `bytes` is measured, never promised: complete audio rows' own recorded lengths, their lyrics and
+ * their covers, plus the in-flight transfer's last reported count (`progress`), so the bar moves
+ * between `done` events instead of jumping once per file. `total` is the estimate the control prints
+ * (`record.bytes`), and `at` is the store's own last-signal clock — the input to `stallOf`, so the
+ * indicator and the retry verdict can never disagree about whether the job is alive.
+ */
+export interface DownloadActivity {
+  /** Bytes that have actually arrived: on-disk files plus the transfer in flight. */
+  bytes: number;
+  /** The figure the bar is a fraction of — the estimate, or the measured bytes when it has none. */
+  total: number;
+  /** When the job last said anything (`0` when it never has). */
+  at: number;
+  /** Transfers the job still owes: audio not complete, plus covers not settled. */
+  pending: number;
+}
+
+/**
  * §5 resume rule, the half that is pure: a `staging` row whose written bytes equal the expected
  * `Content-Length` is promoted to `complete` (the bytes arrived, only the callback was lost);
  * otherwise it is `partial` and re-fetched. "Correct or re-fetch", never "trust a partial".
@@ -416,6 +485,16 @@ export class OfflineStore {
    */
   private readonly songLookup: (songId: string) => Promise<Song | null>;
   private readonly unlisteners: Array<() => void> = [];
+  /**
+   * The last `bytes` a transfer reported, per song id (v2.0.0-beta.5) — what makes the control's
+   * figure and bar move between `done` events. Cleared when the transfer settles, so the count on
+   * screen is never a stale chunk added to a file that is already complete.
+   */
+  private readonly inFlight = new Map<string, number>();
+  /** When each playlist's job last said anything — the stall window's only input (v2.0.0-beta.5). */
+  private readonly lastSignal = new Map<string, number>();
+  /** One shared repaint timer for all progress events, so a fast transfer cannot flood the UI. */
+  private progressNotify: ReturnType<typeof setTimeout> | null = null;
   private readonly changeListeners = new Set<() => void>();
   private listening = false;
   /** How long one bridge `enqueue` may take before it is treated as a failure (v2.0.0-beta.4). */
@@ -950,6 +1029,97 @@ export class OfflineStore {
   }
 
   /**
+   * What the playlist's job has actually moved (v2.0.0-beta.5), for the control's live indicator.
+   *
+   * Every byte here is **measured**: the file's own recorded length for a complete row, the lyric
+   * body's for a present one, the cover's once per album, plus the in-flight transfer's last
+   * reported count. So the figure climbs as the download climbs and, when the job finishes, equals
+   * the sum the row prints — one arithmetic, before and after, which is what "the exact filesize"
+   * means. `total` is the estimate (the control's own sentence) and `at` is the same clock
+   * `stallOf` reads, so the bar and the retry verdict can never disagree.
+   */
+  activityOf(playlistId: string): DownloadActivity {
+    const record = this.playlists.get(playlistId);
+    if (!record) return { bytes: 0, total: 0, at: 0, pending: 0 };
+    let bytes = 0;
+    let pending = 0;
+    const covers = new Set<string>();
+    for (const song of record.songs) {
+      const row = this.rows.get(song.id);
+      if (row?.state === 'complete') bytes += row.bytes;
+      else {
+        bytes += this.inFlight.get(song.id) ?? 0;
+        pending += 1;
+      }
+      if (row?.lyrics?.state === 'present') bytes += row.lyrics.bytes;
+      const cover = row?.coverArt ?? song.coverArt ?? song.albumId;
+      if (cover !== undefined && cover !== '') covers.add(cover);
+    }
+    for (const cover of covers) {
+      const art = artRowForCover(this.rows, cover);
+      if (art?.state === 'present') bytes += art.bytes;
+      if (art?.state === 'pending') pending += 1;
+    }
+    return { bytes, total: record.bytes > 0 ? record.bytes : bytes, at: this.lastSignal.get(playlistId) ?? 0, pending };
+  }
+
+  /**
+   * **Is this download stalled?** (v2.0.0-beta.5) — the one question the control asks before it
+   * prints `retry`, because the owner's report was that a retry appeared while the job was working.
+   *
+   * Not stalled when: there is nothing left to fetch; the record is finished; or the job has a pump
+   * pass scheduled for itself — a scheduled pass *is* the job working, and a tap there would
+   * re-enqueue over it (native `enqueue` cancels the task it replaces). Otherwise the job is stalled
+   * once `lastSignal` is older than `STALL_MS`, and a job that has recorded no signal at all (a
+   * cancelled one: `cancel` drops the entry) is stalled immediately — nothing is running, so there
+   * is nothing to wait for.
+   */
+  stallOf(playlistId: string, now = Date.now()): { stalled: boolean; idleMs: number; window: number } {
+    const idle = { stalled: false, idleMs: 0, window: STALL_MS };
+    const record = this.playlists.get(playlistId);
+    if (!record || record.state === 'complete' || record.state === 'idle') return idle;
+    if (this.outstanding(record) === 0) return idle;
+    if (this.pumpTimers.has(playlistId)) return idle;
+    const at = this.lastSignal.get(playlistId);
+    const idleMs = at === undefined ? Number.POSITIVE_INFINITY : Math.max(0, now - at);
+    return { stalled: idleMs >= STALL_MS, idleMs, window: STALL_MS };
+  }
+
+  /** Transfers the job still owes: audio not complete, lyrics pending, covers in flight. */
+  private outstanding(record: PlaylistRecord): number {
+    let pending = 0;
+    const covers = new Set<string>();
+    for (const song of record.songs) {
+      const row = this.rows.get(song.id);
+      if (row?.state !== 'complete') pending += 1;
+      if (row?.lyrics?.state === 'pending') pending += 1;
+      const cover = row?.coverArt ?? song.coverArt ?? song.albumId;
+      if (cover !== undefined && cover !== '') covers.add(cover);
+    }
+    for (const cover of covers) {
+      if (artRowForCover(this.rows, cover)?.state === 'pending') pending += 1;
+    }
+    return pending;
+  }
+
+  /** The job said something: refresh the stall clock and repaint the control, at most every 250 ms. */
+  private touch(playlistId: string): void {
+    if (playlistId === '') return;
+    this.lastSignal.set(playlistId, Date.now());
+    this.scheduleProgressNotify();
+  }
+
+  private scheduleProgressNotify(): void {
+    if (this.progressNotify !== null || this.disposed) return;
+    this.progressNotify = setTimeout(() => {
+      this.progressNotify = null;
+      this.notify();
+    }, PROGRESS_NOTIFY_MS);
+    (this.progressNotify as unknown as { unref?: () => void }).unref?.();
+  }
+
+
+  /**
    * The playlists a connection is not needed for (v1.9.18) — every playlist with at least one
    * complete file on disk, newest request first.
    *
@@ -1390,7 +1560,26 @@ export class OfflineStore {
     this.listening = true;
     void this.bridge.addListener('done', (event) => this.onDone(event)).then((remove) => this.unlisteners.push(remove));
     void this.bridge.addListener('failed', (event) => this.onFailed(event)).then((remove) => this.unlisteners.push(remove));
-    void this.bridge.addListener('progress', () => undefined).then((remove) => this.unlisteners.push(remove));
+    void this.bridge.addListener('progress', (event) => this.onProgress(event)).then((remove) => this.unlisteners.push(remove));
+  }
+
+  /**
+   * A transfer is moving (v2.0.0-beta.5).
+   *
+   * The event was subscribed to and thrown away ("`addListener('progress', () => undefined)`") for
+   * the whole of 1.x: the owner's complaint was not only that he could not see the download, it is
+   * that the control could not tell a running job from a dead one and printed `retry` at both. Two
+   * facts are taken from it now — the byte count the indicator prints, and the timestamp the stall
+   * verdict reads — and neither is authoritative about anything else: `list()` stays the truth, and
+   * a `progress` for a song this store has no row for is ignored.
+   */
+  private onProgress(event: DownloadEvent): void {
+    const row = this.rows.get(event.songId);
+    if (!row) return;
+    if (event.kind === undefined || event.kind === 'audio') {
+      if (typeof event.bytes === 'number' && event.bytes >= 0) this.inFlight.set(event.songId, event.bytes);
+    }
+    for (const playlistId of row.refs) this.touch(playlistId);
   }
 
   private onDone(event: DownloadEvent): void {
@@ -1491,8 +1680,25 @@ export class OfflineStore {
        */
       return;
     }
+    /*
+     * v2.0.0-beta.5 — the cover is a transfer of the playlist's own job, so its landing can be what
+     * *finishes* the job (`reconcileRecord`: a pending cover holds the record on `downloading`).
+     * Without this line the record would stay open until some other event happened to reconcile it,
+     * which for the last cover of the last album means "for ever".
+     */
+    for (const playlistId of this.refsForCover(cover)) this.reconcileRecord(playlistId);
     this.saveMirror();
     this.notify();
+  }
+
+  /** Every playlist whose rows name this cover — the fan-out axis for an art event (§5.4). */
+  private refsForCover(cover: string): string[] {
+    const ids = new Set<string>();
+    for (const row of this.rows.values()) {
+      if (row.coverArt !== cover) continue;
+      for (const ref of row.refs) ids.add(ref);
+    }
+    return [...ids];
   }
 
   /**
@@ -1516,7 +1722,14 @@ export class OfflineStore {
       touched = true;
     }
     if (!touched) return;
-    // Deliberately **no** `reconcileRecord`: the art axis is not part of a playlist's state (§I5).
+    /*
+     * v2.0.0-beta.5 — the record **is** reconciled now, and the sentence above still holds: neither
+     * `none` nor `failed` counts as pending in `reconcileRecord`, so a cover that will not come
+     * leaves the playlist `complete` on audio and lyrics (never `· retry`). What changed is that a
+     * job whose last outstanding transfer was this cover must be told the transfer is over, or it
+     * would sit on `downloading` for ever waiting for a byte that is not coming.
+     */
+    for (const playlistId of this.refsForCover(cover)) this.reconcileRecord(playlistId);
     this.saveMirror();
     this.notify();
   }
@@ -1743,10 +1956,14 @@ export class OfflineStore {
   private reconcileRecord(playlistId: string): void {
     const record = this.playlists.get(playlistId);
     if (!record) return;
+    // A reconcile is the job saying something: every caller is one of its own events or a pass of
+    // its own, and that is exactly what the stall window reads (v2.0.0-beta.5).
+    this.touch(playlistId);
     let done = 0;
     let staging = 0;
     let lyricPending = 0;
     let lyricFailed = 0;
+    const covers = new Set<string>();
     for (const song of record.songs) {
       const row = this.rows.get(song.id);
       const state = row?.state;
@@ -1755,14 +1972,34 @@ export class OfflineStore {
       const lyric = row?.lyrics?.state;
       if (lyric === 'pending') lyricPending += 1;
       else if (lyric === 'failed') lyricFailed += 1;
+      const cover = row?.coverArt ?? song.coverArt ?? song.albumId;
+      if (cover !== undefined && cover !== '') covers.add(cover);
+    }
+    /*
+     * v2.0.0-beta.5 — **the covers are part of the finish, not a second step.**
+     *
+     * The owner: "once the download of the playlist completes, the button text still changes to
+     * download covers which i then have to click on". The job had always enqueued the art
+     * (`enqueueArt`, in the same tap); what was wrong is that this method declared the playlist
+     * `complete` as soon as the **audio** was in, while the covers it had just asked for were still
+     * `pending`. `missingCovers()` then answered "> 0" for a job that was still running, and the
+     * control printed `✓ 4.8 GB · ↓ covers` — a second tap offered for work already in flight. A
+     * cover still in flight is a transfer of this job, so it holds the record on `downloading`
+     * exactly as a `staging` track does. A cover that has settled (`present`, `none`) or genuinely
+     * failed does **not** hold it: a missing picture must never leave a playlist on `· retry` for
+     * ever (the rule `onArtFailed` states), and a failed cover is re-asked by the pump.
+     */
+    let artPending = 0;
+    for (const cover of covers) {
+      if (artRowForCover(this.rows, cover)?.state === 'pending') artPending += 1;
     }
     record.done = done;
     if (done === record.total && record.total > 0) {
-      // Audio all in; the playlist is complete only when every lyric axis is present or none.
-      if (lyricPending > 0) record.state = 'downloading';
+      // Audio all in; the playlist is complete only when every other transfer of the same job is in.
+      if (lyricPending > 0 || artPending > 0) record.state = 'downloading';
       else if (lyricFailed > 0) record.state = 'partial'; // one small transfer to retry
       else record.state = 'complete';
-    } else if (staging > 0) {
+    } else if (staging > 0 || artPending > 0) {
       record.state = 'downloading';
     } else {
       record.state = done > 0 ? 'partial' : 'failed';
