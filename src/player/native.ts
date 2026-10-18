@@ -86,11 +86,23 @@ interface NaviliteRemotePlugin {
     awake?: boolean;
     reason?: string;
     /**
-     * The last boundary's five moments, in milliseconds from the item end (v2.0-beta.14): the card
-     * announced for the incoming entry, a fetch issued (`-1` when the slot was already warm), the
-     * item reporting ready, the play call issued, and the first frame the player was running.
+     * The last away boundary's five moments, in milliseconds from the item end (v2.0-beta.14): the
+     * card announced for the incoming entry, a fetch issued (`-1` when the slot was already warm),
+     * the item reporting ready, the play call issued, and the first frame the player was running.
+     *
+     * `startedAt` (epoch ms) and `ageMs` say **when** that boundary was (v2.0-beta.15): only an away
+     * boundary is timed natively, and the reading outlives the return to the foreground.
      */
-    timeline?: { path?: string; cardMs?: number; fetchMs?: number; readyMs?: number; playMs?: number; audibleMs?: number };
+    timeline?: {
+      path?: string;
+      cardMs?: number;
+      fetchMs?: number;
+      readyMs?: number;
+      playMs?: number;
+      audibleMs?: number;
+      startedAt?: number;
+      ageMs?: number;
+    };
   }>;
   addListener(eventName: 'next' | 'previous' | 'advanced' | 'advanceFailed', listenerFunc: (event: { songId?: string; assetId?: string; index?: number; reason?: string }) => void): Promise<PluginListenerHandle>;
 }
@@ -258,6 +270,36 @@ export interface NativeTruth {
 }
 
 /**
+ * The JS-side (foreground) boundary's own clock, ms (v2.0-beta.15).
+ *
+ * The native timeline covers only the boundaries the native player takes while the app is away. A
+ * boundary the web layer takes — the app on screen, the item ending — had no number at all, so a
+ * foreground gap was an absence in the row. This is its counterpart on the same axis: when this
+ * layer began the boundary (the incoming load, or the play itself when the slot was already warm),
+ * when it issued the play, and the first read of a player that was actually sounding.
+ *
+ * It is kept as its own reading rather than folded into the away one: neither overwrites the other,
+ * and `pending`/`ageMs` say whether these numbers are a finished measurement and how old it is — an
+ * old number standing in for the current one is the blind round this row exists to prevent.
+ */
+export interface NativeForegroundBoundary {
+  /** When this layer began the boundary, epoch ms; `0` when none has been begun. */
+  startedAt: number;
+  /** When the play for it was issued, epoch ms; `0` when it has not been issued yet. */
+  playedAt: number;
+  /** When the player first reported sound, epoch ms; `0` while it has not. */
+  audibleAt: number;
+  /** `startedAt` → `playedAt`, ms; `-1` when no play was issued. */
+  playMs: number;
+  /** `startedAt` → `audibleAt` — **the foreground gap**, ms; `-1` while pending. */
+  audibleMs: number;
+  /** Now − the moment the reading was taken, ms, so a stale one is identifiable; `-1` when nothing is timed. */
+  ageMs: number;
+  /** True while the boundary has been begun and no sound has been reported for it yet. */
+  pending: boolean;
+}
+
+/**
  * One entry of the queue as the native side is given it (v1.9.9).
  *
  * `url` is the entry's **own file**, never a capped or transcoded variant: this side fetches an
@@ -362,8 +404,16 @@ export interface NativeBridge {
     failures: number;
     ignored: number;
     reason: string;
-    /** The last boundary's five moments in ms from the item end (v2.0-beta.14). */
+    /** The last boundary's five moments in ms from the item end, as one sentence (v2.0-beta.14). */
     timeline: string;
+    /** When that (away) boundary began, epoch ms; `0` when none has been taken (v2.0-beta.15). */
+    startedAt: number;
+    /**
+     * The last JS-side (foreground) boundary's clock — the counterpart of `timeline`/`startedAt`,
+     * kept separately so neither boundary overwrites the other (v2.0-beta.15). `null` until one has
+     * been begun; `pending` marks a boundary that has not produced sound yet.
+     */
+    foreground: NativeForegroundBoundary | null;
   };
   play(startSeconds: number): Promise<void>;
   pause(): Promise<void>;
@@ -805,13 +855,62 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     let boundaryQueued = 0;
     let boundaryArmed = false;
     let boundaryReason = 'nothing stated yet';
-    /*
-     * The last boundary's own timeline, in the row's own words (v2.0-beta.14). This is the thing three
-     * rounds of "the gap between songs" were diagnosed without: the app could say a boundary was
-     * taken and not one number about where its seconds went. The native plugin records the five
-     * moments; this is the sentence the diagnostics row carries.
+    /**
+     * The last **away** boundary's own timeline, in the row's own words (v2.0-beta.14).
+     *
+     * This is the thing three rounds of "the gap between songs" were diagnosed without: the app could
+     * say a boundary was taken and not one number about where its seconds went. The native plugin
+     * records the five moments and this is the sentence the diagnostics row carries.
+     *
+     * Only an away boundary is timed natively (v2.0-beta.15), so the sentence names it as that and
+     * carries its **age**: these numbers survive the return to the foreground, and an old boundary's
+     * milliseconds read exactly like a fresh one unless the row says which boundary it is.
      */
-    let lastTimeline = 'gap: no boundary taken yet';
+    let lastTimeline = 'last away-boundary: none taken yet';
+    /** When that boundary began, epoch ms — so a foreground boundary measured later can outrank it. */
+    let lastTimelineAt = 0;
+    /**
+     * The JS-side boundary's own clock (v2.0-beta.15).
+     *
+     * The native timeline covers only the boundaries the native player takes while the app is away.
+     * A boundary the web layer takes — the app on screen, the item ending — had no number at all, so
+     * a foreground gap was an absence in the row. `foregroundStartedAt` is stamped when this layer
+     * begins the start (the incoming load, or the play when the slot was already warm),
+     * `foregroundPlayedAt` when it issues the play, and `foregroundAudibleAt` on the first read of a
+     * player that is actually sounding. A new boundary replaces the previous reading rather than
+     * letting it stand, which is why `pending` exists: begun and not yet sounding is its own state.
+     */
+    let foregroundStartedAt = 0;
+    let foregroundPlayedAt = 0;
+    let foregroundAudibleAt = 0;
+    /** Begin a boundary this layer is about to take: the previous reading stops being the current one. */
+    const beginForegroundBoundary = (): void => {
+      foregroundStartedAt = Date.now();
+      foregroundPlayedAt = 0;
+      foregroundAudibleAt = 0;
+    };
+    const foregroundBoundary = (): NativeForegroundBoundary | null => {
+      if (foregroundStartedAt === 0) return null;
+      const measured = foregroundAudibleAt > 0 ? foregroundAudibleAt : foregroundStartedAt;
+      return {
+        startedAt: foregroundStartedAt,
+        playedAt: foregroundPlayedAt,
+        audibleAt: foregroundAudibleAt,
+        playMs: foregroundPlayedAt > 0 ? foregroundPlayedAt - foregroundStartedAt : -1,
+        audibleMs: foregroundAudibleAt > 0 ? foregroundAudibleAt - foregroundStartedAt : -1,
+        ageMs: Date.now() - measured,
+        pending: foregroundAudibleAt === 0,
+      };
+    };
+    const foregroundText = (): string => {
+      const fg = foregroundBoundary();
+      if (!fg) return '';
+      if (fg.pending) {
+        return ` · last foreground boundary: begun ${Math.round(fg.ageMs / 1000)} s ago, ${fg.playedAt > 0 ? 'play issued' : 'no play issued'}, not sounding yet`;
+      }
+      const playToSound = fg.playMs >= 0 ? `play→sound ${fg.audibleMs - fg.playMs} ms · ` : '';
+      return ` · last foreground boundary: start→${fg.playMs >= 0 ? 'play' : 'sound'} ${fg.audibleMs} ms · ${playToSound}start→sound ${fg.audibleMs} ms (${Math.round(fg.ageMs / 1000)} s ago)`;
+    };
     const timelineText = (t: {
       path?: string;
       cardMs?: number;
@@ -819,11 +918,16 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       readyMs?: number;
       playMs?: number;
       audibleMs?: number;
+      ageMs?: number;
     }): string => {
       const at = (value: number | undefined): string =>
         Number.isFinite(value) && Number(value) >= 0 ? `${value} ms` : '—';
+      const age =
+        Number.isFinite(t.ageMs) && Number(t.ageMs) >= 0
+          ? ` (${Math.round(Number(t.ageMs) / 1000)} s ago)`
+          : '';
       return (
-        `gap: card ${at(t.cardMs)} · fetch ${at(t.fetchMs)} · ready ${at(t.readyMs)} · ` +
+        `last away-boundary${age}: card ${at(t.cardMs)} · fetch ${at(t.fetchMs)} · ready ${at(t.readyMs)} · ` +
         `play ${at(t.playMs)} · audible ${at(t.audibleMs)} (${t.path ?? 'none'} path)`
       );
     };
@@ -1144,6 +1248,12 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     return {
       async load(info) {
         /*
+         * The JS-side boundary begins here (v2.0-beta.15): this is the first moment the layer asks
+         * for the incoming track, so it is the start the foreground gap is measured from — before
+         * the fetch, the same way the native timeline measures from the item end.
+         */
+        beginForegroundBoundary();
+        /*
          * A load is the listener's own request, and it takes the audible slot over (v1.9.2): any
          * prepare still on the lane for the chain he has left is refused rather than performed.
          *
@@ -1423,7 +1533,18 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         if (Number.isFinite(state.failures)) nativeFailures = Number(state.failures);
         if (Number.isFinite(state.ignored)) nativeIgnored = Number(state.ignored);
         if (typeof state.reason === 'string' && state.reason) boundaryReason = state.reason;
-        if (state.timeline) lastTimeline = timelineText(state.timeline);
+        /*
+         * **The return is a JS-side boundary too (v2.0-beta.15).** `engine` calls this once, on the
+         * way back from `hidden` (src/player/engine.ts:2247), before it reads the player. Stamping the
+         * start here makes the step from "the web layer is running again" to the first read of a
+         * player that is sounding a measurable gap — the counterpart of the away boundary the native
+         * side times, and the only way a foreground return gets a number of its own.
+         */
+        beginForegroundBoundary();
+        if (state.timeline) {
+          lastTimeline = timelineText(state.timeline);
+          if (Number.isFinite(state.timeline.startedAt)) lastTimelineAt = Number(state.timeline.startedAt);
+        }
         const slot = typeof state.assetId === 'string' && state.assetId ? state.assetId : null;
         const nativeIndex = Number.isFinite(state.index) ? Number(state.index) : -1;
         /*
@@ -1455,7 +1576,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           failures: nativeFailures,
           ignored: nativeIgnored,
           reason: boundaryReason,
-          timeline: lastTimeline,
+          timeline: `${lastTimeline}${foregroundText()}`,
+          startedAt: lastTimelineAt,
+          foreground: foregroundBoundary(),
         };
       },
       async discard() {
@@ -1479,6 +1602,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       },
       async play(startSeconds) {
         await startService();
+        // The JS-side boundary's play moment (v2.0-beta.15) — closed by the first report of sound.
+        foregroundPlayedAt = Date.now();
+        if (foregroundStartedAt === 0) foregroundStartedAt = foregroundPlayedAt;
         // Behind the audible lane: the play for a track whose own load is still running must not
         // overtake it, and it must not start the previous track's asset either.
         await lanes.audible(() => bounded(NativeAudio.play({ assetId: audibleId, time: Math.max(0, startSeconds) }), undefined, 'play'));
@@ -1534,6 +1660,17 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
             NativeAudio.getDuration({ assetId: audibleId }),
           ]);
           lastPositionMs = Number.isFinite(current.currentTime) ? current.currentTime * 1000 : lastPositionMs;
+          /*
+           * The foreground boundary's end (v2.0-beta.15): the first read of a player that is actually
+           * sounding, with a boundary of this layer's begun. The play may have been issued here, or
+           * by the native side while the app was away and adopted on the way back — either way the
+           * moment sound is first confirmed is the end of the gap the row measures, and a boundary
+           * that never sounds stays `pending` rather than being closed with a timeout dressed up as a
+           * number.
+           */
+          if (playing.isPlaying === true && foregroundStartedAt > 0 && foregroundAudibleAt === 0) {
+            foregroundAudibleAt = Date.now();
+          }
           return {
             playing: playing.isPlaying === true,
             positionMs: lastPositionMs,

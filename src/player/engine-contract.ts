@@ -309,8 +309,42 @@ export interface EngineStatus {
     failures: number;
     ignored: number;
     reason: string;
-    /** The last boundary's five moments in ms, as one sentence (v2.0-beta.14). */
+    /**
+     * The last away boundary's five moments in ms, and the last foreground start, as one sentence
+     * (v2.0-beta.14; the foreground half in v2.0-beta.15).
+     */
     timeline: string;
+    /** When that away boundary began, epoch ms; `0` when none has been timed (v2.0-beta.15). */
+    startedAt: number;
+    /**
+     * The JS-side (foreground) boundary's own clock, ms (v2.0-beta.15).
+     *
+     * The away boundary is timed natively and only exists when the app was away; a boundary the web
+     * layer takes — the app on screen, the item ending — had no number at all, so a foreground gap was
+     * an absence in the row. This is its counterpart, on the same axis: the boundary's start (the
+     * incoming load, or the play itself when the slot was already warm), the play issued, and the
+     * first read of a player that was actually sounding.
+     *
+     * The two are deliberately separate objects: a foreground reading never overwrites the away one,
+     * and `pending`/`ageMs` say whether the numbers are a finished reading and how old it is — an old
+     * number standing in for the current one is the blind round this row exists to prevent.
+     */
+    foreground: {
+      /** When this layer began the boundary, epoch ms; `0` when none has been begun. */
+      startedAt: number;
+      /** When the play for it was issued, epoch ms; `0` when it has not been issued yet. */
+      playedAt: number;
+      /** When the player first reported sound, epoch ms; `0` while it has not. */
+      audibleAt: number;
+      /** `startedAt` → `playedAt`, ms; `-1` when no play was issued. */
+      playMs: number;
+      /** `startedAt` → `audibleAt` — **the foreground gap**, ms; `-1` while pending. */
+      audibleMs: number;
+      /** Now − the moment the reading was taken, ms, so a stale one is identifiable; `-1` when nothing is timed. */
+      ageMs: number;
+      /** True while the boundary has been begun and no sound has been reported for it yet. */
+      pending: boolean;
+    } | null;
   };
   /**
    * The tap's own numbers, for the reason line (v1.9.25).

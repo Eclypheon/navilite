@@ -1118,6 +1118,8 @@ export class AudioEngine {
         ignored: 0,
         reason: 'this build has no native boundary to report',
         timeline: 'gap: this build has no native boundary to time',
+        startedAt: 0,
+        foreground: null,
       },
       positionMs: Number.isFinite(positionMs) ? positionMs : 0,
       durationMs: Number.isFinite(durationMs) ? durationMs : 0,
