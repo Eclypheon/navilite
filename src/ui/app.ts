@@ -116,8 +116,23 @@ export async function boot(root: HTMLElement): Promise<void> {
    * download finished in the background visible.
    */
   const offline = new OfflineStore(await createDownloadsBridge(platform.os), {
-    downloadUrl: (song) => ctx.library?.client.downloadUrl(song.id) ?? `download?id=${song.id}`,
-    lyricsUrl: (song) => ctx.sidecar?.urlFor?.(song) ?? null,
+    /*
+     * **Every URL that reaches the native downloader is ABSOLUTE** (v2.0.0-beta.7).
+     *
+     * The owner's phone said `failed: unsupported URL`, and that is the whole of the defect: in a
+     * browser a relative URL resolves against the page and nobody notices, but a native
+     * `URLSession.downloadTask(with:)` has no page — it answers `NSURLErrorUnsupportedURL` and no
+     * request is ever made. Three paths could produce one: this fallback (`download?id=…`, used
+     * whenever `ctx.library` is not connected yet — which is exactly the boot resume), and the
+     * sidecar route, whose `baseUrl` is `''` for a same-origin deployment (`LyricsRoute.urlFor`
+     * then returns `/lyrics?path=…`). `offlineUrl` resolves all of them against the library's own
+     * base URL, or the canonical origin when the library is not there yet.
+     */
+    downloadUrl: (song) => {
+      const url = ctx.library?.client.downloadUrl(song.id) ?? `download?id=${song.id}`;
+      return offlineUrl(ctx, url) ?? url;
+    },
+    lyricsUrl: (song) => offlineUrl(ctx, ctx.sidecar?.urlFor?.(song) ?? null),
     lyricsFallback: async (song) => {
       /*
        * The route had nothing for this track — no URL at all, or a `404` (v1.9.14). Ask Navidrome
@@ -147,7 +162,7 @@ export async function boot(root: HTMLElement): Promise<void> {
      * spectrum page draws (512 — the same file serves the palette's 256 read and the list thumbs).
      * Handed in as a factory, like the two above: the store relays URLs, it does not mint them.
      */
-    artUrl: (coverArtId) => ctx.library?.client.coverArtUrl(coverArtId, 512) ?? null,
+    artUrl: (coverArtId) => offlineUrl(ctx, ctx.library?.client.coverArtUrl(coverArtId, 512) ?? null),
     /*
      * …and the one platform call, injected for the same reason: `convertFileSrc` is what makes a
      * file in the app's own container readable from the page's origin, so the cover renders and the
@@ -1041,6 +1056,29 @@ function controlFigures(facts: { done: number; total: number; songs: Song[] }): 
 }
 
 /**
+ * **A URL the native downloader can fetch** (v2.0.0-beta.7): relative → absolute.
+ *
+ * A browser resolves `/lyrics?path=…` against the page it is on; a native `URLSession` download
+ * task has no page and answers `NSURLErrorUnsupportedURL` — which is what the owner's phone
+ * reported (`failed: unsupported URL`) while the byte figure kept climbing, because the audio lane
+ * was fine and the lyric/cover lanes were being enqueued with a relative path.
+ *
+ * The base is the library's own `baseUrl` (the address the owner configured), falling back to the
+ * canonical origin: a URL that is relative is relative to *the server*, and on iOS the page's own
+ * origin is `capacitor://localhost`, which resolves to a scheme `URLSession` cannot download from.
+ */
+export function offlineUrl(ctx: { library?: { client?: { baseUrl?: string } } | null }, value: string | null): string | null {
+  if (value === null || value === '') return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return value;
+  const base = ctx.library?.client?.baseUrl || DEFAULT_SERVER_URL;
+  try {
+    return new URL(value, base).toString();
+  } catch {
+    return value;
+  }
+}
+
+/**
  * The failure note the download control prints beside its figures (v2.0.0-beta.6).
  *
  * The owner's report, verbatim: *"even after 500 MB has been downloaded, it still shows 0 of 233"* —
@@ -1051,9 +1089,16 @@ function controlFigures(facts: { done: number; total: number; songs: Song[] }): 
  */
 function failureNote(failure?: DownloadFailure | null): string {
   if (!failure) return '';
-  const measured = failure.status !== undefined && failure.status > 0 ? `HTTP ${failure.status}` : failure.error;
-  const words = (measured || 'failed').replace(/\s+/g, ' ').trim();
-  return ` · failed: ${words.length > 48 ? `${words.slice(0, 47)}…` : words}`;
+  /*
+   * **The words first, the status only when the status IS the reason** (v2.0.0-beta.7). The first
+   * version preferred any status over the message, so a transfer that answered `200` and then died
+   * (connection lost, cancelled) printed `failed: HTTP 200` — the one thing the owner could not act
+   * on, on a build whose whole point was to say why. A non-2xx status is a cause (`HTTP 404`); a 2xx
+   * with an error is a transport failure and its message is the cause.
+   */
+  const http = failure.status !== undefined && failure.status > 0 && (failure.status < 200 || failure.status > 299);
+  const words = `${failure.error}${http ? ` (HTTP ${failure.status})` : ''}`.replace(/\s+/g, ' ').trim();
+  return ` · failed: ${words.length > 60 ? `${words.slice(0, 59)}…` : words}`;
 }
 
 /**

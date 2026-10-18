@@ -330,6 +330,19 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             call.reject("enqueue needs a songId and a url")
             return
         }
+        /*
+         * **A download task needs an absolute URL** (v2.0.0-beta.7). `URL(string: "download?id=x")`
+         * parses — as a *relative* URL — and then `URLSession` answers `NSURLErrorUnsupportedURL`
+         * without ever making a request, which the owner's phone reported as `failed: unsupported
+         * URL` on every lyric and cover of a playlist whose audio transferred fine. The JS side now
+         * resolves every URL it hands over (`offlineUrl`), so this is the last door: refuse loudly
+         * rather than enqueue something that can only fail silently.
+         */
+        guard let scheme = target.scheme, !scheme.isEmpty, target.host != nil,
+              scheme == "http" || scheme == "https" else {
+            call.reject("enqueue needs an absolute http(s) url, got: \(url)")
+            return
+        }
         let job = Job(
             songId: songId,
             url: url,

@@ -26,7 +26,7 @@ import {
   type DownloadsBridge,
   type IndexRow,
 } from '../src/state/offline.ts';
-import { downloadControlLabel, downloadTapAction, type DownloadControlFacts, type DownloadTapAction } from '../src/ui/app.ts';
+import { downloadControlLabel, downloadTapAction, offlineUrl, type DownloadControlFacts, type DownloadTapAction } from '../src/ui/app.ts';
 import { loadMirror, type MirrorStore } from '../src/storage/offline.ts';
 import type { Song } from '../src/api/types.ts';
 
@@ -508,6 +508,63 @@ test('a failed transfer stops counting in the byte figure', async () => {
   bridge.emit('done', { songId: songs[1]!.id, kind: 'audio', path: 'file:///s1.opus', bytes: SONG_BYTES });
   await settle();
   assert.equal(offline.activityOf('pl-f').bytes, SONG_BYTES, 'a complete row carries those bytes instead');
+});
+
+/* ---------------------------------- 6. "failed: unsupported URL" (owner, beta.7 on his phone) */
+
+/**
+ * The owner's reading on the shipped beta.7: `failed: unsupported url` and `failed: http 200`, while
+ * the byte figure kept climbing. Two separate defects: a URL that reaches a native download task
+ * **relative** can never be fetched (a browser resolves it; `URLSession` has no page), and the note
+ * preferred the status over the words, so a transport failure after a `200` printed `HTTP 200`.
+ */
+
+test('a relative URL is made absolute before it can reach the native downloader', () => {
+  const ctx = { library: { client: { baseUrl: 'https://lib.example:9443' } } };
+  assert.equal(
+    offlineUrl(ctx, '/lyrics?path=a%2Fb.opus'),
+    'https://lib.example:9443/lyrics?path=a%2Fb.opus',
+    'the sidecar route is same-origin relative: the library base is what it is relative TO',
+  );
+  assert.equal(offlineUrl(ctx, 'rest/download.view?id=x'), 'https://lib.example:9443/rest/download.view?id=x');
+  assert.equal(offlineUrl(ctx, 'https://other.example/rest/x?id=1'), 'https://other.example/rest/x?id=1', 'absolute URLs are left alone');
+  assert.equal(
+    offlineUrl({ library: null }, '/lyrics?path=x'),
+    'https://alienlab.tailbed832.ts.net:9443/lyrics?path=x',
+    'before connect (the boot resume) the canonical origin is the base — never the webview origin',
+  );
+  assert.equal(offlineUrl(ctx, null), null, 'nothing to fetch is null, not a broken URL');
+  assert.match(
+    swiftSource,
+    /guard let scheme = target\.scheme[\s\S]{0,120}scheme == "http" \|\| scheme == "https"/,
+    'and the native door refuses a non-absolute URL instead of enqueuing one that can only fail',
+  );
+});
+
+test('the failure note prints the reason, and the status only when the status IS the reason', () => {
+  const facts = (failure: DownloadControlFacts['failure']): string =>
+    downloadControlLabel({
+      state: 'downloading',
+      done: 0,
+      total: TRACKS,
+      songs,
+      size: '1.0 GB',
+      missing: 0,
+      missingCovers: 0,
+      activity: { bytes: 1_000, total: 5_152_000_000, at: Date.now(), pending: 2 },
+      stalled: false,
+      failure,
+    });
+
+  const transport = facts({ status: 200, error: 'The network connection was lost', songId: 's0', at: Date.now() });
+  assert.match(transport, /network connection was lost/, `the words are the cause: ${transport}`);
+  assert.doesNotMatch(transport, /HTTP 200/, 'a 2xx with an error is not an HTTP failure');
+
+  const refused = facts({ status: 404, error: 'no lyrics sidecar for this track', songId: 's0', at: Date.now() });
+  assert.match(refused, /no lyrics sidecar for this track \(HTTP 404\)/, `a refused status is a cause: ${refused}`);
+
+  const unsupported = facts({ error: 'unsupported URL', songId: 's0', at: Date.now() });
+  assert.match(unsupported, /unsupported URL/, 'and a status-less error prints exactly what it says');
 });
 
 test('a finished job takes the failure note away with the last transfer that caused it', async () => {

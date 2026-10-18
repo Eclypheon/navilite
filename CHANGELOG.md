@@ -348,3 +348,8 @@ Plain language, user-visible changes only. The app shows this same list under
 ## 2.0-beta.7 — 2026-10-18
 
 - Downloads finish again: a resumed transfer's bytes are no longer thrown away, and the download button now says why a track failed.
+
+## 2.0-beta.8 — 2026-10-18
+
+- Downloads no longer report "unsupported url": every file the phone fetches (songs, lyrics and cover art) is now asked for with its full address, which is what the phone needs outside a browser.
+- The download button reports the real reason a track failed — including the words from the phone — instead of a bare "HTTP 200".
