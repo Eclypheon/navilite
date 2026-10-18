@@ -358,3 +358,8 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - Downloads no longer get stuck on "cannot create file": leftover transfers from the previous install are cleared when the app opens, the folder a download is written into is checked before it starts, and a failed write now reports the exact reason and file.
 - A track that cannot be written is retried once, then left alone instead of retrying for ever.
+
+## 2.0-beta.10 — 2026-10-18
+
+- Downloads run in-process directly within the app, resolving the system daemon's "cannot create file (-3000)" error on sideloaded and standalone installs.
+

@@ -542,4 +542,11 @@ export const CHANGELOG: ChangelogRelease[] = [
         'A track that cannot be written is retried once, then left alone instead of retrying for ever.',
       ],
     },
+    {
+      version: '2.0-beta.10',
+      date: '2026-10-18',
+      items: [
+        'Downloads run in-process directly within the app, resolving the system daemon\'s "cannot create file (-3000)" error on sideloaded and standalone installs.',
+      ],
+    },
   ];

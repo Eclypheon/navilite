@@ -85,7 +85,7 @@ test('the cancel is by identity, and it happens before the successor is created'
   const stop = enqueueBody.indexOf('stopTask(key: job.taskKey, deliberate: true)');
   const stagingDelete = enqueueBody.indexOf('removeItem(at: staging)');
   const register = enqueueBody.indexOf('register(task, key: job.taskKey)');
-  const resume = enqueueBody.indexOf('task?.resume()');
+  const resume = enqueueBody.search(/task(?:\?)?\.resume\(\)/);
   assert.ok(guard >= 0, 'the idempotency guard exists');
   assert.ok(guard < stop, 'the guard returns before anything is cancelled');
   assert.ok(stop < stagingDelete, 'the superseded transfer is stopped before its staging bytes go');

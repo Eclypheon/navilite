@@ -395,10 +395,9 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         let delegate = DownloadSessionDelegate()
         delegate.plugin = self
         self.delegate = delegate
-        let config = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
+        let config = URLSessionConfiguration.default
         config.allowsCellularAccess = allowsCellular
         config.httpMaximumConnectionsPerHost = Self.defaultMaxLive
-        config.isDiscretionary = false
         session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         /*
          * **Orphans before jobs** (v2.0.0-beta.9). A background session survives an install-over, so
@@ -664,7 +663,7 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             // and `register` re-checks the window under the lock, so two racers cannot both take the
             // last slot.
             if let task, register(task, key: job.taskKey) {
-                task?.resume()
+                task.resume()
                 call.resolve(["queued": true])
                 return
             }
