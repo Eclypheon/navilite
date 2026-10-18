@@ -224,6 +224,10 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// What the repairs have done, for the reason line and the `now()` payload.
     private var cardRepairs = 0
     private var sessionRetakes = 0
+    /// The runtime identity (v2.0-beta.16): computed once, and the flag that keeps the identity line
+    /// in the persisted log down to one per session.
+    private var identity: [String: Any]?
+    private var identityLogged = false
     /// Whether the audio session was active the last time it was asked (v2.0-beta.14).
     ///
     /// `AVAudioSession` has **no public getter** for this — `isActive` is not in the SDK (the
@@ -536,6 +540,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 call.reject("plugin deallocated")
                 return
             }
+            self.logIdentityOnce()
             let playing = (self.index >= 0 && self.index < self.queue.count) ? self.queue[self.index] : nil
             call.resolve([
                 "assetId": self.audible?.assetId ?? "",
@@ -552,6 +557,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 "cardRepairs": self.cardRepairs,
                 "sessionRetakes": self.sessionRetakes,
                 "sessionActive": self.sessionIsActive,
+                /* v2.0-beta.16 — who this app is as the phone knows it, and what the system has
+                 * asked its scene to do. The two facts the tap investigation is decided by, and
+                 * neither is readable from JavaScript. */
+                "identity": self.runtimeIdentity(),
+                "scene": NaviliteSceneEvents.shared.summary,
                 "timeline": self.boundaryTimeline(),
                 /* v2.0-beta.16 — the persisted log's own whereabouts, so the app can copy it out and
                  * the row can carry the last lines without the owner opening a file by hand. */
@@ -573,6 +583,94 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 "cardPresent": MPNowPlayingInfoCenter.default().nowPlayingInfo != nil
             ])
         }
+    }
+
+    /* --------------------------------------- who this app is (v2.0-beta.16) */
+
+    /// The plugin came up: write the session's identity line now, not at the first `now()` call.
+    ///
+    /// The identity is the answer to "was the tap aimed at an id that exists", and the owner reads it
+    /// off the phone — so it must not depend on the web layer ever asking for diagnostics. On a build
+    /// with no library configured, no `now()` may be called at all; the launch itself still proves
+    /// what the app is, and this writes it.
+    override public func load() {
+        super.load()
+        logIdentityOnce()
+    }
+
+    /// What the Now Playing entry's owner is, as the system sees it (v2.0-beta.16).
+    ///
+    /// mediaremoted publishes a Now Playing entry owned by a **CFBundleIdentifier**, and SpringBoard
+    /// routes a tap on that card — or on the island's expanded view — back to whichever app the id
+    /// names. If that id does not resolve to an installed, activatable app, the tap lands on nothing,
+    /// and no Info.plist key, entitlement or `MPNowPlayingInfo` property can redirect it (the research
+    /// on t_4145f5d9 closed that question). The one class of install that produces such an id is a
+    /// sideloader that rewrites or mangles the bundle id — so this side reports the runtime facts
+    /// instead of assuming them: the id it is running as, the id its embedded provisioning profile
+    /// was issued for (empty on an App Store / TestFlight build, which has no profile), where the
+    /// `.app` actually lives, and whether the install carries a receipt or a profile.
+    ///
+    /// Computed once: none of it can change while the process lives.
+    private func runtimeIdentity() -> [String: Any] {
+        if let identity { return identity }
+        let bundle = Bundle.main
+        let bundleId = bundle.bundleIdentifier ?? ""
+        let path = bundle.bundleURL.path
+        let appId = Self.provisioningAppId(bundle)
+        let team = appId.split(separator: ".").first.map(String.init) ?? ""
+        let facts: [String: Any] = [
+            "bundleId": bundleId,
+            "appId": appId,
+            "teamId": team.isEmpty ? "unknown" : team,
+            "appGroups": "not readable (no public API)",
+            "path": path,
+            "container": path.contains("/Containers/Bundle/Application/") ? "installed package" : "relocated or dev build",
+            "signatureMatchesBundleId": appId.isEmpty ? false : appId.hasSuffix("." + bundleId),
+            /* App Store / TestFlight installs carry a receipt and no profile; a sideloader's build
+             * carries an embedded profile instead. That difference is the install method's own
+             * fingerprint, and it is the one fact here the code cannot be wrong about. */
+            "receipt": bundle.appStoreReceiptURL?.lastPathComponent ?? "none",
+            "embeddedProfile": bundle.url(forResource: "embedded", withExtension: "mobileprovision") != nil
+        ]
+        identity = facts
+        return facts
+    }
+
+    /// The `application-identifier` the embedded provisioning profile was issued for (v2.0-beta.16).
+    ///
+    /// The entitlement itself is not readable: `SecTaskCreateFromSelf` is not in the public SDK, and
+    /// an app must not ship private API. The same value is written in plain text inside
+    /// `embedded.mobileprovision` on any dev or sideloaded build, so it is read from there — a
+    /// profile the owner's install method rewrote shows the rewritten id, which is exactly the
+    /// question. An App Store / TestFlight build has no profile: empty, and reported as such.
+    private static func provisioningAppId(_ bundle: Bundle) -> String {
+        guard let url = bundle.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .isoLatin1) else { return "" }
+        var rest = Substring(text)
+        var found: [String] = []
+        while let key = rest.range(of: "<key>application-identifier</key>") {
+            rest = rest[key.upperBound...]
+            guard let open = rest.range(of: "<string>"), let close = rest.range(of: "</string>"),
+                  open.lowerBound < close.lowerBound else { continue }
+            found.append(String(rest[open.upperBound..<close.lowerBound]))
+            rest = rest[close.upperBound...]
+        }
+        // A profile can list several ids (a wildcard, and the exact one); the exact one wins.
+        let id = bundle.bundleIdentifier ?? ""
+        return found.first(where: { $0.hasSuffix("." + id) }) ?? found.first ?? ""
+    }
+
+    /// The session's identity, once, into the log — the answer to "was the tap aimed at an id that
+    /// exists", written down where it can be read off the phone (v2.0-beta.16).
+    private func logIdentityOnce() {
+        guard !identityLogged else { return }
+        identityLogged = true
+        var facts = runtimeIdentity()
+        for (key, value) in NaviliteSceneEvents.shared.summary {
+            facts["scene_" + key] = value
+        }
+        record("identity", facts)
     }
 
     /// The session's category options as words, for the diagnostics row (v2.0-beta.15): `none` when
@@ -1157,6 +1255,32 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         logTail.append(text)
         if logTail.count > Self.logTailLines { logTail.removeFirst(logTail.count - Self.logTailLines) }
         appendLogLine(text)
+    }
+
+    /**
+     * One line into the persisted log, from outside the plugin (v2.0-beta.16).
+     *
+     * The scene callbacks (see `SceneDelegate.swift`) are the only evidence that the system asked
+     * this app to come to the front, and they happen whether or not the web layer is alive to read
+     * them — so they go into the same file as the boundaries. That is the artifact the owner can
+     * hand over, and the one a run with no scene line at all answers plainly: nothing arrived.
+     */
+    static func appendSceneLine(_ facts: [String: Any]) {
+        var line: [String: Any] = facts
+        line["kind"] = "scene"
+        line["at"] = Int((Date().timeIntervalSince1970 * 1000).rounded())
+        guard let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent(logName),
+              let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return }
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: url.path) {
+            manager.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data((text + "\n").utf8))
     }
 
     private var logFileURL: URL? {

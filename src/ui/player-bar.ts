@@ -219,6 +219,9 @@ export function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineSta
     // v2.0-beta.14 — the last boundary's five moments, in ms from the item end. This is the number
     // the owner's "seconds of silence" report never had: card, fetch, ready, play, audible.
     `${status.nativeBoundary.timeline} · ` +
+    // v2.0-beta.16 — who the Now Playing entry is owned by and what the system asked the app's
+    // scene to do: the two facts a card tap that opens nothing is decided by.
+    `${status.nativeBoundary.identity} · ` +
     `dropped: ${status.droppedEvents.inaudible} inaudible, ${status.droppedEvents.slotGrace} in a slot write · ${status.modeReason}`;
   const abnormal = status.state !== 'playing' || !status.spectrum;
   /*

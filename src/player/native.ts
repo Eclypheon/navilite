@@ -31,6 +31,47 @@ import type { PluginListenerHandle } from '@capacitor/core';
 import type { OsName } from '../platform.ts';
 import type { DownloadsBridge, IndexRow } from '../state/offline.ts';
 
+/**
+ * Who the Now Playing entry is owned by, as the phone reports it (v2.0-beta.16).
+ *
+ * The entry `mediaremoted` publishes names a bundle id, and a tap on the card or the island's
+ * expanded view is routed back to whatever app that id names. `appId` is the `application-identifier`
+ * the embedded provisioning profile was issued for (`TEAMID.bundle.id`) — the entitlement itself is
+ * not readable without private API, but a sideloaded build carries that profile in plain text, so a
+ * rewritten id shows up here. `container` is where the `.app` runs from; `path` is that path, so a
+ * relocated build is identifiable and not inferred. `receipt`/`embeddedProfile` say which install
+ * method produced the bundle in the first place.
+ */
+export interface NativeIdentity {
+  bundleId?: string;
+  appId?: string;
+  teamId?: string;
+  appGroups?: string;
+  path?: string;
+  container?: string;
+  signatureMatchesBundleId?: boolean;
+  receipt?: string;
+  embeddedProfile?: boolean;
+}
+
+/**
+ * What the system has asked this app's scene to do (v2.0-beta.16): `connects` (a cold start, which
+ * is also where an external open's URL arrives), `opens` (`scene(_:openURLContexts:)`), `activations`
+ * (`sceneDidBecomeActive` — the warm raise a tap on a suspended app produces), `resignations`.
+ *
+ * If a tap opened nothing and these are unchanged, the app was never asked; that is a different
+ * fault from one that reached the scene and failed, and it is the distinction the row could not make.
+ */
+export interface NativeSceneEvents {
+  connects?: number;
+  opens?: number;
+  activations?: number;
+  resignations?: number;
+  last?: string;
+  lastUrl?: string;
+  lastAt?: number;
+}
+
 interface BackgroundAudioPlugin {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -118,6 +159,24 @@ interface NaviliteRemotePlugin {
     logPath?: string;
     logLines?: number;
     logTail?: string[];
+    /**
+     * Who the Now Playing entry's owner is, as the phone sees it (v2.0-beta.16).
+     *
+     * `mediaremoted` publishes the entry owned by a bundle id, and SpringBoard routes a tap on the
+     * card — or the island's expanded view — back to whatever app that id names. An id that does not
+     * resolve to an installed, activatable app is the one failure no setting in this app can fix, so
+     * the facts are carried rather than assumed: the id it is running as, the signed
+     * `application-identifier` when the process may read its own entitlements, where the `.app` is,
+     * and whether that is a package install or a relocated build.
+     */
+    identity?: NativeIdentity;
+    /**
+     * What the system has asked this app's scene to do this session (v2.0-beta.16): a connect (cold
+     * start), an open-url (an external open carrying a URL), an activation (raised from the
+     * background), a resignation. Nothing in this app can be reached by a tap that produced none of
+     * them — which is why the counts are on the row.
+     */
+    scene?: NativeSceneEvents;
   }>;
   /**
    * The persisted boundary log (v2.0-beta.16): every look-ahead and every boundary, one JSON object
@@ -426,6 +485,12 @@ export interface NativeBridge {
     reason: string;
     /** The last boundary's five moments in ms from the item end, as one sentence (v2.0-beta.14). */
     timeline: string;
+    /**
+     * Who the Now Playing entry is owned by and what the system asked this app's scene to do, as one
+     * sentence (v2.0-beta.16) — see `identitySentence`. Empty until the plugin has answered a
+     * `now()`; it is the only place the bundle id and the scene counts reach the row.
+     */
+    identity: string;
     /** When that (away) boundary began, epoch ms; `0` when none has been taken (v2.0-beta.15). */
     startedAt: number;
     /**
@@ -678,6 +743,34 @@ export async function boundaryLog(): Promise<{ path: string; lines: string[]; co
 }
 
 /**
+ * One sentence for the row (v2.0-beta.16): who the Now Playing entry is owned by, and what the
+ * system has asked this app's scene to do since it started.
+ *
+ * This is the tap investigation's whole reading. Two things can make a card tap open nothing, and
+ * they look identical from the app: the id the media remote holds does not resolve to an installed,
+ * activatable app (a rewritten bundle id, which the signed `application-identifier` exposes), or the
+ * system activated the app and the scene did nothing with it. The counts separate them — a tap whose
+ * numbers are unchanged never arrived, which is a fact about the install, not about this code.
+ */
+export function identitySentence(identity: NativeIdentity | null, scene: NativeSceneEvents | null): string {
+  if (!identity && !scene) return 'identity: this build reports none';
+  const id = identity ?? {};
+  const count = (n?: number) => (Number.isFinite(n) ? String(n) : '—');
+  const team = id.teamId && id.teamId !== 'unknown' ? `team ${id.teamId}` : 'no team entitlement';
+  const signature = !id.appId
+    ? 'no application-identifier'
+    : id.signatureMatchesBundleId
+      ? 'signed id matches'
+      : 'signed id DIFFERS';
+  const s = scene ?? {};
+  const asked = s.last && s.last !== 'none' ? `last ${s.last}${s.lastUrl ? ` ${s.lastUrl}` : ''}` : 'never asked';
+  return (
+    `id ${id.bundleId || 'unknown'} (${team}, ${id.container ?? 'unknown location'}, ${signature}) · ` +
+    `scene ${count(s.connects)} connect / ${count(s.opens)} open-url / ${count(s.activations)} active, ${asked}`
+  );
+}
+
+/**
  * Resolves an artwork URL to an absolute URL against the stream or current origin so native image loaders can fetch it (v2.0-beta.12).
  */
 export function toAbsoluteArtworkUrl(artworkUrl?: string | null, streamUrl?: string): string | undefined {
@@ -914,6 +1007,16 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     let lastTimeline = 'last away-boundary: none taken yet';
     /** When that boundary began, epoch ms — so a foreground boundary measured later can outrank it. */
     let lastTimelineAt = 0;
+    /**
+     * What the phone says this app is, and what the system has asked its scene to do (v2.0-beta.16).
+     *
+     * Both come from the plugin's `now()` and neither is otherwise reachable: the bundle id the Now
+     * Playing entry is owned by, and the scene callbacks that say whether the system ever asked this
+     * app to come to the front. Kept as reported — the sentence is built from them, and an older
+     * plugin that answers without them leaves the row saying so instead of inventing a reading.
+     */
+    let nativeIdentity: NativeIdentity | null = null;
+    let nativeScene: NativeSceneEvents | null = null;
     /**
      * The JS-side boundary's own clock (v2.0-beta.15).
      *
@@ -1682,6 +1785,8 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           const timed = Number(state.timeline.startedAt);
           lastTimelineAt = Number.isFinite(timed) && timed > 0 ? timed : 0;
         }
+        if (state.identity) nativeIdentity = state.identity;
+        if (state.scene) nativeScene = state.scene;
         const slot = typeof state.assetId === 'string' && state.assetId ? state.assetId : null;
         const nativeIndex = Number.isFinite(state.index) ? Number(state.index) : -1;
         /*
@@ -1715,6 +1820,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           failures: nativeFailures,
           ignored: nativeIgnored,
           reason: boundaryReason,
+          identity: identitySentence(nativeIdentity, nativeScene),
           timeline: `${lastTimeline}${foregroundText()}`,
           startedAt: lastTimelineAt,
           foreground: foregroundBoundary(),

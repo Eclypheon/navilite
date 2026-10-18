@@ -32,7 +32,7 @@ import test from 'node:test';
 
 import { AudioEngine } from '../src/player/engine.ts';
 import type { EngineOptions } from '../src/player/engine-contract.ts';
-import { createAssetLanes, toAbsoluteArtworkUrl, type NativeBridge, type NativeBridgeEvents, type NativeQueueStatement, type NativeTrackInfo } from '../src/player/native.ts';
+import { createAssetLanes, identitySentence, toAbsoluteArtworkUrl, type NativeBridge, type NativeBridgeEvents, type NativeQueueStatement, type NativeTrackInfo } from '../src/player/native.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
 import type { Library } from '../src/state/library.ts';
 import type { QueueContext, Song } from '../src/api/types.ts';
@@ -578,6 +578,48 @@ test('a handover arms the first boundary: the native side preloads ahead when it
     'the reload does not go back into the slot that already held the entry',
   );
   assert.match(preloadAhead, /primeAhead\(slot: holding, songId: entry\.songId, token: token\)/, 'the reloaded slot is never primed, so it would sit at `.readyToPlay` with no audio again');
+});
+
+/**
+ * v2.0-beta.16 — the one sentence the card-tap investigation is read from.
+ *
+ * A tap on the Now Playing card is routed to the bundle id the media remote holds, so the row has to
+ * carry that id, the signed id the install actually has (a rewritten one shows up here and nowhere
+ * else), and the scene callbacks that say whether the system ever asked the app to come to the
+ * front. All three are asserted as text, because the row is the only surface the owner can read.
+ */
+test('identitySentence names the bundle id, the signature and the scene counts (v2.0-beta.16)', () => {
+  assert.equal(
+    identitySentence(null, null),
+    'identity: this build reports none',
+    'a plugin that reports neither leaves the row saying so rather than inventing a reading',
+  );
+  const row = identitySentence(
+    {
+      bundleId: 'app.navilite',
+      appId: 'K3STERTEAM.app.navilite',
+      teamId: 'K3STERTEAM',
+      appGroups: 'none',
+      container: 'installed package',
+      signatureMatchesBundleId: true,
+    },
+    { connects: 1, opens: 1, activations: 2, resignations: 0, last: 'openurl', lastUrl: 'navilite://now' },
+  );
+  assert.match(row, /^id app\.navilite \(team K3STERTEAM, installed package, signed id matches\)/);
+  assert.match(row, /scene 1 connect \/ 1 open-url \/ 2 active, last openurl navilite:\/\/now$/);
+
+  // The signature is what a sideloader that rewrote the id changes: reported as a difference, not
+  // smoothed over, because an id that does not resolve to an installed app is the failure no
+  // setting in this plugin can reach.
+  assert.match(
+    identitySentence({ bundleId: 'app.navilite', appId: 'ABCDE12345.com.altstore.app.navilite', signatureMatchesBundleId: false }, null),
+    /signed id DIFFERS/,
+  );
+  // Nothing arrived: distinct from "arrived and did nothing", which is the whole point of the row.
+  assert.match(
+    identitySentence({ bundleId: 'app.navilite' }, { connects: 1, opens: 0, activations: 1, last: 'none' }),
+    /1 connect \/ 0 open-url \/ 1 active, never asked/,
+  );
 });
 
 test('toAbsoluteArtworkUrl converts relative cover art URLs to absolute URLs', () => {

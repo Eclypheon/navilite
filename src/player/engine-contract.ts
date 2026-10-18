@@ -314,6 +314,13 @@ export interface EngineStatus {
      * (v2.0-beta.14; the foreground half in v2.0-beta.15).
      */
     timeline: string;
+    /**
+     * Who the Now Playing entry is owned by, and what the system has asked this app's scene to do,
+     * as one sentence (v2.0-beta.16) — see `identitySentence` in `src/player/native.ts`. The bundle
+     * id (and the signed `application-identifier`) is the id SpringBoard routes a card tap to, and
+     * the scene counts say whether anything arrived at all.
+     */
+    identity: string;
     /** When that away boundary began, epoch ms; `0` when none has been timed (v2.0-beta.15). */
     startedAt: number;
     /**
