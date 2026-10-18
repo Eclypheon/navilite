@@ -187,6 +187,103 @@ test('two passes over the same playlist cannot walk it at the same time', async 
   assert.deepEqual(bridge.cancelled, [], 'and no pass cancelled a transfer the other one had started');
 });
 
+/* --------------------------------------- 4. a terminal state is forgotten by IDENTITY */
+
+/**
+ * The residual of the beta.6 fix (t_2e457501). A task that was **deliberately replaced** is
+ * cancelled, so its `didFail`/`didFinishDownload` lands *after* its successor is already registered
+ * under the same key. beta.6 forgot "whatever is under this key", so that late callback unregistered
+ * the SUCCESSOR — the idempotency guard then saw nothing live, and the next enqueue started a second
+ * transfer for the same bytes (duplicate traffic, and a duplicate's failure reported for a track
+ * whose first transfer is still moving).
+ *
+ * Modelled from the shipped source, the way the tests above are, because `node --test` cannot run
+ * Swift: the semantics are read out of `forgetTask`'s own body.
+ */
+const forgetBody = (() => {
+  const start = source.indexOf('fileprivate func forgetTask');
+  assert.ok(start >= 0, 'the plugin still has one place where a transfer stops being live');
+  const next = source.indexOf('fileprivate func', start + 1);
+  return source.slice(start, next === -1 ? undefined : next);
+})();
+
+interface Transfer {
+  key: string;
+  state: 'running' | 'suspended' | 'completed';
+  cancelled: boolean;
+}
+
+/**
+ * One deliberate replacement, then the superseded transfer's late terminal callback. Returns what
+ * the plugin believes is live afterwards, and every transfer it created for the key.
+ */
+function replacementRace(byIdentity: boolean, late: 'fail' | 'finish'): { live: Transfer | undefined; created: Transfer[]; already: number } {
+  const tasks = new Map<string, Transfer>();
+  const replaced = new Set<Transfer>();
+  const created: Transfer[] = [];
+  let already = 0;
+  const KEY = 'audio:s1';
+
+  // `forgetTask(_:)`: by identity, or — the beta.6 shape — whatever is registered under the key.
+  const forget = (task: Transfer): void => {
+    if (byIdentity) {
+      if (tasks.get(task.key) === task) tasks.delete(task.key);
+    } else {
+      tasks.delete(task.key);
+    }
+  };
+  // `stopTask(key:deliberate:)`: names the task it created, marks it a replacement, cancels it.
+  const stop = (key: string): void => {
+    const task = tasks.get(key);
+    if (!task) return;
+    tasks.delete(key);
+    replaced.add(task);
+    task.cancelled = true;
+  };
+  // `enqueue`, reduced to the two facts this defect turns on: the guard, and the replacement.
+  const enqueue = (key: string): void => {
+    const live = tasks.get(key);
+    if (live && (live.state === 'running' || live.state === 'suspended')) {
+      already += 1;
+      return;
+    }
+    stop(key);
+    const task: Transfer = { key, state: 'running', cancelled: false };
+    created.push(task);
+    tasks.set(key, task); // registered before it is resumed
+  };
+
+  enqueue(KEY); // the owner's tap: transfer A
+  const first = created[0]!;
+  first.state = 'completed'; // A's transfer has ended; its delegate callback is still to come
+  enqueue(KEY); // a re-walk replaces it (A is not running) — transfer B, resumed
+  if (late === 'fail') {
+    forget(first); // didFail: forget by identity, then `takeReplacement` swallows the event
+    assert.equal(replaced.has(first), true, 'the superseded transfer was a replacement, so no failure is reported');
+  } else {
+    forget(first); // didFinishDownload: the same identity rule, on the success path
+  }
+  enqueue(KEY); // …and now a later enqueue for the same key must still be a no-op
+  return { live: tasks.get(KEY), created, already };
+}
+
+test('a superseded transfer’s late failure leaves its successor live', () => {
+  // The semantics are read out of `forgetTask`'s own body: identity, or the beta.6 key sweep.
+  const byIdentity =
+    /forgetTask\(_ task: URLSessionTask\)/.test(forgetBody) && /liveTasks\[key\] === task/.test(forgetBody);
+
+  for (const late of ['fail', 'finish'] as const) {
+    const race = replacementRace(byIdentity, late);
+    assert.equal(race.created.length, 2, `${late}: exactly two transfers for the key — the replacement, no duplicate`);
+    assert.equal(race.live, race.created[1], `${late}: the successor is still the live transfer`);
+    assert.equal(race.live?.cancelled, false, `${late}: and it was not cancelled by its predecessor’s report`);
+    assert.equal(race.already, 1, `${late}: the later enqueue answered "already" instead of starting a second transfer`);
+  }
+
+  assert.ok(byIdentity, 'a terminal state forgets the task that ended, not the key it shares');
+  assert.doesNotMatch(source, /forgetTask\(taskKey\)/, 'no terminal path forgets by key');
+});
+
 /* --------------------------------------------------------- 3. the figure never regresses */
 
 test('the byte figure never goes down while the track is moving', async () => {

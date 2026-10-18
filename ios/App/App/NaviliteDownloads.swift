@@ -572,10 +572,20 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         taskLock.unlock()
     }
 
-    /** A transfer reached a terminal state: it is no longer live, and no longer a replacement. */
-    fileprivate func forgetTask(_ key: String) {
+    /**
+     * A transfer reached a terminal state: it is no longer live, and no longer a replacement.
+     *
+     * **By identity, not by key.** A task cancelled *as a replacement* keeps reporting its own
+     * failure/finish after its successor is already registered under the same key, so removing
+     * "whatever is under this key" unregistered the SUCCESSOR: the idempotency guard in `enqueue`
+     * then saw nothing live, started a second transfer for the same bytes, and the duplicate's
+     * failure was reported for a track whose first transfer was still moving. Same discipline
+     * `stopTask` already uses — the task object, never the string.
+     */
+    fileprivate func forgetTask(_ task: URLSessionTask) {
+        guard let key = task.taskDescription, !key.isEmpty else { return }
         taskLock.lock()
-        _ = liveTasks.removeValue(forKey: key)
+        if liveTasks[key] === task { _ = liveTasks.removeValue(forKey: key) }
         taskLock.unlock()
     }
 
@@ -605,10 +615,12 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     /* ------------------------------------------------------------- completion */
 
     /// A task finished with bytes on disk. Stage them, verify them, and only then move them into place.
-    fileprivate func didFinishDownload(taskKey: String, from location: URL, responseExpected: Int) {
-        // The transfer reached its end under its own steam: it is no longer live.
-        forgetTask(taskKey)
-        guard let base = baseURL, let (kind, songId) = Self.splitKey(taskKey) else { return }
+    fileprivate func didFinishDownload(task: URLSessionDownloadTask, from location: URL, responseExpected: Int) {
+        // The transfer reached its end under its own steam: it is no longer live — and it is only
+        // forgotten if it is still the task registered under its key (never its successor).
+        forgetTask(task)
+        guard let taskKey = task.taskDescription, !taskKey.isEmpty,
+              let base = baseURL, let (kind, songId) = Self.splitKey(taskKey) else { return }
         let job = readJobs()[taskKey]
         let suffix = job?.suffix ?? (kind == Self.lyricsKind ? Self.lyricsKind : kind == Self.artKind ? Self.artKind : "mp3")
         // The route's own `Content-Length` when the response carried one (the lyrics route does),
@@ -761,7 +773,8 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
 
     fileprivate func didFail(task: URLSessionTask, error: Error?, status: Int) {
         guard let taskKey = task.taskDescription, !taskKey.isEmpty else { return }
-        forgetTask(taskKey)
+        // By identity: a superseded task's late failure must not unregister its successor.
+        forgetTask(task)
         /*
          * A task this plugin cancelled **on purpose**, to replace it, is not a failure of the track:
          * the successor is already running and the job just persisted is its own. Identity is the
@@ -881,7 +894,7 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
             return
         }
         let expected = Int(downloadTask.response?.expectedContentLength ?? 0)
-        plugin?.didFinishDownload(taskKey: taskKey, from: location, responseExpected: expected)
+        plugin?.didFinishDownload(task: downloadTask, from: location, responseExpected: expected)
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
@@ -896,8 +909,9 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
             let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
             plugin?.didFail(task: task, error: error, status: status)
         } else {
-            // No error and no `didFinishDownloadingTo` body left to promote: this transfer is over.
-            plugin?.forgetTask(taskKey)
+            // No error and no `didFinishDownloadingTo` body left to promote: this transfer is over —
+            // forgotten only if it is still the task its key names.
+            plugin?.forgetTask(task)
         }
     }
 
