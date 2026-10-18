@@ -240,8 +240,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// rejects it), and `AVAudioApplication.activationState` — the iOS 16 answer — does not resolve
     /// under this SDK either. So the honest source is this side's record, and its correctness is
     /// earned by the two notifications installed in `installSessionObservers`: media services reset
-    /// clears it, an interruption that ends re-takes the session. One reader, so the four call sites
-    /// cannot drift.
+    /// clears it, an interruption that ends re-takes the session. Two readers — the `now()` payload
+    /// and `retakeSession` — and both read this one flag, so the four call sites cannot drift.
     private var sessionIsActive: Bool {
         return sessionActive
     }
@@ -1254,8 +1254,19 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          * dropped it while the app was away without a notification — the case this loop exists for.
          * It moves the retake count only when the flag already said the session was gone, so the
          * number stays a count of rescues rather than of ticks.
+         *
+         * **But not at a player that is stopped** (v2.0-beta.15). `setActive(true)` on a playback
+         * category that does not mix *interrupts* whatever else is sounding, so a listener who paused
+         * from the lock screen with a queue armed and had the session dropped would have this 2 s
+         * loop take the session back — and cut off the podcast he is hearing instead. A player this
+         * side can read as stopped is a player that needs no rescue from here; a player it cannot
+         * read (nil) is not evidence of a stop, and while a handed-off boundary is in flight the
+         * audible slot is mid-start, so both keep the assertion.
          */
-        retakeSession("the audio session had been deactivated while the app was away")
+        let audiblePlaying = audibleIsPlaying()
+        if boundaryInFlight || audiblePlaying != false {
+            retakeSession("the audio session had been deactivated while the app was away")
+        }
         /*
          * A handed-off boundary is in flight (v2.1): `announceUpcoming` deliberately wrote a card that
          * names a track which is **not** `index` yet, and `queue[index]` plus `audibleIsPlaying()`
@@ -1272,7 +1283,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          * then matched the rate being asked for, nothing ever repaired it. Judge nothing this tick;
          * the next one reads again.
          */
-        guard let playing = audibleIsPlaying() else { return }
+        guard let playing = audiblePlaying else { return }
         let entry = queue[index]
         let card = MPNowPlayingInfoCenter.default().nowPlayingInfo
         let cardTitle = card?[MPMediaItemPropertyTitle] as? String
@@ -1572,6 +1583,10 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         // Every path that ends a boundary goes through `commit` or through here, so this is where a
         // handed-off boundary stops being in flight even when it never reached a slot.
         boundaryInFlight = false
+        // And a start that never produced sound clears the paused latch with it (v2.0-beta.15):
+        // left set, the *next* real pause on the next item would never settle the card ladder, which
+        // is the "paused card is the last word" bug this latch exists to fix, one track later.
+        awaitingFirstPlayback = false
         failures += 1
         reason = why
         notifyListeners("advanceFailed", data: ["reason": why, "index": index])

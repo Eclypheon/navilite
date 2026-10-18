@@ -883,11 +883,54 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     let foregroundStartedAt = 0;
     let foregroundPlayedAt = 0;
     let foregroundAudibleAt = 0;
+    /**
+     * Whether the reading this layer holds was **adopted** rather than measured (v2.0-beta.15).
+     *
+     * A return from `hidden` is not a boundary this layer took: the native side may have taken it
+     * minutes ago, and the item is already sounding before a single line here runs. Beginning a
+     * boundary on that return measured the microseconds between `reconcile()` and `sync()` and
+     * overwrote the last real reading with them (the ~12 ms that measures nothing). So the return
+     * marks the reading adopted instead, the previous reading stands (aged), and no stamp is written
+     * until a boundary this layer genuinely begins.
+     */
+    let foregroundAdopted = false;
+    /**
+     * The next `load()` is the adoption of a track the native side is already playing — set by
+     * `reconcile()` when it finds the player on another entry, and consumed by that load.
+     */
+    let adoptingNextLoad = false;
+    /** The offset the current start asked for, ms — the gate that tells the incoming item's report
+     * from a report the outgoing item is still sending (see `noteForegroundAudible`). */
+    let foregroundAskedMs = 0;
+    /** How far a report may sit from the asked-for offset and still be about this start, ms. */
+    const FOREGROUND_AUDIBLE_SLACK_MS = 2000;
     /** Begin a boundary this layer is about to take: the previous reading stops being the current one. */
     const beginForegroundBoundary = (): void => {
       foregroundStartedAt = Date.now();
       foregroundPlayedAt = 0;
       foregroundAudibleAt = 0;
+      foregroundAskedMs = 0;
+      foregroundAdopted = false;
+    };
+    /**
+     * The foreground gap's **end**, from the path that actually observes playback while the app is on
+     * screen (v2.0-beta.15).
+     *
+     * `sync()` is not that path: it runs on resume, after a seek, and on the return from hidden —
+     * never at an awake track boundary, which is the boundary this clock exists to measure. The
+     * plugin's own `playbackState` report is: it is the same word the clock's redraw is built from
+     * (the engine's `onState`, src/player/engine.ts:1486), and it arrives at the boundary because the
+     * boundary ends with a `play`. Two conditions keep it honest — the play must have been issued by
+     * this layer (before it, the state belongs to the item being replaced), and the position must be
+     * near the offset that play asked for (the outgoing item keeps reporting for as long as the
+     * incoming stream is fetched; engine.ts:1475 gates its own start the same way).
+     */
+    const noteForegroundAudible = (isPlaying: boolean | undefined, currentTimeSeconds: unknown): void => {
+      if (foregroundStartedAt === 0 || foregroundAudibleAt > 0 || foregroundAdopted) return;
+      if (isPlaying !== true || foregroundPlayedAt === 0) return;
+      const at = Number(currentTimeSeconds);
+      if (Number.isFinite(at) && Math.abs(at * 1000 - foregroundAskedMs) > FOREGROUND_AUDIBLE_SLACK_MS) return;
+      foregroundAudibleAt = Date.now();
     };
     const foregroundBoundary = (): NativeForegroundBoundary | null => {
       if (foregroundStartedAt === 0) return null;
@@ -908,8 +951,22 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       if (fg.pending) {
         return ` · last foreground boundary: begun ${Math.round(fg.ageMs / 1000)} s ago, ${fg.playedAt > 0 ? 'play issued' : 'no play issued'}, not sounding yet`;
       }
-      const playToSound = fg.playMs >= 0 ? `play→sound ${fg.audibleMs - fg.playMs} ms · ` : '';
-      return ` · last foreground boundary: start→${fg.playMs >= 0 ? 'play' : 'sound'} ${fg.audibleMs} ms · ${playToSound}start→sound ${fg.audibleMs} ms (${Math.round(fg.ageMs / 1000)} s ago)`;
+      /*
+       * Both halves are named only when both exist (v2.0-beta.15): `start→play` is the wait for the
+       * player to take the request, `play→sound` the wait for it to produce audio, and `start→sound`
+       * is their sum. A boundary with no play issued has one half, not two — the old branch printed
+       * the sound number under both labels (`start→sound 120 ms · start→sound 120 ms`).
+       */
+      const halves =
+        fg.playMs >= 0 ? `start→play ${fg.playMs} ms · play→sound ${fg.audibleMs - fg.playMs} ms · ` : '';
+      /*
+       * And it says when it is not the newest reading on the row (v2.0-beta.15): `lastTimelineAt` is
+       * the start of the last **away** boundary, so a foreground reading that began before it is the
+       * older of the two and must not pass for the current one.
+       */
+      const older =
+        lastTimelineAt > 0 && fg.startedAt < lastTimelineAt ? ', older than the away boundary' : '';
+      return ` · last foreground boundary: ${halves}start→sound ${fg.audibleMs} ms (${Math.round(fg.ageMs / 1000)} s ago${older})`;
     };
     const timelineText = (t: {
       path?: string;
@@ -980,6 +1037,8 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         duration: Number.isFinite(event.duration) ? event.duration : undefined,
         reason: typeof event.reason === 'string' ? event.reason : undefined,
       });
+      // And the JS-side boundary's end, on the first report that this start is sounding (v2.0-beta.15).
+      noteForegroundAudible(event.isPlaying, event.currentTime);
     });
     await NativeAudio.addListener('complete', (event) => {
       if (!isAudible(event)) return;
@@ -1252,7 +1311,18 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          * for the incoming track, so it is the start the foreground gap is measured from — before
          * the fetch, the same way the native timeline measures from the item end.
          */
-        beginForegroundBoundary();
+        /*
+         * An **adoption** is not a boundary (v2.0-beta.15): when `reconcile()` handed the app a track
+         * the native side is already playing, this load is the app moving onto it — the sound began
+         * before the app was running, so a clock started here would measure the few ms between the
+         * return and this call and call it a gap. The previous reading stands instead, aged.
+         */
+        if (adoptingNextLoad) {
+          adoptingNextLoad = false;
+          foregroundAdopted = true;
+        } else {
+          beginForegroundBoundary();
+        }
         /*
          * A load is the listener's own request, and it takes the audible slot over (v1.9.2): any
          * prepare still on the lane for the chain he has left is refused rather than performed.
@@ -1534,16 +1604,24 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         if (Number.isFinite(state.ignored)) nativeIgnored = Number(state.ignored);
         if (typeof state.reason === 'string' && state.reason) boundaryReason = state.reason;
         /*
-         * **The return is a JS-side boundary too (v2.0-beta.15).** `engine` calls this once, on the
-         * way back from `hidden` (src/player/engine.ts:2247), before it reads the player. Stamping the
-         * start here makes the step from "the web layer is running again" to the first read of a
-         * player that is sounding a measurable gap — the counterpart of the away boundary the native
-         * side times, and the only way a foreground return gets a number of its own.
+         * **The return is not a boundary this layer measured (v2.0-beta.15).** It used to begin one
+         * here, and `engine` calls `sync()` ms later on the same path (src/player/engine.ts:2260) —
+         * so the return closed a boundary at the time it took to get there (5–50 ms) for a boundary
+         * the native side may have taken minutes earlier, and overwrote the last real reading with
+         * it. What the return does now is leave the reading it already has standing — aged, and said
+         * to be old by the row — and, when the player is on another entry, mark the load that adopts
+         * it as an adoption rather than a new clock.
          */
-        beginForegroundBoundary();
         if (state.timeline) {
           lastTimeline = timelineText(state.timeline);
-          if (Number.isFinite(state.timeline.startedAt)) lastTimelineAt = Number(state.timeline.startedAt);
+          /*
+           * `-1` is the plugin's "nothing has been timed" (NaviliteRemote.swift:938) and it is
+           * **truthy**, so passing it through made every `if (startedAt)` read a boundary that never
+           * existed. Normalised here, at the boundary, to the `0` the contract declares (src/player/
+           * engine-contract.ts:318).
+           */
+          const timed = Number(state.timeline.startedAt);
+          lastTimelineAt = Number.isFinite(timed) && timed > 0 ? timed : 0;
         }
         const slot = typeof state.assetId === 'string' && state.assetId ? state.assetId : null;
         const nativeIndex = Number.isFinite(state.index) ? Number(state.index) : -1;
@@ -1567,6 +1645,8 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           audibleId = slot;
         }
         audibleSongId = typeof state.songId === 'string' && state.songId ? state.songId : null;
+        // The load that moves the app onto this entry is an adoption, not a new clock (v2.0-beta.15).
+        adoptingNextLoad = true;
         return { changed: true, songId: audibleSongId, index: nativeIndex };
       },
       nativeAdvance() {
@@ -1602,9 +1682,18 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       },
       async play(startSeconds) {
         await startService();
-        // The JS-side boundary's play moment (v2.0-beta.15) — closed by the first report of sound.
-        foregroundPlayedAt = Date.now();
-        if (foregroundStartedAt === 0) foregroundStartedAt = foregroundPlayedAt;
+        /*
+         * The JS-side boundary's play moment (v2.0-beta.15) — closed by the first report of sound.
+         *
+         * Never on an **adopted** reading: that clock is not this layer's boundary, and writing a
+         * play into it would print a `play→sound` for a start nothing here made.
+         */
+        if (!foregroundAdopted) {
+          foregroundPlayedAt = Date.now();
+          if (foregroundStartedAt === 0) foregroundStartedAt = foregroundPlayedAt;
+          // What this start asked for — the offset its own reports can be near (`noteForegroundAudible`).
+          foregroundAskedMs = Math.max(0, startSeconds) * 1000;
+        }
         // Behind the audible lane: the play for a track whose own load is still running must not
         // overtake it, and it must not start the previous track's asset either.
         await lanes.audible(() => bounded(NativeAudio.play({ assetId: audibleId, time: Math.max(0, startSeconds) }), undefined, 'play'));
@@ -1661,14 +1750,14 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           ]);
           lastPositionMs = Number.isFinite(current.currentTime) ? current.currentTime * 1000 : lastPositionMs;
           /*
-           * The foreground boundary's end (v2.0-beta.15): the first read of a player that is actually
-           * sounding, with a boundary of this layer's begun. The play may have been issued here, or
-           * by the native side while the app was away and adopted on the way back — either way the
-           * moment sound is first confirmed is the end of the gap the row measures, and a boundary
-           * that never sounds stays `pending` rather than being closed with a timeout dressed up as a
-           * number.
+           * The foreground boundary's end — the **second** reader (v2.0-beta.15). The primary one is
+           * the plugin's own `playbackState` report (`noteForegroundAudible`), because this call never
+           * runs at an awake track boundary: it runs on resume, after a seek, and on the return from
+           * hidden. It still closes a boundary here — a resumed or sought start is this layer's own —
+           * but never an **adopted** one: the return's `5–50 ms` was exactly that mistake, a number
+           * measuring the round trip rather than the gap.
            */
-          if (playing.isPlaying === true && foregroundStartedAt > 0 && foregroundAudibleAt === 0) {
+          if (playing.isPlaying === true && foregroundStartedAt > 0 && foregroundAudibleAt === 0 && !foregroundAdopted) {
             foregroundAudibleAt = Date.now();
           }
           return {
