@@ -24,7 +24,7 @@ import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
 import { OfflineStore, estimateBytes, formatBytes, formatSize, type DownloadActivity, type DownloadFailure, type DownloadedPlaylist, type PlaylistBadge, type PlaylistDownloadState, type SizeEstimate } from '../state/offline.ts';
 import { fillSong } from '../state/song-metadata.ts';
-import { createDownloadsBridge, localFileSrc } from '../player/native.ts';
+import { boundaryLog, createDownloadsBridge, localFileSrc } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore } from '../storage/secret.ts';
 import { loadSettings, saveSettings } from '../storage/settings.ts';
@@ -2191,6 +2191,36 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
   const whatsNew = h('button', { class: 'button', text: "What's new" }, [icon(ICONS.changelog, 16)]);
   whatsNew.addEventListener('click', () => (location.hash = '#/changelog'));
 
+  /*
+   * v2.0-beta.16 — **the boundary log, and the one action that gets it off the phone.**
+   *
+   * Four rounds of "the gap between songs" were diagnosed from source because the phone's own numbers
+   * never left the phone: a row on a screen cannot be read while driving, and it holds one boundary,
+   * not the pattern. The native side now writes every look-ahead, every track end, every boundary and
+   * every first sound to `Documents/navilite-boundaries.jsonl`; this copies the whole file to the
+   * clipboard so it can be pasted into a message. If the clipboard is refused (a webview can), the
+   * toast says where the file is instead of pretending it worked.
+   */
+  const boundaryCopy = h('button', { class: 'button', text: 'Copy boundary log' });
+  boundaryCopy.addEventListener('click', () => {
+    void boundaryLog().then(async (log) => {
+      if (!log) {
+        ctx.toast('This build keeps no boundary log', 'error');
+        return;
+      }
+      if (log.count === 0) {
+        ctx.toast('The boundary log is empty — nothing has happened in the background yet');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(log.lines.join('\n'));
+        ctx.toast(`Copied ${log.count} boundary line${log.count === 1 ? '' : 's'}`);
+      } catch {
+        ctx.toast(`Could not copy — the log is at ${log.path} (${log.count} lines)`, 'error');
+      }
+    });
+  });
+
   const clearLyrics = h('button', { class: 'button', text: 'Clear cached lyrics' });
   clearLyrics.addEventListener('click', () => {
     ctx.lyrics.forget();
@@ -2254,6 +2284,9 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
       h('h2', { class: 'section', text: 'Downloads' }),
       downloadSummary,
       h('div', { class: 'row' }, [removeDownloads]),
+      h('h2', { class: 'section', text: 'Boundary log' }),
+      h('p', { class: 'muted small', text: 'Every song change made while the app is in the background is written to a log on this phone: what was loaded ahead for it, how many seconds of audio that slot actually held, how long each step of the change took, and — when it did not start from the slot that was ready — which slot refused and why. Copy it and send it on, and the report has numbers instead of a description.' }),
+      h('div', { class: 'row' }, [boundaryCopy]),
       h('h2', { class: 'section', text: 'About' }),
       h('p', { class: 'muted', text: `Navilite ${BUILD_ID} · Subsonic API 1.16.1 · ${ctx.platform.native ? `wrapped ${ctx.platform.os} build` : 'browser / PWA'}` }),
       h('div', { class: 'row' }, [whatsNew, forget]),

@@ -548,11 +548,36 @@ test('a handover arms the first boundary: the native side preloads ahead when it
     'the arming happens before the observer is installed, so it may run against a queue this side has not adopted',
   );
 
-  // And the arming is idempotent: it names a slot that already holds the entry as "nothing to do",
-  // so a repeated statement cannot replace a warm slot with a second, competing load.
-  const preloadAhead = native.slice(native.indexOf('private func preloadAhead('), native.indexOf('private func preloadAhead(') + 1200);
+  /*
+   * And a slot name is not a warm slot (v2.0-beta.16). The old arming returned the moment *anything*
+   * held the entry, so an entry whose prime never pulled a buffer was left in place while the card
+   * counted the seam as warm — the ten seconds the owner hears. The arming now re-loads that entry,
+   * but only under three conditions, and each is asserted here: it is a slot of this side's own (not
+   * one the app handed over), the look-ahead's own record says the prime failed or stopped short of
+   * `primeBuffer`, and the audible track has more than 20 s left so the reload cannot be heard.
+   */
+  const preloadAhead = native.slice(native.indexOf('private func preloadAhead('), native.indexOf('private func primeAhead('));
   assert.match(preloadAhead, /guard !awake, index >= 0, index < queue\.count else \{ return \}/, 'preloadAhead no longer checks that it is the off-screen owner');
-  assert.match(preloadAhead, /if holding\(entry\.songId\) != nil \{ return \}/, 'preloadAhead could replace an entry a slot already holds');
+  assert.ok(!/if holding\(entry\.songId\) != nil \{ return \}/.test(preloadAhead), 'preloadAhead returned on a slot name alone again — a slot with no audio would pass as warm');
+  assert.match(preloadAhead, /guard Self\.windowSlots\.contains\(holding\) else \{ return \}/, 'the reload may take over a slot that is not this side\'s own window');
+  assert.match(
+    preloadAhead,
+    /guard let state = ahead, state\.songId == entry\.songId,\s*\n\s*state\.gaveUp != nil \|\| state\.buffered < Self\.primeBuffer else \{ return \}/,
+    'the reload is not conditional on the look-ahead\'s own record saying the prime failed or stopped short of a startable buffer',
+  );
+  assert.match(
+    preloadAhead,
+    /guard Self\.remainingSeconds\(from: audible\?\.assetId, bridge: bridge\) > 20 else \{ return \}/,
+    'the reload is not guarded by time left on the audible track — it could be heard',
+  );
+  // Into the same slot, and primed again: a reload that allocated a second slot would leave two
+  // connections open on the same entry and the audible stream sharing the pipe with both.
+  assert.match(
+    preloadAhead,
+    /guard preloadSlot\(plugin: plugin, slot: holding, entry: entry, preroll: true\) else \{ return \}\s*\n\s*fetchWindow = \(holding, entry\.songId\)/,
+    'the reload does not go back into the slot that already held the entry',
+  );
+  assert.match(preloadAhead, /primeAhead\(slot: holding, songId: entry\.songId, token: token\)/, 'the reloaded slot is never primed, so it would sit at `.readyToPlay` with no audio again');
 });
 
 test('toAbsoluteArtworkUrl converts relative cover art URLs to absolute URLs', () => {

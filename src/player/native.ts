@@ -102,8 +102,28 @@ interface NaviliteRemotePlugin {
       audibleMs?: number;
       startedAt?: number;
       ageMs?: number;
+      /**
+       * v2.0-beta.16 — the two facts `path` could not carry: what the play actually had to render
+       * with (`buffered`, in seconds of the audible item) and, when the boundary did not start from
+       * the slot that was supposed to be warm, the sentence saying why (`whyNotWarm`). `ahead` is
+       * the look-ahead's own state — `native-b 3.2s buffered, startable`, or the reason it is not.
+       */
+      pathDetail?: string;
+      whyNotWarm?: string;
+      buffered?: number;
+      likely?: boolean;
+      ahead?: string;
     };
+    /** Where the persisted boundary log is, how many lines this run wrote, and its last lines. */
+    logPath?: string;
+    logLines?: number;
+    logTail?: string[];
   }>;
+  /**
+   * The persisted boundary log (v2.0-beta.16): every look-ahead and every boundary, one JSON object
+   * per line, so the phone's own numbers can leave the phone instead of being read off a row.
+   */
+  boundaries(): Promise<{ path?: string; lines?: string[]; count?: number; tail?: string[] }>;
   addListener(eventName: 'next' | 'previous' | 'advanced' | 'advanceFailed', listenerFunc: (event: { songId?: string; assetId?: string; index?: number; reason?: string }) => void): Promise<PluginListenerHandle>;
 }
 
@@ -633,6 +653,31 @@ export interface AssetLanes {
 }
 
 /**
+ * The native boundary log, for the settings screen's copy-out (v2.0-beta.16).
+ *
+ * The row can say the seam was warm and still leave the owner with a ten-second silence he has to
+ * describe in words. This hands the phone's own lines over — every look-ahead (`ahead`), every track
+ * end (`end`, with whether the native side was allowed to take it), every boundary (`boundary`, with
+ * the five moments, the path, the slot and why-not-warm) and every first sound (`audible`,
+ * `audible-gave-up`) — so the next round starts from a measurement instead of from source. `null`
+ * on any build without the plugin, and on any failure: it is a diagnostic, never a feature.
+ */
+export async function boundaryLog(): Promise<{ path: string; lines: string[]; count: number } | null> {
+  if (!Capacitor.isPluginAvailable(NAVILITE_REMOTE)) return null;
+  try {
+    const remote = registerPlugin<NaviliteRemotePlugin>(NAVILITE_REMOTE);
+    const answer = await remote.boundaries();
+    return {
+      path: typeof answer.path === 'string' ? answer.path : '',
+      lines: Array.isArray(answer.lines) ? answer.lines : [],
+      count: Number.isFinite(answer.count) ? Number(answer.count) : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolves an artwork URL to an absolute URL against the stream or current origin so native image loaders can fetch it (v2.0-beta.12).
  */
 export function toAbsoluteArtworkUrl(artworkUrl?: string | null, streamUrl?: string): string | undefined {
@@ -976,6 +1021,10 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       playMs?: number;
       audibleMs?: number;
       ageMs?: number;
+      pathDetail?: string;
+      whyNotWarm?: string;
+      buffered?: number;
+      ahead?: string;
     }): string => {
       const at = (value: number | undefined): string =>
         Number.isFinite(value) && Number(value) >= 0 ? `${value} ms` : '—';
@@ -983,9 +1032,19 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         Number.isFinite(t.ageMs) && Number(t.ageMs) >= 0
           ? ` (${Math.round(Number(t.ageMs) / 1000)} s ago)`
           : '';
+      /*
+       * v2.0-beta.16 — the seam's own two facts, on the row. `path` said "warm" for a seam that
+       * started from a resolved item with no audio in it, which is the state the owner heard for ten
+       * seconds; `buffered` is what the play actually had, and `whyNotWarm` is the sentence that says
+       * which slot refused and why. `ahead` is the look-ahead's own account for the *next* boundary.
+       */
+      const buffer =
+        Number.isFinite(t.buffered) && Number(t.buffered) >= 0 ? `, buffered ${t.buffered} s` : '';
+      const why = t.whyNotWarm ? ` · why-not-warm: ${t.whyNotWarm}` : '';
+      const ahead = t.ahead ? ` · ahead: ${t.ahead}` : '';
       return (
         `last away-boundary${age}: card ${at(t.cardMs)} · fetch ${at(t.fetchMs)} · ready ${at(t.readyMs)} · ` +
-        `play ${at(t.playMs)} · audible ${at(t.audibleMs)} (${t.path ?? 'none'} path)`
+        `play ${at(t.playMs)} · audible ${at(t.audibleMs)} (${t.path ?? 'none'} path${buffer})${ahead}${why}`
       );
     };
     /** The number of the statement, so the reason line can name the picture the native side holds. */

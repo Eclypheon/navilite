@@ -118,7 +118,10 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "detach", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "activateSession", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setQueue", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "now", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "now", returnType: CAPPluginReturnPromise),
+        /* v2.0-beta.16 — the persisted boundary log, so the owner can hand over the measurement
+         * instead of reading a row on a screen while driving (see `boundaries`). */
+        CAPPluginMethod(name: "boundaries", returnType: CAPPluginReturnPromise)
     ]
 
     /// One entry of the published queue: the track, where it can be fetched from, and — when the app
@@ -263,6 +266,57 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private var readyAt: Date?
     private var playIssuedAt: Date?
     private var audibleAt: Date?
+    /// Why the boundary could not start from a slot that was supposed to be warm (v2.0-beta.16) —
+    /// empty when it started from one, which is the fact the old row could not state.
+    private var boundaryWhyNotWarm: String?
+
+    /* --------------------------------- the look-ahead's own account (v2.0-beta.16) */
+
+    /// What the look-ahead has loaded for the **next** boundary, and how far it got.
+    ///
+    /// The owner's gap is a constant (~10 s) and the fetch deadline here is 12 s, so the number has a
+    /// shape: the seam that takes ten seconds is the seam that pays `fetch()` → `awaitReady()`. The
+    /// question this record answers on his phone is *why the slot that was supposed to be warm was not
+    /// startable*: `buffered` is the one fact the readiness poll never asked for — an item can be
+    /// `.readyToPlay` (the metadata resolved) and hold **no audio**, which is exactly the state a
+    /// boundary would wait ten seconds on.
+    private struct Ahead {
+        let slot: String
+        let songId: String
+        var issuedAt: Date
+        var readyAt: Date?
+        var primedAt: Date?
+        var buffered: Double
+        var likely: Bool
+        var attempts: Int
+        var gaveUp: String?
+    }
+    private var ahead: Ahead?
+    /// How far the preloaded item's buffer must reach before the boundary counts as startable: three
+    /// seconds of audio at the item's head is more than the seam needs, and it is reached in one
+    /// preroll on a local network.
+    private static let primeBuffer = 3.0
+    /// How long the look-ahead keeps asking for that buffer: 50 ms steps, 30 s. It is paid out of the
+    /// outgoing track (minutes long), not out of the seam.
+    private static let primeAttempts = 600
+    private static let primeStep = 0.05
+
+    /* --------------------------------------- the persisted boundary log (v2.0-beta.16) */
+
+    /// One JSON line per look-ahead and per boundary, in `Documents/navilite-boundaries.jsonl`.
+    ///
+    /// A row on a screen is not evidence the owner can hand over — it cannot be read while driving,
+    /// and the last three rounds of this defect were diagnosed from source. This file is the
+    /// measurement itself: `kind: "end"` (a track ended and whether this side took it), `"ahead"`
+    /// (what the look-ahead loaded and how much audio it actually pulled), `"boundary"` (the five
+    /// moments, the path, the slot, and why-not-warm), and `"audible"` (when sound actually began).
+    /// The app copies it out from Settings → Boundary log.
+    private static let logName = "navilite-boundaries.jsonl"
+    /// One rotation is kept. An unbounded log on a phone is a bug of its own.
+    private static let logRotateBytes = 512 * 1024
+    private static let logTailLines = 60
+    private var logCount = 0
+    private var logTail: [String] = []
 
     /// Cached artwork: songId -> MPMediaItemArtwork (v2.0-beta.12).
     private var artworkCache: [String: MPMediaItemArtwork] = [:]
@@ -499,6 +553,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 "sessionRetakes": self.sessionRetakes,
                 "sessionActive": self.sessionIsActive,
                 "timeline": self.boundaryTimeline(),
+                /* v2.0-beta.16 — the persisted log's own whereabouts, so the app can copy it out and
+                 * the row can carry the last lines without the owner opening a file by hand. */
+                "logPath": self.logFileURL?.path ?? "",
+                "logLines": self.logCount,
+                "logTail": Array(self.logTail.suffix(2)),
                 "cardTitle": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String) ?? "",
                 "cardRate": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? NSNumber)?.doubleValue ?? 0,
                 "artCached": playing.map { self.artworkCache[$0.songId] != nil } ?? false,
@@ -561,6 +620,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         guard let item = notification.object as? AVPlayerItem else { return }
         guard let recorded = audible, let found = AudibleBridgePlayer.player(recorded.assetId, from: bridge), found.player.currentItem === item else {
             ignored += 1
+            record("end-ignored", ["why": "the item that ended is not the audible player's current item"])
             return
         }
         /*
@@ -571,8 +631,17 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          */
         guard !awake else {
             reason = "the app was on screen, so the web layer took the track boundary as it always has"
+            /*
+             * The line that settles the argument (v2.0-beta.16): if every track end in the log says
+             * `awake: true` while the app was in his pocket, then nothing in this file ever ran at the
+             * seam and every native fix before this one was a fix to a path that was not being taken.
+             */
+            record("end", ["taken": false, "slot": recorded.assetId, "songId": recorded.songId,
+                           "why": "the app was on screen, so the web layer owns this boundary"])
             return
         }
+        record("end", ["taken": true, "slot": recorded.assetId, "songId": recorded.songId,
+                       "duration": item.status == .readyToPlay ? item.duration.seconds : -1])
         /*
          * The statement in force at this moment travels with the boundary (v1.9.10). Everything the
          * advance goes on to do — a fetch, each rung of its readiness poll, the play — re-checks it, so
@@ -680,6 +749,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         let entry = queue[target]
         let slot = holding(entry.songId)
         if let slot {
+            /*
+             * The buffer the slot was holding at the moment of the play (v2.0-beta.16) — the number
+             * that tells "the seam had audio to render" from "the seam had a resolved item and no
+             * bytes". It travels with the boundary's log line.
+             */
+            boundaryWhyNotWarm = nil
             if playSlot(entry: entry, slot: slot, time: 0, how: how, token: token) {
                 commit(target: target, slot: slot, entry: entry, how: how)
                 return true
@@ -696,6 +771,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                found.player.status != .failed,
                !NaviliteSpectrum.hasEnded(item) {
                 reason = "\(how): \(entry.songId) is already buffering in \(slot), waiting for readiness"
+                boundaryWhyNotWarm = reason
                 awaitReady(slot: slot, entry: entry, target: target, how: how, waited: 0, token: token)
                 return true
             }
@@ -706,11 +782,15 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
              * for the music to stop.
              */
             reason = "\(how): the slot holding \(entry.songId) would not play, so it is being fetched again here"
+            boundaryWhyNotWarm = reason
         }
         if restart {
             // Restarting the current entry with no slot to restart from is nothing to fetch.
             fail("\(how): there is nothing on the player to restart")
             return false
+        }
+        if boundaryWhyNotWarm == nil {
+            boundaryWhyNotWarm = "\(how): nothing held \(entry.songId) — no slot from the app and none from the look-ahead"
         }
         return fetch(entry: target, how: how, token: token)
     }
@@ -844,6 +924,9 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         refreshNowPlaying()
         // When the first frame is actually running (v2.0-beta.14) — the last of the five numbers.
         beginAudibleProbe(token: generation)
+        // The boundary's own line in the persisted log (v2.0-beta.16), written **before** the
+        // look-ahead is re-armed: `preloadAhead` replaces the record this one is about.
+        recordBoundary(outcome: "taken")
         preloadAhead(token: generation)
     }
 
@@ -861,16 +944,45 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         }
         let entry = queue[target]
         loadArtwork(for: entry)
-        // Already held, by the app or by this side: nothing to fetch, and nothing to replace.
-        if holding(entry.songId) != nil { return }
+        /*
+         * **"Something holds it" is not "it can start" (v2.0-beta.16).** The old early return treated
+         * a slot's name as a promise. The look-ahead's own record is the honest test: if this side
+         * loaded that entry and its prime never pulled a buffer, the slot is a name with no audio in
+         * it, and the boundary would pay a cold fetch through it — the ten seconds. It is loaded
+         * again here instead, and only into a slot of this side's own, and only while the audible
+         * track has long enough left that the reload cannot be heard.
+         */
+        if let holding = holding(entry.songId) {
+            guard let plugin = bridge?.plugin(withName: Self.audioPluginName) else { return }
+            guard Self.windowSlots.contains(holding) else { return }
+            guard let state = ahead, state.songId == entry.songId,
+                  state.gaveUp != nil || state.buffered < Self.primeBuffer else { return }
+            guard Self.remainingSeconds(from: audible?.assetId, bridge: bridge) > 20 else { return }
+            record("reload", [
+                "slot": holding,
+                "songId": entry.songId,
+                "buffered": (state.buffered * 10).rounded() / 10,
+                "why": state.gaveUp ?? "the prime stopped short of a startable buffer"
+            ])
+            guard preloadSlot(plugin: plugin, slot: holding, entry: entry, preroll: true) else { return }
+            fetchWindow = (holding, entry.songId)
+            ahead = Ahead(slot: holding, songId: entry.songId, issuedAt: Date(), readyAt: nil, primedAt: nil,
+                          buffered: 0, likely: false, attempts: 0, gaveUp: nil)
+            primeAhead(slot: holding, songId: entry.songId, token: token)
+            return
+        }
         guard let plugin = bridge?.plugin(withName: Self.audioPluginName) else { return }
         let slot = fetchSlot()
         // It fetches exactly the entry after the audible one: that is the boundary, so it is primed.
         guard preloadSlot(plugin: plugin, slot: slot, entry: entry, preroll: true) else { return }
         fetchWindow = (slot, entry.songId)
+        ahead = Ahead(slot: slot, songId: entry.songId, issuedAt: Date(), readyAt: nil, primedAt: nil,
+                      buffered: 0, likely: false, attempts: 0, gaveUp: nil)
+        record("ahead-issued", ["slot": slot, "songId": entry.songId])
         // The vendor's preroll fires in the same turn as the preload, before its item has resolved;
-        // this is the same prime, issued at the one moment it can actually load anything.
-        prerollWhenReady(slot: slot, token: token)
+        // this is the same prime, issued at the one moment it can actually load anything — and kept
+        // up until the slot holds a buffer the boundary can start from (v2.0-beta.16).
+        primeAhead(slot: slot, songId: entry.songId, token: token)
     }
 
     /**
@@ -887,30 +999,263 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      * This is that prime, moved to the state that can perform it: the item is asked every 50 ms (the
      * same step the readiness poll uses) until it reports `.readyToPlay`, then `preroll(atRate: 1.0)`
      * fills the buffer while the slot is still paused and silent. **Only the immediate next entry** —
-     * one connection, so the audible stream is not starved. Bounded to 10 s, given up silently: a
-     * prime that cannot happen is not a boundary that failed.
+     * one connection, so the audible stream is not starved.
+     *
+     * **v2.0-beta.16 — the prime is kept up until the slot can actually start.** A single `preroll`
+     * loads what it loads and stops: a paused player does not keep pulling, so the item that was
+     * primed at the head of a three-minute track could still be holding a second of audio at the
+     * boundary, and `.readyToPlay` — the only thing the old prime (and the readiness poll) ever
+     * asked — is true for an item with no audio at all. So the ask is repeated once a second and the
+     * item's own `loadedTimeRanges` are read every 50 ms until it covers three seconds, at which
+     * point the boundary is a play and nothing else. What it reached is written into the boundary
+     * log either way; a prime that never gets there says why, because that sentence is the answer to
+     * "why was the slot that was supposed to be warm not startable".
      */
-    private func prerollWhenReady(slot: String, token: Int, attempt: Int = 0) {
+    private func primeAhead(slot: String, songId: String, token: Int, attempt: Int = 0) {
         guard current(token: token), !awake, slot != audible?.assetId else { return }
-        guard let found = AudibleBridgePlayer.player(slot, from: bridge) else { return }
-        guard let item = found.player.currentItem else {
-            guard attempt < Self.prerollAttempts else { return }
-            after(Self.fetchStep) { [weak self] in
-                self?.prerollWhenReady(slot: slot, token: token, attempt: attempt + 1)
+        guard let found = AudibleBridgePlayer.player(slot, from: bridge), let item = found.player.currentItem else {
+            guard attempt < Self.primeAttempts else {
+                finishPrime(why: "the slot never held an item to prime")
+                return
+            }
+            after(Self.primeStep) { [weak self] in
+                self?.primeAhead(slot: slot, songId: songId, token: token, attempt: attempt + 1)
             }
             return
         }
-        if item.status == .failed || found.player.status == .failed { return }
-        if item.status == .readyToPlay, found.player.status == .readyToPlay {
-            // Nothing is issued on an item that has played to its end (the crash of v1.9.8, again).
-            guard !NaviliteSpectrum.hasEnded(item) else { return }
-            found.player.preroll(atRate: 1.0) { _ in }
+        if item.status == .failed || found.player.status == .failed {
+            finishPrime(why: "the item failed to load (\(item.error?.localizedDescription ?? "no reason given by the player"))")
             return
         }
-        guard attempt < Self.prerollAttempts else { return }
-        after(Self.fetchStep) { [weak self] in
-            self?.prerollWhenReady(slot: slot, token: token, attempt: attempt + 1)
+        // Nothing is issued on an item that has played to its end (the crash of v1.9.8, again).
+        if NaviliteSpectrum.hasEnded(item) {
+            finishPrime(why: "the item had already played to its end")
+            return
         }
+        let buffered = Self.bufferedSeconds(item)
+        let likely = item.isPlaybackLikelyToKeepUp
+        if ahead?.songId == songId {
+            if ahead?.readyAt == nil, item.status == .readyToPlay, found.player.status == .readyToPlay {
+                ahead?.readyAt = Date()
+            }
+            ahead?.buffered = buffered
+            ahead?.likely = likely
+            ahead?.attempts = attempt
+        }
+        /*
+         * **The gate is the buffer, not the status (v2.0-beta.16).** `.readyToPlay` means the asset's
+         * metadata resolved; it says nothing about whether there is a second of audio to render. A
+         * boundary that started from an item in that state was silent from the moment of the play
+         * until the network caught up — with `automaticallyWaitsToMinimizeStalling = false` the player
+         * even reports itself as playing while it starves, which is why the old row looked healthy.
+         */
+        if buffered >= Self.primeBuffer, ahead?.primedAt != nil {
+            ahead?.gaveUp = nil
+            finishPrime(why: nil)
+            return
+        }
+        guard attempt < Self.primeAttempts else {
+            finishPrime(why: item.status == .readyToPlay
+                ? "the item resolved but pulled only \(String(format: "%.1f", buffered)) s of audio"
+                : "the item never resolved (status \(NaviliteSpectrum.statusName(item.status)))")
+            return
+        }
+        /*
+         * Ask for the bytes without starting. A paused player stops pulling once the previous preroll
+         * has done all it can, so the ask is repeated (once a second) while the item is resolved and
+         * the buffer is short. This is the one lever that fills the slot early instead of at the seam.
+         */
+        if item.status == .readyToPlay, found.player.status == .readyToPlay, attempt % 20 == 0 {
+            if ahead?.primedAt == nil { ahead?.primedAt = Date() }
+            found.player.preroll(atRate: 1.0) { _ in }
+        }
+        after(Self.primeStep) { [weak self] in
+            self?.primeAhead(slot: slot, songId: songId, token: token, attempt: attempt + 1)
+        }
+    }
+
+    /// Close the look-ahead's account: one line in the log, whether it reached a startable buffer or
+    /// ran out of time trying (`why` non-nil). Nothing is played, stopped or unloaded here.
+    private func finishPrime(why: String?) {
+        guard var state = ahead, state.gaveUp == nil else { return }
+        state.gaveUp = why
+        ahead = state
+        var facts: [String: Any] = [
+            "slot": state.slot,
+            "songId": state.songId,
+            "attempts": state.attempts,
+            "buffered": (state.buffered * 10).rounded() / 10,
+            "likely": state.likely,
+            "startable": why == nil
+        ]
+        if let ready = state.readyAt {
+            facts["readyMs"] = Int((ready.timeIntervalSince(state.issuedAt) * 1000).rounded())
+        }
+        if let primed = state.primedAt {
+            facts["primeMs"] = Int((primed.timeIntervalSince(state.issuedAt) * 1000).rounded())
+        }
+        if let why { facts["why"] = why }
+        record("ahead", facts)
+    }
+
+    /// How far an item's own buffered ranges reach, in seconds from its start — the fact the old
+    /// readiness poll never asked for (v2.0-beta.16).
+    private static func bufferedSeconds(_ item: AVPlayerItem) -> Double {
+        var furthest = 0.0
+        for value in item.loadedTimeRanges {
+            let range = value.timeRangeValue
+            let start = CMTimeGetSeconds(range.start)
+            let length = CMTimeGetSeconds(range.duration)
+            guard start.isFinite, length.isFinite else { continue }
+            furthest = max(furthest, start + length)
+        }
+        return furthest
+    }
+
+    /**
+     * Whether a player is stalled over its item — the state the ten-second silence actually is.
+     *
+     * `AVPlayerItem.isPlaybackStalled` is gone from the current SDK (v2.0-beta.16, Xcode 26), so the
+     * same fact is read from the two properties that still exist: an item whose buffer is empty and
+     * which the player does not believe it can keep up, or a player that is waiting to minimise
+     * stalling. Read only for the diagnostics line — nothing in the boundary depends on it.
+     */
+    private static func stalled(_ item: AVPlayerItem?, _ player: AVPlayer) -> Bool {
+        guard let item else { return false }
+        // A player that has run dry over an item it can no longer keep up with, or an item whose
+        // buffer is empty while the player says it is waiting — either is the silent seam.
+        if item.isPlaybackBufferEmpty && !item.isPlaybackLikelyToKeepUp { return true }
+        return player.timeControlStatus == .waitingToPlayAtSpecifiedRate && item.isPlaybackBufferEmpty
+    }
+
+    /// How much of the audible track is left, in seconds (0 when it cannot be read). The look-ahead
+    /// uses it to decide whether a slot may be reloaded without the reload being heard.
+    private static func remainingSeconds(from assetId: String?, bridge: CAPBridgeProtocol?) -> Double {
+        guard let assetId, let found = AudibleBridgePlayer.player(assetId, from: bridge),
+              let item = found.player.currentItem,
+              item.status == .readyToPlay else { return 0 }
+        let duration = item.duration.seconds
+        let position = found.player.currentTime().seconds
+        guard duration.isFinite, position.isFinite, duration > 0, position >= 0 else { return 0 }
+        return max(0, duration - position)
+    }
+
+    /* ------------------------------------------------- the boundary log (v2.0-beta.16) */
+
+    /// Append one record to the persisted log. A log that cannot be written is not a boundary that
+    /// failed: nothing here throws and nothing here waits.
+    private func record(_ kind: String, _ facts: [String: Any] = [:]) {
+        var line: [String: Any] = facts
+        line["kind"] = kind
+        line["at"] = Int((Date().timeIntervalSince1970 * 1000).rounded())
+        line["awake"] = awake
+        line["index"] = index
+        line["generation"] = generation
+        guard let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return }
+        logCount += 1
+        logTail.append(text)
+        if logTail.count > Self.logTailLines { logTail.removeFirst(logTail.count - Self.logTailLines) }
+        appendLogLine(text)
+    }
+
+    private var logFileURL: URL? {
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent(Self.logName)
+    }
+
+    private func appendLogLine(_ text: String) {
+        guard let url = logFileURL else { return }
+        let manager = FileManager.default
+        if let size = (try? manager.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
+           size.intValue > Self.logRotateBytes {
+            let previous = url.appendingPathExtension("1")
+            try? manager.removeItem(at: previous)
+            try? manager.moveItem(at: url, to: previous)
+        }
+        if !manager.fileExists(atPath: url.path) {
+            manager.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data((text + "\n").utf8))
+    }
+
+    /// The whole log, as lines, for the app's own copy-out (v2.0-beta.16).
+    private func logLines() -> [String] {
+        guard let url = logFileURL, let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return logTail
+        }
+        return text.split(separator: "\n").map(String.init)
+    }
+
+    /**
+     * The boundary log, for the app's copy-out (v2.0-beta.16).
+     *
+     * The owner cannot read a row on a screen while driving, and every round of this defect so far was
+     * diagnosed from source because the phone's own numbers never left the phone. This hands them
+     * over: the file's path, its every line, and the last few on their own for the row.
+     */
+    @objc func boundaries(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                call.reject("plugin deallocated")
+                return
+            }
+            let lines = self.logLines()
+            call.resolve([
+                "path": self.logFileURL?.path ?? "",
+                "lines": lines,
+                "count": lines.count,
+                "tail": Array(lines.suffix(5))
+            ])
+        }
+    }
+
+    /// One line summarising the boundary that has just been taken or refused, with every fact that
+    /// tells a warm seam from a cold one.
+    private func recordBoundary(outcome: String) {
+        guard let start = boundaryStart else { return }
+        func ms(_ at: Date?) -> Int {
+            guard let at else { return -1 }
+            return Int((at.timeIntervalSince(start) * 1000).rounded())
+        }
+        var facts: [String: Any] = [
+            "outcome": outcome,
+            "path": fetchIssuedAt == nil ? "warm" : "fetch",
+            "cardMs": ms(cardAnnouncedAt),
+            "fetchMs": ms(fetchIssuedAt),
+            "readyMs": ms(readyAt),
+            "playMs": ms(playIssuedAt),
+            "audibleMs": ms(audibleAt),
+            "slot": audible?.assetId ?? "",
+            "entry": index + 1,
+            "queued": queue.count,
+            "reason": reason
+        ]
+        if index >= 0, index < queue.count {
+            facts["songId"] = queue[index].songId
+            facts["title"] = queue[index].title
+        }
+        if let ahead {
+            facts["aheadSlot"] = ahead.slot
+            facts["aheadSong"] = ahead.songId
+            facts["aheadBuffered"] = (ahead.buffered * 10).rounded() / 10
+            facts["aheadStartable"] = ahead.gaveUp == nil
+            if let gave = ahead.gaveUp { facts["aheadWhy"] = gave }
+        } else {
+            facts["aheadSlot"] = "none"
+        }
+        facts["whyNotWarm"] = boundaryWhyNotWarm ?? "n/a — a slot held the next entry and did not refuse the play"
+        if let slot = audible?.assetId, let found = AudibleBridgePlayer.player(slot, from: bridge),
+           let item = found.player.currentItem {
+            facts["bufferedAtPlay"] = (Self.bufferedSeconds(item) * 10).rounded() / 10
+            facts["likely"] = item.isPlaybackLikelyToKeepUp
+            facts["stalled"] = Self.stalled(item, found.player)
+            facts["duration"] = item.status == .readyToPlay ? item.duration.seconds : -1
+        }
+        record("boundary", facts)
     }
 
     /// Start the boundary's clock: the end of the finished item is t 0, and the four moments after it
@@ -922,6 +1267,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         readyAt = nil
         playIssuedAt = nil
         audibleAt = nil
+        boundaryWhyNotWarm = nil
     }
 
     /// The last boundary, in milliseconds from its item end — the five numbers §6 asks for. `-1`
@@ -936,14 +1282,16 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         guard let start = boundaryStart else {
             return [
                 "path": "none", "startedAt": -1, "ageMs": -1,
-                "cardMs": -1, "fetchMs": -1, "readyMs": -1, "playMs": -1, "audibleMs": -1
+                "cardMs": -1, "fetchMs": -1, "readyMs": -1, "playMs": -1, "audibleMs": -1,
+                "pathDetail": "no away boundary has been taken yet",
+                "whyNotWarm": "", "buffered": -1, "ahead": self.aheadSummary()
             ]
         }
         func ms(_ at: Date?) -> Int {
             guard let at else { return -1 }
             return Int((at.timeIntervalSince(start) * 1000).rounded())
         }
-        return [
+        var facts: [String: Any] = [
             "path": fetchIssuedAt == nil ? "warm" : "fetch",
             "startedAt": Int((start.timeIntervalSince1970 * 1000).rounded()),
             "ageMs": Int((Date().timeIntervalSince(start) * 1000).rounded()),
@@ -951,8 +1299,34 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             "fetchMs": ms(fetchIssuedAt),
             "readyMs": ms(readyAt),
             "playMs": ms(playIssuedAt),
-            "audibleMs": ms(audibleAt)
+            "audibleMs": ms(audibleAt),
+            /*
+             * The two facts the old row never carried (v2.0-beta.16): what the play had to render
+             * with, and why the slot that was supposed to be warm was not startable. `path` alone
+             * could not tell a warm seam from a warm-looking one.
+             */
+            "pathDetail": fetchIssuedAt == nil ? "the seam was a play" : "the seam paid a fetch",
+            "whyNotWarm": boundaryWhyNotWarm ?? "",
+            "ahead": aheadSummary()
         ]
+        if let slot = audible?.assetId, let found = AudibleBridgePlayer.player(slot, from: bridge),
+           let item = found.player.currentItem {
+            facts["buffered"] = (Self.bufferedSeconds(item) * 10).rounded() / 10
+            facts["likely"] = item.isPlaybackLikelyToKeepUp
+        } else {
+            facts["buffered"] = -1
+        }
+        return facts
+    }
+
+    /// What the look-ahead holds for the next boundary, in one phrase for the row.
+    private func aheadSummary() -> String {
+        guard let ahead else { return "none" }
+        let buffered = String(format: "%.1f", ahead.buffered)
+        if let gave = ahead.gaveUp {
+            return "\(ahead.slot) NOT startable — \(buffered)s buffered (\(gave))"
+        }
+        return "\(ahead.slot) \(buffered)s buffered, startable"
     }
 
     /// When the audible player is actually running: `.playing` **and** its clock off zero. Bounded,
@@ -960,11 +1334,44 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private func beginAudibleProbe(token: Int, attempt: Int = 0) {
         guard current(token: token), let audible,
               let found = AudibleBridgePlayer.player(audible.assetId, from: bridge) else { return }
-        if found.player.timeControlStatus == .playing, found.player.currentTime().seconds > 0.01 {
+        let item = found.player.currentItem
+        let position = found.player.currentTime().seconds
+        /*
+         * Sound, not "the player says it is playing" (v2.0-beta.16): every item here is created with
+         * `automaticallyWaitsToMinimizeStalling = false`, so a play issued on an unbuffered item
+         * reports `.playing` and a clock that creeps forward while nothing is audible — which is how a
+         * ten-second silence could read as an immediate start in the old row. The clock has to be a
+         * quarter second in and the item must not be stalled before this counts as the first sound.
+         */
+        if found.player.timeControlStatus == .playing, position > 0.25,
+           !Self.stalled(item, found.player) {
             audibleAt = Date()
+            if let start = boundaryStart {
+                record("audible", [
+                    "ms": Int((Date().timeIntervalSince(start) * 1000).rounded()),
+                    "slot": audible.assetId,
+                    "buffered": item.map { (Self.bufferedSeconds($0) * 10).rounded() / 10 } ?? -1,
+                    "likely": item?.isPlaybackLikelyToKeepUp ?? false,
+                    "stalled": Self.stalled(item, found.player)
+                ])
+            }
             return
         }
-        guard attempt < Self.audibleProbeAttempts else { return }
+        guard attempt < Self.audibleProbeAttempts else {
+            /*
+             * Five seconds after the play and still nothing audible: the state itself is the evidence
+             * — a player that says `.playing` over an item that is stalled is exactly the silence the
+             * owner hears, and this line is what tells it apart from a boundary that never started.
+             */
+            record("audible-gave-up", [
+                "attempts": attempt,
+                "position": position.isFinite ? position : -1,
+                "control": String(describing: found.player.timeControlStatus),
+                "stalled": Self.stalled(item, found.player),
+                "buffered": item.map { (Self.bufferedSeconds($0) * 10).rounded() / 10 } ?? -1
+            ])
+            return
+        }
         after(Self.fetchStep) { [weak self] in
             self?.beginAudibleProbe(token: token, attempt: attempt + 1)
         }
@@ -1589,6 +1996,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         awaitingFirstPlayback = false
         failures += 1
         reason = why
+        recordBoundary(outcome: "failed")
         notifyListeners("advanceFailed", data: ["reason": why, "index": index])
     }
 }

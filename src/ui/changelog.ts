@@ -595,4 +595,13 @@ export const CHANGELOG: ChangelogRelease[] = [
         'Tapping the card is unchanged by this build, and still iOS\'s decision: the pill in the Dynamic Island opens NaviLite once the phone is unlocked, the song name and artist on the Lock Screen card and the expanded player open it, and the cover art keeps the tap iOS gives it (full-screen artwork), which no app can redirect. Whether the session re-take above brings the tap back is something only the phone can answer.',
       ],
     },
+    {
+      version: '2.0-beta.16',
+      date: '2026-10-18',
+      items: [
+        'The gap between songs in the background starts from a track that is actually loaded, not one that only looked ready: the next track\'s audio is now pulled in while the current one plays and kept topped up until the phone holds seconds of it, instead of stopping at the first sign that the stream exists. A song change counts as ready only when that audio is there.',
+        'The player row says how many seconds of audio the song change had to work with, what was loaded ahead for the next one, and — when it did not start from the track that was meant to be ready — which one refused and why. "Warm" on that row used to be possible for a change with no audio at all behind it.',
+        'Every song change made while the app is in your pocket is written to a log on the phone, and Settings now has Copy boundary log: what was loaded ahead, how many seconds of audio it held, how long each step took, and why a change did not start from the ready track. If this build still has a gap, that log says where the seconds went instead of costing another round of guessing. Copying it and sending it on is the one thing this build cannot do for you.',
+      ],
+    },
   ];
