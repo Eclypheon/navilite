@@ -219,7 +219,12 @@ export const ART_ASSUMED_BYTES = 256 * 1024;
 export const LYRICS_MISS_TTL_MS = 5 * 60 * 1000;
 /** §5: leave this much headroom over the estimate before a download is allowed to start. */
 const FREE_SPACE_MARGIN = 250 * 1024 * 1024;
-const MAX_CONCURRENT = 3;
+/**
+ * How many transfers the app asks native to keep moving (v2.0.0-beta.10): the same number is the
+ * plugin's `maxLive` window — `configure` sets both — so a playlist of 233 tracks opens a handful of
+ * transfers at a time rather than several hundred, each of which needs its own temp file.
+ */
+const MAX_CONCURRENT = 4;
 
 /**
  * v2.0.0-beta.4 — the bounds the enqueue loop itself was missing.

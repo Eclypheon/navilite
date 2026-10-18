@@ -47,7 +47,10 @@ test('cancel cancels one kind; remove is the only thing that cancels both', () =
   assert.match(source, /"status": status/, 'a failure carries the HTTP status, so a 404 lyric can be a miss');
   // v2.0.0-beta.6 — the key is still the whole predicate, and the victim is named by the handle the
   // plugin created for it (`stopTask`), never by enumerating the session asynchronously.
-  assert.match(source, /stopTask\(key: Self\.taskKey\(kind, songId\), deliberate: false\)/, 'the predicate is the whole key');
+  assert.match(source, /stopTask\(key: (Self\.taskKey\(kind, songId\)|key), deliberate: false\)/, 'the predicate is the whole key');
+  // v2.0.0-beta.10 — a track cancelled while it waited in the window must never start later.
+  assert.match(source, /dropPending\(key\)/, 'a waiting job is dropped, not started later');
+  assert.match(source, /pumpPending\(\)/, 'and its slot (if it had one) goes to the next job');
   assert.doesNotMatch(source, /for task in tasks where task\.taskDescription == key/, 'no asynchronous enumeration decides a cancel');
   assert.doesNotMatch(source, /func cancelTask\(songId:/, 'the bare-songId cancel is gone');
   // `cancel` resolves a kind: one kind when the caller names it, both when it does not (a playlist

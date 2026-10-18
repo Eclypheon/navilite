@@ -90,8 +90,10 @@ test('load() cancels every task whose job is gone, before it reconciles', () => 
   assert.ok(reconcileAt >= 0, 'and reconcile() is still the boot half of the state machine');
   assert.ok(pruneAt < reconcileAt, 'orphans are cleared BEFORE the reconcile walks the staging area');
 
-  // The semantics, read out of the sweep's own body: a task survives only if a job names it.
-  const keepsOnlyNamed = /if !key\.isEmpty, jobs\[key\] != nil \{ continue \}/.test(pruneBody);
+  // The semantics, read out of the sweep's own body: a task survives only if a job names it —
+  // and, since v2.0.0-beta.10, it is **adopted** into the live window so a re-enqueue of the same
+  // key answers `already` instead of opening a second transfer.
+  const keepsOnlyNamed = /if !key\.isEmpty, jobs\[key\] != nil,/.test(pruneBody) && /adopt\(task, key: key\)/.test(pruneBody);
   const silentBeforeCancel = pruneBody.indexOf('markSilent(task)') < pruneBody.indexOf('task.cancel()');
   const isSilentInDidFail = /if takeSilent\(task\) \{ return \}/.test(didFailBody);
 
@@ -123,7 +125,7 @@ test('a second -3000 for the same track is not retried again in the same launch'
   const budget = /fileErrorRetried/.test(retryBody) && /fileErrorExhausted\.insert\(key\)/.test(retryBody);
   const givesUp = /fileErrorExhausted\(job\.taskKey\)/.test(enqueueBody)
     && /call\.resolve\(\["queued": false, "givenUp": true\]\)/.test(enqueueBody);
-  const removesStaging = /stagingFile\(songId: songId, suffix: suffix\)/.test(didFailBody)
+  const removesStaging = /stagingFile\(songId: songId, suffix: (?:suffix|job\.suffix)\)/.test(didFailBody)
     && /removeItem\(at: staging\)/.test(didFailBody);
 
   // The model: `takeFileErrorRetry` as written, then `enqueue`'s answer.

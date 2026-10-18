@@ -61,7 +61,18 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
 
     private static let sessionIdentifier = "com.navilite.offline-downloads"
     private static let jobsKey = "navilite.offline.jobs"
-    private static let maxConcurrent = 3
+    /**
+     * **How many transfers may be live at once** (v2.0.0-beta.10).
+     *
+     * The owner's playlist is 233 tracks, and a track is audio + lyrics + a cover: the app asks for
+     * several hundred *download tasks* in one walk, and `httpMaximumConnectionsPerHost` caps
+     * **connections**, not tasks or the temp files they each need. `nsurlsessiond` then cannot create
+     * its own temp file and answers `NSURLErrorCannotCreateFile` (-3000) before a byte is written —
+     * the owner's `failed: cannot create file` on a *fresh* container with plenty of free space.
+     * The window below is what `enqueue` now respects: at most this many live, the rest waiting in
+     * request order. It also matches the build he remembers as working, which downloaded song by song.
+     */
+    private static let defaultMaxLive = 4
 
     /// The axes of a song's download. The kind is part of every key, never implied by the song.
     private static let audioKind = "audio"
@@ -88,6 +99,15 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
      * back, no song is ever downloaded", on every track, because the race is in the happy path.
      */
     private var liveTasks: [String: URLSessionTask] = [:]
+    /**
+     * **The window** (v2.0.0-beta.10): the width of the live set, and the keys waiting for a slot.
+     *
+     * A job is persisted by `enqueue` whether or not it starts, so a waiting key is a complete job on
+     * disk — the transfer is started from it when a slot frees (`pumpPending`), and a key whose job
+     * has gone is dropped instead of started. FIFO, and a key is held once.
+     */
+    private var pendingKeys: [String] = []
+    private var maxLive = NaviliteDownloads.defaultMaxLive
     /// Keys whose in-flight transfer is being replaced on purpose: the cancelled task's `didFail` is
     /// the replacement's own doing, not a failure, so it is neither reported nor recorded. Keyed by
     /// the task **object**, so a mark is consumed by exactly the transfer it belongs to.
@@ -107,6 +127,16 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     /// session's delegate queue (completions), so every access goes through this lock. The
     /// per-launch file-error sets are behind the same lock.
     private let taskLock = NSLock()
+    /**
+     * **One writer at a time over the job store** (v2.0.0-beta.10). `persist`, `removeJob` and
+     * `recordExpectedBytes` are read-modify-write of the whole `UserDefaults` blob, and they run from
+     * the plugin's queue *and* from the session's delegate queue: unserialised, a completion's
+     * `recordExpectedBytes` and an `enqueue`'s `persist` each read the same state and the later write
+     * wins whole — the earlier job is gone from disk. A job that disappears while its key waits is a
+     * download that never starts and a slot that waits for ever. Held only around the read and the
+     * write, never across a lock the delegate takes, so it cannot deadlock with `taskLock`.
+     */
+    private let jobsLock = NSLock()
 
     /// The one key shape: `"<kind>:<songId>"`. Used for the task description and the persisted job.
     private static func taskKey(_ kind: String, _ songId: String) -> String {
@@ -367,7 +397,7 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         self.delegate = delegate
         let config = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         config.allowsCellularAccess = allowsCellular
-        config.httpMaximumConnectionsPerHost = Self.maxConcurrent
+        config.httpMaximumConnectionsPerHost = Self.defaultMaxLive
         config.isDiscretionary = false
         session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         /*
@@ -386,6 +416,14 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
      * Cancel every task the session hands back whose `taskDescription` has **no persisted job**
      * (v2.0.0-beta.9). Marked silent first, so the delegate's `didFail` for the cancellation is
      * swallowed instead of being announced as a failure of a track that is not in this launch.
+     *
+     * A task that **has** a job is adopted only if the window can hold it (v2.0.0-beta.10). The
+     * session survives an install-over, so beta.9 handed back its whole surviving backlog — hundreds
+     * of alive-but-unstarted tasks, because only *connections* were ever capped — and adopting all of
+     * them filled `liveTasks` on the first launch after the upgrade, so `register` refused every new
+     * start: the exact -3000 shape this window exists to remove. Everything past the window is
+     * cancelled here instead; its job is still on disk, so the JS replay re-enqueues it inside the
+     * window.
      */
     private func pruneOrphanTasks() {
         guard let session else { return }
@@ -394,11 +432,39 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             guard let self else { return }
             for task in tasks {
                 let key = task.taskDescription ?? ""
-                if !key.isEmpty, jobs[key] != nil { continue }
+                /*
+                 * **It is already in flight** (v2.0.0-beta.10): a background session survives a
+                 * relaunch, so these tasks are live for jobs we still hold. Adopt them, so they
+                 * count toward the window and a re-enqueue of the same key answers `already`
+                 * instead of opening a second transfer for the same bytes.
+                 */
+                if !key.isEmpty, jobs[key] != nil, self.adopt(task, key: key) { continue }
                 self.markSilent(task)
                 task.cancel()
             }
         }
+    }
+
+    /**
+     * Take a task the session handed back as a live transfer this plugin owns. Answers whether it
+     * did; a `false` means the caller must cancel it, because a task nobody tracks is worse than no
+     * task at all.
+     *
+     * Three refusals, under the one lock that also counts the window:
+     * - **Not running.** A terminal task will never call back, so adopting it would hold a slot for
+     *   the whole launch.
+     * - **Tracked already.** `getAllTasks` is asynchronous, so `enqueue` can register this key before
+     *   the callback runs. Adopting the duplicate would leave the restored task running *outside*
+     *   `liveTasks`: its own temp file, no slot, uncancellable by key, and its late `didFail`
+     *   reported as a failure of a track that is downloading fine.
+     * - **No free slot.** The window is the bound, and a launch may not start wider than it.
+     */
+    private func adopt(_ task: URLSessionTask, key: String) -> Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        guard task.state == .running, liveTasks[key] == nil, liveTasks.count < maxLive else { return false }
+        liveTasks[key] = task
+        return true
     }
 
     /// This task's cancellation is nobody's failure: no event reaches JS for it.
@@ -482,8 +548,15 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
 
     @objc func configure(_ call: CAPPluginCall) {
         allowsCellular = call.getBool("allowsCellular") ?? false
-        if let max = call.getInt("maxConcurrent") {
+        if let max = call.getInt("maxConcurrent"), max > 0 {
+            /* The window and the JS's number are the same number, so neither side has to guess how
+             * many transfers are live: the app asks for `maxConcurrent` slots, and this is the cap
+             * that is actually enforced (v2.0.0-beta.10). Widening it starts what is already waiting. */
             session?.configuration.httpMaximumConnectionsPerHost = max
+            taskLock.lock()
+            maxLive = max
+            taskLock.unlock()
+            pumpPending()
         }
         call.resolve(["allowsCellular": allowsCellular])
     }
@@ -542,10 +615,24 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             call.resolve(["queued": true, "already": true])
             return
         }
+        /*
+         * **Idempotent while it waits, too** (v2.0.0-beta.10): the playlist walk, the boot reconcile
+         * and a tap all ask for the same track, and a second ask must not send it to the back of the
+         * queue behind tracks that are still waiting. The job persisted just above is what the queued
+         * transfer is started from, so it is also how the latest words reach it.
+         */
+        if isPending(job.taskKey) {
+            call.resolve(["queued": true, "waiting": true])
+            return
+        }
         // Only this song's transfer of this kind: a lyrics enqueue must never cancel the audio one.
         // By **identity**, synchronously, before its successor exists — never by enumerating the
         // session, whose completion runs after the replacement has been resumed.
         stopTask(key: job.taskKey, deliberate: true)
+        // A key that was waiting and is about to be started must leave the queue in the same turn:
+        // otherwise a later pump would open a SECOND transfer for the same job and orphan the first
+        // one under its own key, costing a slot that never frees (v2.0.0-beta.10).
+        dropPending(job.taskKey)
         // …and the staging bytes go only for a transfer that is genuinely not live any more.
         do {
             let staging = try stagingFile(songId: songId, suffix: job.suffix)
@@ -559,14 +646,44 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
              */
             removeJob(kind: job.kind, songId: songId)
             call.reject(Self.localMessage(step: "cannot stage a download", error: error))
+            pumpPending() // the stopped transfer freed a slot
             return
         }
-        let task = session?.downloadTask(with: target)
-        task?.taskDescription = job.taskKey
-        // Registered before it is resumed, so a cancel issued from this same turn can name it.
-        if let task { register(task, key: job.taskKey) }
-        task?.resume()
-        call.resolve(["queued": true])
+        /*
+         * **The window** (v2.0.0-beta.10). A playlist is asked for as a whole — 233 tracks means
+         * hundreds of tasks — and every live `URLSessionDownloadTask` needs its own temp file. Past a
+         * handful, `nsurlsessiond` fails to create one and answers `-3000` before a byte moves. So a
+         * slot is taken first and the task created second: with no slot the job stays **persisted and
+         * waiting** (not failed, not retried), and `pumpPending` starts it in request order when a
+         * transfer ends.
+         */
+        if hasSlot() {
+            let task = session?.downloadTask(with: target)
+            task?.taskDescription = job.taskKey
+            // Registered before it is resumed, so a cancel issued from this same turn can name it —
+            // and `register` re-checks the window under the lock, so two racers cannot both take the
+            // last slot.
+            if let task, register(task, key: job.taskKey) {
+                task?.resume()
+                call.resolve(["queued": true])
+                return
+            }
+            /*
+             * **The loser of the race is not a failed download** (v2.0.0-beta.10). Another caller
+             * took the last slot between `hasSlot()` and `register`, so this task never transferred
+             * a byte: it is marked silent *before* it is cancelled. Unmarked, its
+             * `didCompleteWithError` reaches `didFail`, which reports the track as failed and deletes
+             * the job the key is about to wait on — the row then reads `failed` while `pendingKeys`
+             * holds a key with nothing to start. Marked, the cancellation is swallowed and the pump
+             * starts this job from disk like any other waiting key.
+             */
+            if let task {
+                markSilent(task)
+                task.cancel()
+            }
+        }
+        holdPending(job.taskKey)
+        call.resolve(["queued": true, "waiting": true])
     }
 
     @objc func cancel(_ call: CAPPluginCall) {
@@ -729,12 +846,16 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     /* -------------------------------------------------------------------- jobs */
 
     private func persist(job: Job) {
+        jobsLock.lock()
+        defer { jobsLock.unlock() }
         var jobs = readJobs()
         jobs[job.taskKey] = job
         writeJobs(jobs)
     }
 
     private func removeJob(kind: String, songId: String) {
+        jobsLock.lock()
+        defer { jobsLock.unlock() }
         var jobs = readJobs()
         jobs.removeValue(forKey: Self.taskKey(kind, songId))
         writeJobs(jobs)
@@ -745,6 +866,8 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     private func recordExpectedBytes(kind: String, songId: String, total: Int) {
         let key = Self.taskKey(kind, songId)
         guard total > 0 else { return }
+        jobsLock.lock()
+        defer { jobsLock.unlock() }
         var jobs = readJobs()
         guard var job = jobs[key], job.expectedBytes != total else { return }
         job.expectedBytes = total
@@ -777,7 +900,12 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
      * task is named **by the handle this plugin created for it** (v2.0.0-beta.6), synchronously.
      */
     private func cancelTask(kind: String, songId: String) {
-        stopTask(key: Self.taskKey(kind, songId), deliberate: false)
+        let key = Self.taskKey(kind, songId)
+        // A track cancelled while it waited must never start later (v2.0.0-beta.10).
+        dropPending(key)
+        stopTask(key: key, deliberate: false)
+        // …and if it was live, its slot goes to the next job in line.
+        pumpPending()
     }
 
     /** The live transfer for a key, if this plugin created one and has not seen it end. */
@@ -788,11 +916,133 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     }
 
     /** Record a task under its key **before** it is resumed, so a cancel can always name it. */
-    private func register(_ task: URLSessionTask, key: String) {
+    @discardableResult
+    private func register(_ task: URLSessionTask, key: String) -> Bool {
         taskLock.lock()
+        defer { taskLock.unlock() }
+        // The window is checked HERE, under the same lock that records the task: two callers that
+        // both passed `hasSlot()` can only fill one slot between them (v2.0.0-beta.10).
+        guard liveTasks.count < maxLive else { return false }
         liveTasks[key] = task
+        return true
+    }
+
+    /* -------------------------------------------------------------- the live window */
+
+    /** Is there a slot for one more transfer? */
+    private func hasSlot() -> Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        return liveTasks.count < maxLive
+    }
+
+    /** Hold a key until a slot frees. FIFO, and a key is held once. */
+    private func holdPending(_ key: String) {
+        taskLock.lock()
+        if !pendingKeys.contains(key) { pendingKeys.append(key) }
         taskLock.unlock()
     }
+
+    /** A key that will never run: the track was cancelled or removed while it waited. */
+    private func dropPending(_ key: String) {
+        taskLock.lock()
+        pendingKeys.removeAll { $0 == key }
+        taskLock.unlock()
+    }
+
+    /** Is this key already waiting for a slot? */
+    private func isPending(_ key: String) -> Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        return pendingKeys.contains(key)
+    }
+
+    /**
+     * **Start what is waiting, one transfer per free slot** (v2.0.0-beta.10).
+     *
+     * Called from every place a transfer stops being live — `forgetTask` (finish, failure, or a
+     * transfer that ended with no body), a cancellation, and `configure` when the window widens. A
+     * waiting job is started from its persisted bytes, so JS does not have to ask again; a key whose
+     * job has gone is dropped rather than resurrected.
+     */
+    private func pumpPending() {
+        while startNextPending() {}
+    }
+
+    /**
+     * Start the key at the head of `pending`, if a slot is free. Returns whether it did anything.
+     *
+     * The head is **peeked under the lock and only removed in the same critical section that
+     * registers its task**, so a `cancel` removing a waiting key can never race this: either the
+     * removal lands first (the key is gone, nothing starts) or the registration lands first (the key
+     * is live, and the cancel's `stopTask` finds it). Taking the key out of the queue before its
+     * transfer existed left a gap in which a cancelled track could still be started, with nothing
+     * left under its key to cancel.
+     */
+    private func startNextPending() -> Bool {
+        taskLock.lock()
+        guard liveTasks.count < maxLive, let key = pendingKeys.first else {
+            taskLock.unlock()
+            return false
+        }
+        guard let session else {
+            taskLock.unlock()
+            return false
+        }
+        /*
+         * A key that already has a live transfer under it is a stale duplicate: nothing to start and
+         * nothing to say — the transfer that is running will report for it.
+         */
+        if liveTasks[key] != nil {
+            pendingKeys.removeFirst()
+            taskLock.unlock()
+            return true
+        }
+        /*
+         * A key with no job — or a job whose url no transfer can open — is not startable, and the job
+         * is the whole authority here: it dies with its key. But it is **spoken for** rather than
+         * dropped (v2.0.0-beta.10). Dropped silently, the row sat on `downloading` until the JS stall
+         * window offered a retry `STALL_MS` later, for a key nothing was ever going to start.
+         */
+        let job = readJobs()[key]
+        guard let job, let target = URL(string: job.url), target.host != nil else {
+            pendingKeys.removeFirst()
+            taskLock.unlock()
+            reportUnstartable(key)
+            return true
+        }
+        let task = session.downloadTask(with: target)
+        task.taskDescription = key
+        liveTasks[key] = task
+        pendingKeys.removeFirst()
+        taskLock.unlock()
+        // Resumed outside the lock: a `cancel` that lands in between has already cancelled the task,
+        // and resuming a cancelled task is a no-op.
+        task.resume()
+        return true
+    }
+
+    /**
+     * A waiting key that can never start — its job has gone from the store, or its url is not one a
+     * transfer can open (v2.0.0-beta.10).
+     *
+     * The row is told, in the same shape a failed transfer reports: the alternative is `downloading`
+     * until the JS stall window offers a retry, for a key nothing will ever start. No `retried` retry
+     * is offered here — nothing was transferred, so there is nothing to retry against; the next walk
+     * of the playlist enqueues the track afresh.
+     */
+    private func reportUnstartable(_ key: String) {
+        guard let (kind, songId) = Self.splitKey(key) else { return }
+        removeJob(kind: kind, songId: songId)
+        notifyListeners("failed", data: [
+            "songId": songId,
+            "kind": kind,
+            "status": 0,
+            "error": "the waiting download has no job to start from",
+            "retried": false
+        ])
+    }
+
 
     /**
      * A transfer reached a terminal state: it is no longer live, and no longer a replacement.
@@ -809,6 +1059,8 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         taskLock.lock()
         if liveTasks[key] === task { _ = liveTasks.removeValue(forKey: key) }
         taskLock.unlock()
+        // A slot just freed: the next waiting job starts from where it was persisted (v2.0.0-beta.10).
+        pumpPending()
     }
 
     /**
@@ -1020,7 +1272,14 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         // …and the boot sweep's cancellations belong to no track in this launch (v2.0.0-beta.9).
         if takeSilent(task) { return }
         guard let (kind, songId) = Self.splitKey(taskKey) else { return }
-        let job = readJobs()[taskKey]
+        /*
+         * **A failure with no job is nobody's failure** (v2.0.0-beta.10). `removeJob` on a key the
+         * store does not hold rewrites the whole blob for nothing — and the event is worse: the loser
+         * of a register race, a key whose job went while it waited, a track cancelled from JS all
+         * reach here, and reporting them as `failed` tells the row to give up on a download that is
+         * still queued. The job is the authority for a track; without one there is no track to fail.
+         */
+        guard let job = readJobs()[taskKey] else { return }
         removeJob(kind: kind, songId: songId)
         /*
          * **The note names the code, and the file when the failure is ours** (v2.0.0-beta.9).
@@ -1040,7 +1299,7 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
          */
         var retried = true
         if let ns, Self.isFileError(ns) {
-            if let suffix = job?.suffix, let staging = try? stagingFile(songId: songId, suffix: suffix) {
+            if let staging = try? stagingFile(songId: songId, suffix: job.suffix) {
                 try? FileManager.default.removeItem(at: staging)
             }
             retried = takeFileErrorRetry(taskKey)
