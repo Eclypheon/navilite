@@ -75,6 +75,27 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     /// E7: a staging file nobody came back for is swept after a day.
     private static let stagingMaxAge: TimeInterval = 24 * 60 * 60
 
+    /**
+     * **Every transfer this plugin created and has not yet seen end**, keyed by job key
+     * (v2.0.0-beta.6).
+     *
+     * A cancel names its victim *here*. The build before this one cancelled through
+     * `session.getAllTasks { … }` — an **asynchronous** completion — while `enqueue` created and
+     * resumed the replacement in the same synchronous turn, so the block ran *after* the new task was
+     * already running, walked every task carrying that `taskDescription` and cancelled it. Each
+     * transfer died as `NSURLErrorCancelled` a few milliseconds after it connected, nothing could ever
+     * reach `Content-Length`, and the staging file was deleted: the owner's "it climbs and then drops
+     * back, no song is ever downloaded", on every track, because the race is in the happy path.
+     */
+    private var liveTasks: [String: URLSessionTask] = [:]
+    /// Keys whose in-flight transfer is being replaced on purpose: the cancelled task's `didFail` is
+    /// the replacement's own doing, not a failure, so it is neither reported nor recorded. Keyed by
+    /// the task **object**, so a mark is consumed by exactly the transfer it belongs to.
+    private var replacedTasks: Set<ObjectIdentifier> = []
+    /// Both maps are touched from the plugin's queue (`enqueue`/`cancel`/`remove`) *and* from the
+    /// session's delegate queue (completions), so every access goes through this lock.
+    private let taskLock = NSLock()
+
     /// The one key shape: `"<kind>:<songId>"`. Used for the task description and the persisted job.
     private static func taskKey(_ kind: String, _ songId: String) -> String {
         "\(kind):\(songId)"
@@ -299,13 +320,29 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             coverOf: call.getArray("coverOf") as? [String]
         )
         persist(job: job)
+        /*
+         * **Idempotent for a live transfer** (v2.0.0-beta.6). A second enqueue of a job that is still
+         * in flight is a no-op: no cancel, no staging delete, no restart of the bytes that have
+         * already arrived. The owner's tap, the boot resume and the pump all enumerate the same
+         * playlist, so before this guard two overlapping walks destroyed each other's transfers —
+         * every re-enqueue cancelled the task it had just resumed.
+         */
+        if let live = liveTask(job.taskKey), live.state == .running || live.state == .suspended {
+            call.resolve(["queued": true, "already": true])
+            return
+        }
         // Only this song's transfer of this kind: a lyrics enqueue must never cancel the audio one.
-        cancelTask(job: job)
+        // By **identity**, synchronously, before its successor exists — never by enumerating the
+        // session, whose completion runs after the replacement has been resumed.
+        stopTask(key: job.taskKey, deliberate: true)
+        // …and the staging bytes go only for a transfer that is genuinely not live any more.
         if let staging = stagingFile(songId: songId, suffix: job.suffix) {
             try? FileManager.default.removeItem(at: staging)
         }
         let task = session?.downloadTask(with: target)
         task?.taskDescription = job.taskKey
+        // Registered before it is resumed, so a cancel issued from this same turn can name it.
+        if let task { register(task, key: job.taskKey) }
         task?.resume()
         call.resolve(["queued": true])
     }
@@ -513,20 +550,64 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         cancelTask(kind: job.kind, songId: job.songId)
     }
 
-    /// Cancel only the tasks of this song *and* this kind — the key is the whole predicate.
+    /**
+     * Cancel only the tasks of this song *and* this kind — the key is the whole predicate, and the
+     * task is named **by the handle this plugin created for it** (v2.0.0-beta.6), synchronously.
+     */
     private func cancelTask(kind: String, songId: String) {
-        let key = Self.taskKey(kind, songId)
-        session?.getAllTasks { tasks in
-            for task in tasks where task.taskDescription == key {
-                task.cancel()
-            }
-        }
+        stopTask(key: Self.taskKey(kind, songId), deliberate: false)
+    }
+
+    /** The live transfer for a key, if this plugin created one and has not seen it end. */
+    private func liveTask(_ key: String) -> URLSessionTask? {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        return liveTasks[key]
+    }
+
+    /** Record a task under its key **before** it is resumed, so a cancel can always name it. */
+    private func register(_ task: URLSessionTask, key: String) {
+        taskLock.lock()
+        liveTasks[key] = task
+        taskLock.unlock()
+    }
+
+    /** A transfer reached a terminal state: it is no longer live, and no longer a replacement. */
+    fileprivate func forgetTask(_ key: String) {
+        taskLock.lock()
+        _ = liveTasks.removeValue(forKey: key)
+        taskLock.unlock()
+    }
+
+    /**
+     * Cancel the transfer **this plugin** created for `key`, by its own handle and synchronously,
+     * before any successor exists. `deliberate` marks the cancellation as a replacement, so the
+     * cancelled task's `didFail` is not reported to JS as a failure of the track.
+     */
+    @discardableResult
+    private func stopTask(key: String, deliberate: Bool) -> Bool {
+        taskLock.lock()
+        let task = liveTasks.removeValue(forKey: key)
+        if let task, deliberate { replacedTasks.insert(ObjectIdentifier(task)) }
+        taskLock.unlock()
+        guard let task else { return false }
+        task.cancel()
+        return true
+    }
+
+    /** Was this task's cancellation a deliberate replacement? Consumed: one mark, one cancellation. */
+    private func takeReplacement(_ task: URLSessionTask) -> Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        return replacedTasks.remove(ObjectIdentifier(task)) != nil
     }
 
     /* ------------------------------------------------------------- completion */
 
     /// A task finished with bytes on disk. Stage them, verify them, and only then move them into place.
     fileprivate func didFinishDownload(taskKey: String, from location: URL, responseExpected: Int) {
+        // The transfer reached its end under its own steam: it is no longer live.
+        forgetTask(taskKey)
         guard let base = baseURL, let (kind, songId) = Self.splitKey(taskKey) else { return }
         let job = readJobs()[taskKey]
         let suffix = job?.suffix ?? (kind == Self.lyricsKind ? Self.lyricsKind : kind == Self.artKind ? Self.artKind : "mp3")
@@ -678,7 +759,16 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    fileprivate func didFail(taskKey: String, error: Error?, status: Int) {
+    fileprivate func didFail(task: URLSessionTask, error: Error?, status: Int) {
+        guard let taskKey = task.taskDescription, !taskKey.isEmpty else { return }
+        forgetTask(taskKey)
+        /*
+         * A task this plugin cancelled **on purpose**, to replace it, is not a failure of the track:
+         * the successor is already running and the job just persisted is its own. Identity is the
+         * whole test — the cancelled task object, not the key — so a mark can never swallow the next
+         * genuine failure for the same track. One mark, one cancellation.
+         */
+        if takeReplacement(task) { return }
         guard let (kind, songId) = Self.splitKey(taskKey) else { return }
         removeJob(kind: kind, songId: songId)
         // `status` is the HTTP status when the response got that far: the lyrics route answers
@@ -787,7 +877,7 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
         let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             try? FileManager.default.removeItem(at: location)
-            plugin?.didFail(taskKey: taskKey, error: NaviliteDownloads.statusError(status), status: status)
+            plugin?.didFail(task: downloadTask, error: NaviliteDownloads.statusError(status), status: status)
             return
         }
         let expected = Int(downloadTask.response?.expectedContentLength ?? 0)
@@ -804,7 +894,10 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
         guard let taskKey = task.taskDescription, !taskKey.isEmpty else { return }
         if let error {
             let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
-            plugin?.didFail(taskKey: taskKey, error: error, status: status)
+            plugin?.didFail(task: task, error: error, status: status)
+        } else {
+            // No error and no `didFinishDownloadingTo` body left to promote: this transfer is over.
+            plugin?.forgetTask(taskKey)
         }
     }
 

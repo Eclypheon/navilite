@@ -511,4 +511,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'Retry appears only when the download has actually stopped moving, never while it is still working, and a retry carries on from where it was: the files already on the phone are not downloaded again.',
       ],
     },
+    {
+      version: '2.0-beta.6',
+      date: '2026-10-18',
+      items: [
+        'Downloads work again. In the last build every download stopped a few milliseconds after it started, so no song ever finished and the bytes it had already received were thrown away — that is why the count climbed, dropped back, and no playlist ever got past 0. Transfers now run to the end and keep what they have received.',
+        'The download figure no longer goes backwards while it is working, and the phone now walks a playlist once at a time instead of several passes cancelling each other.',
+      ],
+    },
   ];

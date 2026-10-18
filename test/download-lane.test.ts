@@ -45,7 +45,10 @@ test('the audio and lyrics transfers of one song are keyed by songId *and* kind'
 test('cancel cancels one kind; remove is the only thing that cancels both', () => {
   assert.match(source, /private func cancelTask\(kind: String, songId: String\)/, 'cancelTask is kind-aware');
   assert.match(source, /"status": status/, 'a failure carries the HTTP status, so a 404 lyric can be a miss');
-  assert.match(source, /for task in tasks where task\.taskDescription == key/, 'the predicate is the whole key');
+  // v2.0.0-beta.6 — the key is still the whole predicate, and the victim is named by the handle the
+  // plugin created for it (`stopTask`), never by enumerating the session asynchronously.
+  assert.match(source, /stopTask\(key: Self\.taskKey\(kind, songId\), deliberate: false\)/, 'the predicate is the whole key');
+  assert.doesNotMatch(source, /for task in tasks where task\.taskDescription == key/, 'no asynchronous enumeration decides a cancel');
   assert.doesNotMatch(source, /func cancelTask\(songId:/, 'the bare-songId cancel is gone');
   // `cancel` resolves a kind: one kind when the caller names it, both when it does not (a playlist
   // cancel stops the song, not one of its axes).
@@ -135,7 +138,7 @@ test('the completion handler reads the HTTP status, and only a 200 is ever promo
   assert.doesNotMatch(handler, /expectedContentLength[\s\S]*?\n\s*let status/, 'the status is read *before* the byte count, not after');
   assert.match(
     source,
-    /plugin\?\.didFail\(taskKey: taskKey, error: NaviliteDownloads\.statusError\(status\), status: status\)/,
+    /plugin\?\.didFail\(task: downloadTask, error: NaviliteDownloads\.statusError\(status\), status: status\)/,
     'anything else is reported as failed, carrying the status JS maps to a miss',
   );
   assert.match(handler, /guard status == 200 else \{\s+try\? FileManager\.default\.removeItem\(at: location\)/, 'the staged bytes are deleted, never promoted');

@@ -491,6 +491,14 @@ export class OfflineStore {
    * screen is never a stale chunk added to a file that is already complete.
    */
   private readonly inFlight = new Map<string, number>();
+  /**
+   * One walk per playlist at a time (v2.0.0-beta.6). `download()` (the owner's tap), `resume()` (the
+   * boot reconcile) and `pump()` (the self-completion pass) all enumerate the same playlist, and the
+   * native `enqueue` used to cancel-and-restart whatever was in flight for a key — so two overlapping
+   * walks destroyed each other's transfers and the byte figure fell back. A caller that arrives while
+   * a walk is running joins it instead of starting a second one.
+   */
+  private readonly walks = new Map<string, Promise<void>>();
   /** When each playlist's job last said anything — the stall window's only input (v2.0.0-beta.5). */
   private readonly lastSignal = new Map<string, number>();
   /** One shared repaint timer for all progress events, so a fast transfer cannot flood the UI. */
@@ -1359,6 +1367,29 @@ export class OfflineStore {
   /** The one place a song list becomes transfers: audio first (the long pole), then its lyric, then its cover. */
   private async enqueueSongs(playlistId: string, songs: Song[]): Promise<void> {
     if (!this.bridge) return;
+    /*
+     * **One walk per playlist** (v2.0.0-beta.6). A pass that arrives while another is running joins
+     * it: the running pass is enumerating the same manifest, so a second walk would re-enqueue tracks
+     * whose transfers are already moving — which is what "the progress climbs and then drops back"
+     * was, because a native re-enqueue replaced the transfer it named.
+     */
+    const running = this.walks.get(playlistId);
+    if (running !== undefined) {
+      await running;
+      return;
+    }
+    const walk = this.enqueueWalk(playlistId, songs);
+    this.walks.set(playlistId, walk);
+    try {
+      await walk;
+    } finally {
+      if (this.walks.get(playlistId) === walk) this.walks.delete(playlistId);
+    }
+  }
+
+  /** One pass over a playlist's manifest. Never entered concurrently for the same playlist. */
+  private async enqueueWalk(playlistId: string, songs: Song[]): Promise<void> {
+    if (!this.bridge) return;
     for (const song of songs) {
       const existing = this.rows.get(song.id);
       if (existing?.state === 'complete') {
@@ -1577,7 +1608,19 @@ export class OfflineStore {
     const row = this.rows.get(event.songId);
     if (!row) return;
     if (event.kind === undefined || event.kind === 'audio') {
-      if (typeof event.bytes === 'number' && event.bytes >= 0) this.inFlight.set(event.songId, event.bytes);
+      if (typeof event.bytes === 'number' && event.bytes >= 0) {
+        /*
+         * **The figure never goes down while the track is moving** (v2.0.0-beta.6). One URLSession
+         * task's own byte count only rises, so a smaller reading for the same track can only come
+         * from a *second* task for it — the overlap that made the owner watch the bytes "increment
+         * then suddenly regress". Both halves of that overlap are gone (native `enqueue` is a no-op
+         * for a live transfer, and one walk per playlist at a time), so keeping the higher of the two
+         * numbers is not invented progress: it is the bytes that were actually reported, and with one
+         * transfer per key the higher number is always this transfer's own.
+         */
+        const reported = this.inFlight.get(event.songId) ?? 0;
+        this.inFlight.set(event.songId, Math.max(reported, event.bytes));
+      }
     }
     for (const playlistId of row.refs) this.touch(playlistId);
   }
