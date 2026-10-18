@@ -20,3 +20,6 @@ Pods/
 
 # Timestamped backups from agent edits (*.bak-<timestamp>) are never committed.
 *.bak-*
+
+# Per-card git worktrees created by the kanban dispatcher.
+.worktrees/
