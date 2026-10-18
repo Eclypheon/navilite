@@ -2,6 +2,7 @@ import AVFoundation
 import Capacitor
 import Foundation
 import MediaPlayer
+import UIKit
 
 /**
  * Navilite's own lock-screen remote commands, the audio session's re-arm, and — since v1.9.8, and
@@ -198,6 +199,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// Which refresh is current; a newer one retires the older one's ladder.
     private var cardTicket = 0
 
+    /// Cached artwork: songId -> MPMediaItemArtwork (v2.0-beta.12).
+    private var artworkCache: [String: MPMediaItemArtwork] = [:]
+    /// songIds currently being fetched to avoid duplicate fetches.
+    private var fetchingArtworkSongIds: Set<String> = []
+
     private static let playSelector = NSSelectorFromString("play:")
     private static let preloadSelector = NSSelectorFromString("preload:")
     private static let unloadSelector = NSSelectorFromString("unload:")
@@ -263,6 +269,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             self.queue = []
             self.index = -1
             self.fetchWindow = nil
+            self.artworkCache.removeAll()
+            self.fetchingArtworkSongIds.removeAll()
             self.reason = "detached — nothing is published"
             call.resolve(["attached": false])
         }
@@ -705,6 +713,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             if repeatMode == "all" { target = 0 } else { return }
         }
         let entry = queue[target]
+        loadArtwork(for: entry)
         // Already held, by the app or by this side: nothing to fetch, and nothing to replace.
         if holding(entry.songId) != nil { return }
         guard let plugin = bridge?.plugin(withName: Self.audioPluginName) else { return }
@@ -884,6 +893,68 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     }
 
     /**
+     * Load album artwork from a local file path or remote URL and cache it (v2.0-beta.12).
+     *
+     * Once loaded, updates the Now Playing card if the song is still the current track.
+     */
+    private func loadArtwork(for entry: Entry) {
+        guard let artworkUrlString = entry.artworkUrl, !artworkUrlString.isEmpty else { return }
+        guard !fetchingArtworkSongIds.contains(entry.songId) else { return }
+        fetchingArtworkSongIds.insert(entry.songId)
+
+        let songId = entry.songId
+        let applyImage: (UIImage) -> Void = { [weak self] image in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.fetchingArtworkSongIds.remove(songId)
+                let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                self.artworkCache[songId] = artwork
+                // Keep cache bounded
+                if self.artworkCache.count > 50 {
+                    let activeIds = Set(self.queue.map(\.songId))
+                    for key in self.artworkCache.keys where !activeIds.contains(key) {
+                        self.artworkCache.removeValue(forKey: key)
+                    }
+                }
+                // Only update nowPlayingInfo if this song is still the current entry
+                if self.index >= 0 && self.index < self.queue.count && self.queue[self.index].songId == songId {
+                    var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
+                    info[MPMediaItemPropertyArtwork] = artwork
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+                }
+            }
+        }
+
+        if let url = URL(string: artworkUrlString) {
+            if url.isFileURL {
+                if let image = UIImage(contentsOfFile: url.path) {
+                    applyImage(image)
+                    return
+                }
+            } else if let scheme = url.scheme, scheme.hasPrefix("http") {
+                URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+                    guard let data = data, let image = UIImage(data: data) else {
+                        DispatchQueue.main.async {
+                            self?.fetchingArtworkSongIds.remove(songId)
+                        }
+                        return
+                    }
+                    applyImage(image)
+                }.resume()
+                return
+            }
+        }
+
+        // Direct local file path fallback
+        if FileManager.default.fileExists(atPath: artworkUrlString), let image = UIImage(contentsOfFile: artworkUrlString) {
+            applyImage(image)
+            return
+        }
+
+        fetchingArtworkSongIds.remove(songId)
+    }
+
+    /**
      * One write of the card: the entry that is playing, the item's own duration when it has one, the
      * player's own position, and its own rate.
      *
@@ -905,6 +976,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         if !entry.title.isEmpty { info[MPMediaItemPropertyTitle] = entry.title }
         if !entry.artist.isEmpty { info[MPMediaItemPropertyArtist] = entry.artist }
         if !entry.album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = entry.album }
+        info[MPNowPlayingInfoPropertyExternalContentIdentifier] = entry.songId
+        if let cached = artworkCache[entry.songId] {
+            info[MPMediaItemPropertyArtwork] = cached
+        } else {
+            loadArtwork(for: entry)
+        }
         let player = found.player
         /*
          * The duration, and **only from an item that has already been inspected (v1.9.11)**.

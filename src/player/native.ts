@@ -568,6 +568,27 @@ export interface AssetLanes {
   yieldToAudible(ms?: number): Promise<boolean>;
 }
 
+/**
+ * Resolves an artwork URL to an absolute URL against the stream or current origin so native image loaders can fetch it (v2.0-beta.12).
+ */
+export function toAbsoluteArtworkUrl(artworkUrl?: string | null, streamUrl?: string): string | undefined {
+  if (!artworkUrl) return undefined;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(artworkUrl)) {
+    return artworkUrl;
+  }
+  if (streamUrl && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(streamUrl)) {
+    try {
+      return new URL(artworkUrl, streamUrl).toString();
+    } catch {}
+  }
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    try {
+      return new URL(artworkUrl, window.location.origin).toString();
+    } catch {}
+  }
+  return artworkUrl;
+}
+
 export function createAssetLanes(yieldStepMs = WARM_YIELD_STEP_MS): AssetLanes {
   const chain = <T>(current: Promise<unknown>, work: () => Promise<T>): { next: Promise<T>; settled: Promise<unknown> } => {
     const next = current.then(work, work);
@@ -871,7 +892,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       title: info.title,
       artist: info.artist,
       album: info.album,
-      artworkUrl: info.artworkUrl ?? undefined,
+      artworkUrl: toAbsoluteArtworkUrl(info.artworkUrl, info.url),
     });
 
     /** Put `info` into `slot`, replacing whatever it held. Best-effort: the plugin rejects both on an empty slot. */
@@ -1017,8 +1038,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           entry.warmUrl == null
             ? undefined
             : [...warm.entries()].find(([, claim]) => claim.songId === entry.songId && claim.url === entry.warmUrl);
+        const artworkUrl = toAbsoluteArtworkUrl(entry.artworkUrl, entry.url);
         if (held === undefined) {
-          return { songId: entry.songId, url: entry.url, title: entry.title, artist: entry.artist, album: entry.album, artworkUrl: entry.artworkUrl ?? undefined };
+          return { songId: entry.songId, url: entry.url, title: entry.title, artist: entry.artist, album: entry.album, artworkUrl };
         }
         warmEntries += 1;
         return {
@@ -1027,7 +1049,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           title: entry.title,
           artist: entry.artist,
           album: entry.album,
-          artworkUrl: entry.artworkUrl ?? undefined,
+          artworkUrl,
           assetId: held[0],
         };
       });

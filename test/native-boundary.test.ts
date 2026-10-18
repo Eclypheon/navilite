@@ -32,7 +32,7 @@ import test from 'node:test';
 
 import { AudioEngine } from '../src/player/engine.ts';
 import type { EngineOptions } from '../src/player/engine-contract.ts';
-import { createAssetLanes, type NativeBridge, type NativeBridgeEvents, type NativeQueueStatement, type NativeTrackInfo } from '../src/player/native.ts';
+import { createAssetLanes, toAbsoluteArtworkUrl, type NativeBridge, type NativeBridgeEvents, type NativeQueueStatement, type NativeTrackInfo } from '../src/player/native.ts';
 import { PlaybackQueue } from '../src/state/queue.ts';
 import type { Library } from '../src/state/library.ts';
 import type { QueueContext, Song } from '../src/api/types.ts';
@@ -553,4 +553,15 @@ test('a handover arms the first boundary: the native side preloads ahead when it
   const preloadAhead = native.slice(native.indexOf('private func preloadAhead('), native.indexOf('private func preloadAhead(') + 1200);
   assert.match(preloadAhead, /guard !awake, index >= 0, index < queue\.count else \{ return \}/, 'preloadAhead no longer checks that it is the off-screen owner');
   assert.match(preloadAhead, /if holding\(entry\.songId\) != nil \{ return \}/, 'preloadAhead could replace an entry a slot already holds');
+});
+
+test('toAbsoluteArtworkUrl converts relative cover art URLs to absolute URLs', () => {
+  assert.equal(toAbsoluteArtworkUrl(null), undefined);
+  assert.equal(toAbsoluteArtworkUrl(undefined), undefined);
+  assert.equal(toAbsoluteArtworkUrl('https://example.com/cover.jpg'), 'https://example.com/cover.jpg');
+  assert.equal(toAbsoluteArtworkUrl('file:///var/mobile/art.jpg'), 'file:///var/mobile/art.jpg');
+  assert.equal(
+    toAbsoluteArtworkUrl('/rest/getCoverArt.view?id=123', 'http://127.0.0.1:4599/rest/stream?id=123'),
+    'http://127.0.0.1:4599/rest/getCoverArt.view?id=123',
+  );
 });

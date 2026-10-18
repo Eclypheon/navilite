@@ -277,6 +277,84 @@ patch({
             }`,
 });
 
+/*
+ *   8. **iOS — keep audio session active across track transitions (v2.0-beta.12).**
+ *
+ *      When an item finishes or `endSession()` runs, the plugin deactivated the audio session
+ *      whenever no assets were actively playing. With background playback and Now Playing
+ *      enabled (`showNotification == true`), deactivating the audio session immediately
+ *      dismisses the Dynamic Island and Lock Screen Now Playing widget, causing the native player
+ *      to disappear for seconds while the next track is prepared. We keep the audio session active
+ *      as long as notifications are enabled.
+ */
+patch({
+  file: PLUGIN,
+  id: 'ios-continuous-session',
+  anchor: `            if !hasPlayingAssets &&
+                !session.isOtherAudioPlaying &&
+                session.secondaryAudioShouldBeSilencedHint == false &&
+                !isRecordCapableCategory {
+                try self.session.setActive(false, options: .notifyOthersOnDeactivation)
+            }`,
+  replacement: `            // <marker>: keep audio session alive across track transitions when showNotification is enabled.
+            if !hasPlayingAssets &&
+                !session.isOtherAudioPlaying &&
+                session.secondaryAudioShouldBeSilencedHint == false &&
+                !isRecordCapableCategory &&
+                !self.showNotification {
+                try self.session.setActive(false, options: .notifyOthersOnDeactivation)
+            }`,
+});
+
+/*
+ *   9. **iOS — do not clear Now Playing card on track completion (v2.0-beta.12).**
+ *
+ *      `handlePlaybackCompletion` wiped `nowPlayingInfo = nil` as soon as the item finished,
+ *      causing the Lock Screen and Dynamic Island to disappear before the next track could be
+ *      started by the boundary runner.
+ */
+patch({
+  file: PLUGIN,
+  id: 'ios-persist-now-playing-on-completion',
+  anchor: `    internal func handlePlaybackCompletion(assetId: String, audioAsset: AudioAsset? = nil) {
+        if currentlyPlayingAssetId == assetId {
+            currentlyPlayingAssetId = nil
+            clearNowPlayingInfo()
+        }`,
+  replacement: `    internal func handlePlaybackCompletion(assetId: String, audioAsset: AudioAsset? = nil) {
+        if currentlyPlayingAssetId == assetId {
+            currentlyPlayingAssetId = nil
+            // <marker>: do not clear now playing card on completion when showNotification is enabled.
+            if !self.showNotification {
+                clearNowPlayingInfo()
+            }
+        }`,
+});
+
+/*
+ *   10. **iOS — do not clear Now Playing card on slot unload (v2.0-beta.12).**
+ *
+ *      `unload()` cleared `nowPlayingInfo` whenever the unloaded asset was the one that was playing.
+ *      At a track boundary, the old slot is unloaded while the next slot is starting, which
+ *      wiped the player card and caused it to flicker/disappear.
+ */
+patch({
+  file: PLUGIN,
+  id: 'ios-persist-now-playing-on-unload',
+  anchor: `                if wasCurrentlyPlaying {
+                    // This asset controlled the Now Playing / remote command state.
+                    self.currentlyPlayingAssetId = nil
+                    if self.showNotification {
+                        self.clearNowPlayingInfo()
+                    }
+                }`,
+  replacement: `                if wasCurrentlyPlaying {
+                    // This asset controlled the Now Playing / remote command state.
+                    self.currentlyPlayingAssetId = nil
+                    // <marker>: preserve now playing card across track boundary unloads.
+                }`,
+});
+
 for (const line of applied) console.log(`[navilite] ${line}`);
 if (failures.length > 0) {
   for (const line of failures) console.error(`[navilite] PATCH FAILED — ${line}`);

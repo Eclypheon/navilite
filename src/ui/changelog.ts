@@ -556,4 +556,13 @@ export const CHANGELOG: ChangelogRelease[] = [
         'Autoadvance to the next track while in the background now transitions immediately, without the multi-second delay between songs.',
       ],
     },
+    {
+      version: '2.0-beta.12',
+      date: '2026-10-18',
+      items: [
+        'The native player stays visible across songs when running in the background, keeping the audio session and Now Playing controls seamlessly active instead of disappearing between tracks.',
+        'Album art is pushed to the lock screen, Control Center, and Dynamic Island player for both streamed and downloaded songs.',
+        'Tapping the Dynamic Island or lock screen player opens the app directly via registered system URL schemes.',
+      ],
+    },
   ];
