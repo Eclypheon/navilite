@@ -92,8 +92,20 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     /// the replacement's own doing, not a failure, so it is neither reported nor recorded. Keyed by
     /// the task **object**, so a mark is consumed by exactly the transfer it belongs to.
     private var replacedTasks: Set<ObjectIdentifier> = []
+    /**
+     * The file-error family's per-launch budget (v2.0.0-beta.9). `-3000`/`-3001`/`-3003` are
+     * `URLSession` failing on its **own** temp file — before a byte is written and before a request
+     * reaches the server — so they are retried **once per track per launch** and then left `failed`:
+     * `fileErrorRetried` has taken that one retry, `fileErrorExhausted` may not take another.
+     */
+    private var fileErrorRetried: Set<String> = []
+    private var fileErrorExhausted: Set<String> = []
+    /// Tasks the boot sweep cancelled for having no persisted job: their cancellation is nobody's
+    /// failure, so `didFail` swallows it and JS is told nothing.
+    private var silentTasks: Set<ObjectIdentifier> = []
     /// Both maps are touched from the plugin's queue (`enqueue`/`cancel`/`remove`) *and* from the
-    /// session's delegate queue (completions), so every access goes through this lock.
+    /// session's delegate queue (completions), so every access goes through this lock. The
+    /// per-launch file-error sets are behind the same lock.
     private let taskLock = NSLock()
 
     /// The one key shape: `"<kind>:<songId>"`. Used for the task description and the persisted job.
@@ -119,6 +131,30 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     /// The error a non-`200` transfer is reported with; `status` travels beside it in the event.
     fileprivate static func statusError(_ status: Int) -> NSError {
         NSError(domain: "NaviliteDownloads", code: status, userInfo: [NSLocalizedDescriptionKey: "HTTP \(status)"])
+    }
+
+    /// A failure of **our own** step (a staging directory, a move), carrying the path it was writing
+    /// so the note can name the file as well as the code (v2.0.0-beta.9).
+    private struct LocalFailure: Error {
+        let path: String
+        let underlying: Error
+    }
+
+    /**
+     * `localizedDescription` **plus its numeric code** (v2.0.0-beta.9). The note the owner reads used
+     * to carry the words alone — `cannot create file` says nothing a diagnosis can act on, while
+     * `cannot create file (-3000)` names `NSURLErrorCannotCreateFile`: `URLSession` could not make its
+     * own temp file, before a byte was written and before a request reached the server.
+     */
+    fileprivate static func describe(_ error: Error) -> String {
+        let ns = error as NSError
+        return "\(ns.localizedDescription) (\(ns.code))"
+    }
+
+    /// `URLSession`'s file-system family: cannot create (-3000), cannot write (-3001), cannot close (-3003).
+    fileprivate static func isFileError(_ error: NSError) -> Bool {
+        guard error.domain == NSURLErrorDomain else { return false }
+        return [-3000, -3001, -3003].contains(error.code)
     }
 
     /**
@@ -272,12 +308,36 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         return dir
     }
 
-    private var stagingURL: URL? {
-        guard let base = baseURL else { return nil }
+    /**
+     * The staging directory, **created here, at the point of use** (v2.0.0-beta.9).
+     *
+     * It used to be `try?`-ed inside a computed property that returned the URL regardless, so a
+     * directory that could not be made turned into a *move into nothing*: the job then failed with a
+     * move error whose words said nothing about the directory (the owner's `cannot create file`).
+     * A failure now carries the path and the underlying errno, and the job fails on it instead.
+     */
+    private func stagingDirectory() throws -> URL {
+        guard let base = baseURL else {
+            throw LocalFailure(
+                path: "applicationSupport/navilite-offline/staging",
+                underlying: NSError(
+                    domain: NSCocoaErrorDomain,
+                    code: NSFileNoSuchFileError,
+                    userInfo: [NSLocalizedDescriptionKey: "no application support directory"]
+                )
+            )
+        }
         let dir = base.appendingPathComponent("staging", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            throw LocalFailure(path: dir.path, underlying: error)
+        }
         return dir
     }
+
+    /// The non-throwing form, for the two paths where a missing directory is only "nothing to list".
+    private var stagingURL: URL? { try? stagingDirectory() }
 
     private var indexPath: URL? { baseURL?.appendingPathComponent("index.json") }
 
@@ -295,8 +355,8 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     }
 
     /// Where a transfer's bytes live until they have been verified.
-    private func stagingFile(songId: String, suffix: String) -> URL? {
-        stagingURL?.appendingPathComponent("\(songId).\(suffix)\(Self.stagingSuffix)")
+    private func stagingFile(songId: String, suffix: String) throws -> URL {
+        try stagingDirectory().appendingPathComponent("\(songId).\(suffix)\(Self.stagingSuffix)")
     }
 
     /* ------------------------------------------------------------------- load */
@@ -310,8 +370,112 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         config.httpMaximumConnectionsPerHost = Self.maxConcurrent
         config.isDiscretionary = false
         session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        /*
+         * **Orphans before jobs** (v2.0.0-beta.9). A background session survives an install-over, so
+         * a launch can be handed tasks whose jobs are gone from `UserDefaults` — each answers
+         * `-3000` for ever and the pump re-enqueues it, which is a download that can never finish.
+         * They are cancelled here, before `reconcile()`, and their cancellation is reported to
+         * nobody: no track in this launch owns those bytes.
+         */
+        pruneOrphanTasks()
         // The boot half of the state machine, before any JS runs and before `list()` is ever asked.
         reconcile()
+    }
+
+    /**
+     * Cancel every task the session hands back whose `taskDescription` has **no persisted job**
+     * (v2.0.0-beta.9). Marked silent first, so the delegate's `didFail` for the cancellation is
+     * swallowed instead of being announced as a failure of a track that is not in this launch.
+     */
+    private func pruneOrphanTasks() {
+        guard let session else { return }
+        let jobs = readJobs()
+        session.getAllTasks { [weak self] tasks in
+            guard let self else { return }
+            for task in tasks {
+                let key = task.taskDescription ?? ""
+                if !key.isEmpty, jobs[key] != nil { continue }
+                self.markSilent(task)
+                task.cancel()
+            }
+        }
+    }
+
+    /// This task's cancellation is nobody's failure: no event reaches JS for it.
+    private func markSilent(_ task: URLSessionTask) {
+        taskLock.lock()
+        silentTasks.insert(ObjectIdentifier(task))
+        taskLock.unlock()
+    }
+
+    /** Was this task cancelled by the boot sweep? Consumed: one mark, one cancellation. */
+    private func takeSilent(_ task: URLSessionTask) -> Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        return silentTasks.remove(ObjectIdentifier(task)) != nil
+    }
+
+    /* ------------------------------------------------- the per-launch file-error budget */
+
+    /// Has this key already spent its one retry for the file-error family?
+    private func fileErrorExhausted(_ key: String) -> Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        return fileErrorExhausted.contains(key)
+    }
+
+    /**
+     * Record a file-error failure for `key` and answer whether it may be retried (v2.0.0-beta.9):
+     * `true` the first time in this launch — the pump's next pass **is** that retry — and `false` on
+     * every occurrence after, which is what stops `-3000` looping on a track nothing can create.
+     */
+    private func takeFileErrorRetry(_ key: String) -> Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        if fileErrorExhausted.contains(key) { return false }
+        if fileErrorRetried.contains(key) {
+            fileErrorRetried.remove(key)
+            fileErrorExhausted.insert(key)
+            return false
+        }
+        fileErrorRetried.insert(key)
+        return true
+    }
+
+    /// One line for a failure of ours, naming the step, the code and the path — never the transfer.
+    fileprivate static func localMessage(step: String, error: Error) -> String {
+        if let local = error as? LocalFailure {
+            return "\(step): \(describe(local.underlying)) · \(local.path)"
+        }
+        return "\(step): \(describe(error))"
+    }
+
+    /**
+     * A failure of **our own** step (a staging directory, a move), reported with the path it was
+     * writing and the numeric code (v2.0.0-beta.9). No new UI: the existing note prints `error`.
+     */
+    private func reportLocalFailure(kind: String, songId: String, step: String, path: URL? = nil, error: Error) {
+        let ns: NSError
+        var failingPath = path?.path
+        if let local = error as? LocalFailure {
+            ns = local.underlying as NSError
+            failingPath = local.path
+        } else {
+            ns = error as NSError
+        }
+        removeJob(kind: kind, songId: songId)
+        var message = "\(step): \(Self.describe(ns))"
+        if let failingPath, !failingPath.isEmpty { message += " · \(failingPath)" }
+        var data: [String: Any] = [
+            "songId": songId,
+            "kind": kind,
+            "status": 0,
+            "error": message,
+            "domain": ns.domain,
+            "code": ns.code
+        ]
+        if let failingPath, !failingPath.isEmpty { data["path"] = failingPath }
+        notifyListeners("failed", data: data)
     }
 
     /* ---------------------------------------------------------------- methods */
@@ -356,6 +520,16 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             coverArt: call.getString("coverArt"),
             coverOf: call.getArray("coverOf") as? [String]
         )
+        /*
+         * **A file error that already took its retry is not retried again** (v2.0.0-beta.9). The
+         * family above is a file-system condition, not a transfer: the pump's next pass is the one
+         * retry, and when that one fails too the track sticks at `failed` — answered here, with no
+         * transfer started and no job persisted, so nothing loops for the rest of the launch.
+         */
+        if fileErrorExhausted(job.taskKey) {
+            call.resolve(["queued": false, "givenUp": true])
+            return
+        }
         persist(job: job)
         /*
          * **Idempotent for a live transfer** (v2.0.0-beta.6). A second enqueue of a job that is still
@@ -373,8 +547,19 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         // session, whose completion runs after the replacement has been resumed.
         stopTask(key: job.taskKey, deliberate: true)
         // …and the staging bytes go only for a transfer that is genuinely not live any more.
-        if let staging = stagingFile(songId: songId, suffix: job.suffix) {
+        do {
+            let staging = try stagingFile(songId: songId, suffix: job.suffix)
             try? FileManager.default.removeItem(at: staging)
+        } catch {
+            /*
+             * The directory these bytes would be staged in cannot be made (v2.0.0-beta.9). Fail the
+             * job HERE, naming the path and the errno: a transfer whose staging directory does not
+             * exist can only end as a move into nothing, and the words of that failure ("cannot
+             * create file") blame the network for a directory.
+             */
+            removeJob(kind: job.kind, songId: songId)
+            call.reject(Self.localMessage(step: "cannot stage a download", error: error))
+            return
         }
         let task = session?.downloadTask(with: target)
         task?.taskDescription = job.taskKey
@@ -666,13 +851,24 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
         // the JS job's `bytes` was the fallback here, and it can be a stale or rounded guess, which
         // failed a correct file for ever on every retry.
         let expected = responseExpected > 0 ? responseExpected : 0
-        guard let staged = stagingFile(songId: songId, suffix: suffix) else { return }
+        let staged: URL
+        do {
+            staged = try stagingFile(songId: songId, suffix: suffix)
+        } catch {
+            reportLocalFailure(kind: kind, songId: songId, step: "cannot stage the download", error: error)
+            return
+        }
         try? FileManager.default.removeItem(at: staged)
         do {
             try FileManager.default.moveItem(at: location, to: staged)
         } catch {
-            removeJob(kind: kind, songId: songId)
-            notifyListeners("failed", data: ["songId": songId, "kind": kind, "error": error.localizedDescription])
+            reportLocalFailure(
+                kind: kind,
+                songId: songId,
+                step: "cannot move the transfer into staging",
+                path: staged,
+                error: error
+            )
             return
         }
         let actual = fileSize(staged)
@@ -690,8 +886,7 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
             try FileManager.default.moveItem(at: staged, to: destination)
         } catch {
             try? FileManager.default.removeItem(at: staged)
-            removeJob(kind: kind, songId: songId)
-            notifyListeners("failed", data: ["songId": songId, "kind": kind, "error": error.localizedDescription])
+            reportLocalFailure(kind: kind, songId: songId, step: "cannot move the file into place", path: destination, error: error)
             return
         }
         excludeFromBackup(destination)
@@ -822,17 +1017,47 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
          * genuine failure for the same track. One mark, one cancellation.
          */
         if takeReplacement(task) { return }
+        // …and the boot sweep's cancellations belong to no track in this launch (v2.0.0-beta.9).
+        if takeSilent(task) { return }
         guard let (kind, songId) = Self.splitKey(taskKey) else { return }
+        let job = readJobs()[taskKey]
         removeJob(kind: kind, songId: songId)
-        // `status` is the HTTP status when the response got that far: the lyrics route answers
-        // `404` for a track whose folder holds no sidecar, which is a fact ("asked, there is
-        // nothing") and not a failure the playlist should retry forever.
-        notifyListeners("failed", data: [
+        /*
+         * **The note names the code, and the file when the failure is ours** (v2.0.0-beta.9).
+         * `localizedDescription` alone printed the owner `failed: cannot create file`, which says
+         * nothing: with the code it reads `cannot create file (-3000)` — `NSURLErrorCannotCreateFile`,
+         * `URLSession` failing on its own temp file before a byte was written and before a request
+         * reached the server.
+         */
+        let ns: NSError? = error.map { $0 as NSError }
+        var message = ns.map(Self.describe) ?? "download failed"
+        /*
+         * **The file-error family is retried once per track per launch.** -3000/-3001/-3003 are a
+         * file-system condition, not a transfer: the staging bytes go, the failure is reported (which
+         * is what makes the pump's next pass the one retry), and a second occurrence in the same
+         * launch is exhausted — `enqueue` then answers without starting anything, so the row stays
+         * `failed` instead of looping for ever.
+         */
+        var retried = true
+        if let ns, Self.isFileError(ns) {
+            if let suffix = job?.suffix, let staging = try? stagingFile(songId: songId, suffix: suffix) {
+                try? FileManager.default.removeItem(at: staging)
+            }
+            retried = takeFileErrorRetry(taskKey)
+            if !retried { message += " · not retried again this launch" }
+        }
+        var data: [String: Any] = [
             "songId": songId,
             "kind": kind,
             "status": status,
-            "error": error?.localizedDescription ?? "download failed"
-        ])
+            "error": message,
+            "retried": retried
+        ]
+        if let ns {
+            data["domain"] = ns.domain
+            data["code"] = ns.code
+        }
+        notifyListeners("failed", data: data)
     }
 
     fileprivate func didProgress(taskKey: String, bytes: Int, total: Int) {
