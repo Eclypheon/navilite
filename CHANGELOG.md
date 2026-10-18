@@ -353,3 +353,8 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - Downloads no longer report "unsupported url": every file the phone fetches (songs, lyrics and cover art) is now asked for with its full address, which is what the phone needs outside a browser.
 - The download button reports the real reason a track failed — including the words from the phone — instead of a bare "HTTP 200".
+
+## 2.0-beta.9 — 2026-10-18
+
+- Downloads no longer get stuck on "cannot create file": leftover transfers from the previous install are cleared when the app opens, the folder a download is written into is checked before it starts, and a failed write now reports the exact reason and file.
+- A track that cannot be written is retried once, then left alone instead of retrying for ever.

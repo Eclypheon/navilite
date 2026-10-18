@@ -534,4 +534,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The download button reports the real reason a track failed — including the words from the phone — instead of a bare "HTTP 200".',
       ],
     },
+    {
+      version: '2.0-beta.9',
+      date: '2026-10-18',
+      items: [
+        'Downloads no longer get stuck on "cannot create file": leftover transfers from the previous install are cleared when the app opens, the folder a download is written into is checked before it starts, and a failed write now reports the exact reason and file.',
+        'A track that cannot be written is retried once, then left alone instead of retrying for ever.',
+      ],
+    },
   ];
