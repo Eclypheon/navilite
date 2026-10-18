@@ -303,7 +303,15 @@ export interface EngineStatus {
    * about the slot the app told it was playing. `reason` names, in one sentence, which of those
    * states it is in — the clearing path for every one of them.
    */
-  nativeBoundary: { armed: number; advances: number; failures: number; ignored: number; reason: string };
+  nativeBoundary: {
+    armed: number;
+    advances: number;
+    failures: number;
+    ignored: number;
+    reason: string;
+    /** The last boundary's five moments in ms, as one sentence (v2.0-beta.14). */
+    timeline: string;
+  };
   /**
    * The tap's own numbers, for the reason line (v1.9.25).
    *

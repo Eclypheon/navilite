@@ -380,3 +380,10 @@ Plain language, user-visible changes only. The app shows this same list under
 - The cover art shows on the card for streamed and downloaded songs, and it stays there when the card moves on to the next track.
 - Tapping the song name or artist in the Lock Screen player brings you back to the app, and so does the small pill in the Dynamic Island once the phone is unlocked; the cover itself keeps its own tap, which iOS gives to full-screen artwork and no app can redirect.
 
+## 2.0-beta.14 — 2026-10-18
+
+- The gap between songs no longer opens the stream at the moment the song ends: the next track is primed only once its own stream has resolved, which is the state the old prepare step asked for too early to do anything. The five moments of every song change (card, fetch, ready, play, first sound) are now in the player row under the settings gear, in milliseconds.
+- A phone call or another app taking the audio used to leave this app believing its audio session was still live, so it never took it back and it could stop being the app the Lock Screen player belongs to. It now takes the session back every time it returns to the foreground and after an interruption, and the row shows how many times it had to.
+- Tapping the card: the player you see is the whole app iOS may open, and iOS decides what a tap on it does. The small pill in the Dynamic Island opens NaviLite once the phone is unlocked; on the Lock Screen card and the expanded player the song name and artist open it, while the cover art keeps the tap iOS gives it (full-screen artwork), which no app can redirect. There is no link involved in any of these taps, so no link can fix one.
+- Correction to beta.12: that release said taps were handled by registered URL schemes. They are not, and never were — the schemes changed nothing about a tap, and the entry was wrong to say so.
+

@@ -216,6 +216,9 @@ export function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineSta
     // app is away, how many tracks it has taken, and the sentence naming which state it is in.
     `native: ${status.nativeBoundary.armed} armed, ${status.nativeBoundary.advances} taken, ` +
     `${status.nativeBoundary.failures} refused, ${status.nativeBoundary.ignored} ignored · ` +
+    // v2.0-beta.14 — the last boundary's five moments, in ms from the item end. This is the number
+    // the owner's "seconds of silence" report never had: card, fetch, ready, play, audible.
+    `${status.nativeBoundary.timeline} · ` +
     `dropped: ${status.droppedEvents.inaudible} inaudible, ${status.droppedEvents.slotGrace} in a slot write · ${status.modeReason}`;
   const abnormal = status.state !== 'playing' || !status.spectrum;
   /*

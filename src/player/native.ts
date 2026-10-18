@@ -85,6 +85,12 @@ interface NaviliteRemotePlugin {
     ignored?: number;
     awake?: boolean;
     reason?: string;
+    /**
+     * The last boundary's five moments, in milliseconds from the item end (v2.0-beta.14): the card
+     * announced for the incoming entry, a fetch issued (`-1` when the slot was already warm), the
+     * item reporting ready, the play call issued, and the first frame the player was running.
+     */
+    timeline?: { path?: string; cardMs?: number; fetchMs?: number; readyMs?: number; playMs?: number; audibleMs?: number };
   }>;
   addListener(eventName: 'next' | 'previous' | 'advanced' | 'advanceFailed', listenerFunc: (event: { songId?: string; assetId?: string; index?: number; reason?: string }) => void): Promise<PluginListenerHandle>;
 }
@@ -350,7 +356,15 @@ export interface NativeBridge {
    */
   reconcile?(): Promise<{ changed: boolean; songId: string | null; index: number } | null>;
   /** What the native boundary has done, as numbers and a sentence — for the reason line (v1.9.8). */
-  nativeAdvance?(): { armed: number; advances: number; failures: number; ignored: number; reason: string };
+  nativeAdvance?(): {
+    armed: number;
+    advances: number;
+    failures: number;
+    ignored: number;
+    reason: string;
+    /** The last boundary's five moments in ms from the item end (v2.0-beta.14). */
+    timeline: string;
+  };
   play(startSeconds: number): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -791,6 +805,28 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     let boundaryQueued = 0;
     let boundaryArmed = false;
     let boundaryReason = 'nothing stated yet';
+    /*
+     * The last boundary's own timeline, in the row's own words (v2.0-beta.14). This is the thing three
+     * rounds of "the gap between songs" were diagnosed without: the app could say a boundary was
+     * taken and not one number about where its seconds went. The native plugin records the five
+     * moments; this is the sentence the diagnostics row carries.
+     */
+    let lastTimeline = 'gap: no boundary taken yet';
+    const timelineText = (t: {
+      path?: string;
+      cardMs?: number;
+      fetchMs?: number;
+      readyMs?: number;
+      playMs?: number;
+      audibleMs?: number;
+    }): string => {
+      const at = (value: number | undefined): string =>
+        Number.isFinite(value) && Number(value) >= 0 ? `${value} ms` : '—';
+      return (
+        `gap: card ${at(t.cardMs)} · fetch ${at(t.fetchMs)} · ready ${at(t.readyMs)} · ` +
+        `play ${at(t.playMs)} · audible ${at(t.audibleMs)} (${t.path ?? 'none'} path)`
+      );
+    };
     /** The number of the statement, so the reason line can name the picture the native side holds. */
     let statementGeneration = 0;
     /** What the native side has done by itself, and where it would not (v1.9.8). */
@@ -1387,6 +1423,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         if (Number.isFinite(state.failures)) nativeFailures = Number(state.failures);
         if (Number.isFinite(state.ignored)) nativeIgnored = Number(state.ignored);
         if (typeof state.reason === 'string' && state.reason) boundaryReason = state.reason;
+        if (state.timeline) lastTimeline = timelineText(state.timeline);
         const slot = typeof state.assetId === 'string' && state.assetId ? state.assetId : null;
         const nativeIndex = Number.isFinite(state.index) ? Number(state.index) : -1;
         /*
@@ -1418,6 +1455,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           failures: nativeFailures,
           ignored: nativeIgnored,
           reason: boundaryReason,
+          timeline: lastTimeline,
         };
       },
       async discard() {

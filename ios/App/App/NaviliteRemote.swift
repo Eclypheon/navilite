@@ -184,6 +184,10 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private static let fetchDeadline = 12.0
     /// How often a fetched slot is asked whether it can start yet (50ms for responsive background handoff).
     private static let fetchStep = 0.05
+    /// How long a prime may keep asking whether its item has resolved: 50 ms steps, 10 s.
+    private static let prerollAttempts = 200
+    /// How long the boundary's clock keeps asking whether the player is running: 50 ms steps, 5 s.
+    private static let audibleProbeAttempts = 100
 
     /* --------------------------------------------------- the lock-screen card (v1.9.10) */
 
@@ -212,16 +216,48 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// What the repairs have done, for the reason line and the `now()` payload.
     private var cardRepairs = 0
     private var sessionRetakes = 0
-    /// Whether the audio session is believed to be active.
+    /// Whether the audio session was active the last time it was asked (v2.0-beta.14).
     ///
-    /// **iOS has no public getter for this** — `AVAudioSession` exposes no `isActive` — so this is
-    /// kept the only way it can be: set true by every successful `setActive(true)` here, and set false
-    /// by the system's own media-services reset. It is a fact this side has a reason for, not a guess.
+    /// `AVAudioSession` has **no public getter** for this — `isActive` is not in the SDK (the
+    /// compiler rejects it as "no member"), so the earlier claim that it had been public since iOS 6
+    /// was false and is not repeated. What the flag is, instead, is a record kept honest by the two
+    /// notifications that can invalidate the session without anything here asking: a media-services
+    /// reset clears it, and an interruption that ends re-takes the session and sets it again. A
+    /// session the system dropped while the app was away and none of those fired is still invisible
+    /// to it — which is why the return to the foreground asserts the session unconditionally (a
+    /// no-op when it is already active) rather than trusting the flag. Every decision below reads
+    /// `sessionIsActive`; this field is the last reading, for the diagnostics row.
     private var sessionActive = true
+
+    /// Whether the audio session is active right now (v2.0-beta.14).
+    ///
+    /// There is **no getter in the SDK**: `AVAudioSession.isActive` does not exist (the compiler
+    /// rejects it), and `AVAudioApplication.activationState` — the iOS 16 answer — does not resolve
+    /// under this SDK either. So the honest source is this side's record, and its correctness is
+    /// earned by the two notifications installed in `installSessionObservers`: media services reset
+    /// clears it, an interruption that ends re-takes the session. One reader, so the four call sites
+    /// cannot drift.
+    private var sessionIsActive: Bool {
+        return sessionActive
+    }
     /// The return-to-foreground observation, installed with the end observer and removed with it.
     private var activeObserver: NSObjectProtocol?
     /// The session's own notifications (reset, interruption ended).
     private var sessionObservers: [NSObjectProtocol] = []
+
+    /* -------------------------------------- the boundary's own clock (v2.0-beta.14) */
+
+    /// Five moments of the last boundary taken here, so a recurrence on the owner's phone names
+    /// itself in the diagnostics row instead of costing another blind round: the **item end** (t 0),
+    /// the moment the card was announced for the incoming entry, the moment a fetch was issued (nil
+    /// on the warm path), the moment the item reported ready, the moment the play call was issued,
+    /// and the first frame the player was actually running. All relative to `boundaryStart`, in ms.
+    private var boundaryStart: Date?
+    private var cardAnnouncedAt: Date?
+    private var fetchIssuedAt: Date?
+    private var readyAt: Date?
+    private var playIssuedAt: Date?
+    private var audibleAt: Date?
 
     /// Cached artwork: songId -> MPMediaItemArtwork (v2.0-beta.12).
     private var artworkCache: [String: MPMediaItemArtwork] = [:]
@@ -456,7 +492,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 "reason": self.reason,
                 "cardRepairs": self.cardRepairs,
                 "sessionRetakes": self.sessionRetakes,
-                "sessionActive": self.sessionActive,
+                "sessionActive": self.sessionIsActive,
+                "timeline": self.boundaryTimeline(),
                 "cardTitle": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String) ?? "",
                 "cardRate": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? NSNumber)?.doubleValue ?? 0,
                 "artCached": playing.map { self.artworkCache[$0.songId] != nil } ?? false
@@ -608,6 +645,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          * in through `advanceIfAble`/`previousIfAble` — crossed its boundary with the finished track
          * on the card at rate 0 for the whole fetch. `commit()` and `fail()` close it.
          */
+        beginBoundary()
         boundaryInFlight = true
         announceUpcoming(token: token)
         let entry = queue[target]
@@ -681,6 +719,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         }
         let entry = queue[target]
         let slot = fetchSlot()
+        fetchIssuedAt = Date()
         guard preloadSlot(plugin: plugin, slot: slot, entry: entry) else {
             fail("\(how): the audio plugin does not answer to preload(assetId:assetPath:isUrl:), so \(entry.songId) could not be fetched here")
             return false
@@ -774,6 +813,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         notifyListeners("advanced", data: ["songId": entry.songId, "assetId": slot, "index": target])
         // The card names the track that has just started, with the position and rate it starts at.
         refreshNowPlaying()
+        // When the first frame is actually running (v2.0-beta.14) — the last of the five numbers.
+        beginAudibleProbe(token: generation)
         preloadAhead(token: generation)
     }
 
@@ -798,6 +839,98 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         // It fetches exactly the entry after the audible one: that is the boundary, so it is primed.
         guard preloadSlot(plugin: plugin, slot: slot, entry: entry, preroll: true) else { return }
         fetchWindow = (slot, entry.songId)
+        // The vendor's preroll fires in the same turn as the preload, before its item has resolved;
+        // this is the same prime, issued at the one moment it can actually load anything.
+        prerollWhenReady(slot: slot, token: token)
+    }
+
+    /**
+     * Prime the slot the next boundary will start, **once its item has resolved** (v2.0-beta.14).
+     *
+     * `preroll(atRate:)` on an `AVPlayerItem` whose `status` is still `.unknown` returns without
+     * loading a byte — it cannot, the asset has not resolved. The vendor's own prime (patch 12,
+     * `RemoteAudioAsset.prerollForBoundary`) is called from `preload` in the *same turn* as the asset
+     * is constructed, and the construction only queues the player, so that call is the one that
+     * loads nothing: the slot reads as warm (`fetchWindow` names it, `holding()` finds it) while it
+     * holds no media, and the boundary then pays the connection and the first buffer — the seconds of
+     * silence after the card has already shown the new track.
+     *
+     * This is that prime, moved to the state that can perform it: the item is asked every 50 ms (the
+     * same step the readiness poll uses) until it reports `.readyToPlay`, then `preroll(atRate: 1.0)`
+     * fills the buffer while the slot is still paused and silent. **Only the immediate next entry** —
+     * one connection, so the audible stream is not starved. Bounded to 10 s, given up silently: a
+     * prime that cannot happen is not a boundary that failed.
+     */
+    private func prerollWhenReady(slot: String, token: Int, attempt: Int = 0) {
+        guard current(token: token), !awake, slot != audible?.assetId else { return }
+        guard let found = AudibleBridgePlayer.player(slot, from: bridge) else { return }
+        guard let item = found.player.currentItem else {
+            guard attempt < Self.prerollAttempts else { return }
+            after(Self.fetchStep) { [weak self] in
+                self?.prerollWhenReady(slot: slot, token: token, attempt: attempt + 1)
+            }
+            return
+        }
+        if item.status == .failed || found.player.status == .failed { return }
+        if item.status == .readyToPlay, found.player.status == .readyToPlay {
+            // Nothing is issued on an item that has played to its end (the crash of v1.9.8, again).
+            guard !NaviliteSpectrum.hasEnded(item) else { return }
+            found.player.preroll(atRate: 1.0) { _ in }
+            return
+        }
+        guard attempt < Self.prerollAttempts else { return }
+        after(Self.fetchStep) { [weak self] in
+            self?.prerollWhenReady(slot: slot, token: token, attempt: attempt + 1)
+        }
+    }
+
+    /// Start the boundary's clock: the end of the finished item is t 0, and the four moments after it
+    /// are each recorded where they happen (v2.0-beta.14).
+    private func beginBoundary() {
+        boundaryStart = Date()
+        cardAnnouncedAt = nil
+        fetchIssuedAt = nil
+        readyAt = nil
+        playIssuedAt = nil
+        audibleAt = nil
+    }
+
+    /// The last boundary, in milliseconds from its item end — the five numbers §6 asks for. `-1`
+    /// is "did not happen on this boundary": a warm start has no fetch, and a boundary still in
+    /// flight has no audible frame yet.
+    private func boundaryTimeline() -> [String: Any] {
+        guard let start = boundaryStart else {
+            return [
+                "path": "none", "cardMs": -1, "fetchMs": -1, "readyMs": -1, "playMs": -1, "audibleMs": -1
+            ]
+        }
+        func ms(_ at: Date?) -> Int {
+            guard let at else { return -1 }
+            return Int((at.timeIntervalSince(start) * 1000).rounded())
+        }
+        return [
+            "path": fetchIssuedAt == nil ? "warm" : "fetch",
+            "cardMs": ms(cardAnnouncedAt),
+            "fetchMs": ms(fetchIssuedAt),
+            "readyMs": ms(readyAt),
+            "playMs": ms(playIssuedAt),
+            "audibleMs": ms(audibleAt)
+        ]
+    }
+
+    /// When the audible player is actually running: `.playing` **and** its clock off zero. Bounded,
+    /// silent, and read-only — 50 ms for up to 5 s (v2.0-beta.14).
+    private func beginAudibleProbe(token: Int, attempt: Int = 0) {
+        guard current(token: token), let audible,
+              let found = AudibleBridgePlayer.player(audible.assetId, from: bridge) else { return }
+        if found.player.timeControlStatus == .playing, found.player.currentTime().seconds > 0.01 {
+            audibleAt = Date()
+            return
+        }
+        guard attempt < Self.audibleProbeAttempts else { return }
+        after(Self.fetchStep) { [weak self] in
+            self?.beginAudibleProbe(token: token, attempt: attempt + 1)
+        }
     }
 
     /**
@@ -915,6 +1048,9 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                     : "the slot the app named for \(entry.songId) is not ready to start (player \(NaviliteSpectrum.statusName(found.player.status)), item \(NaviliteSpectrum.statusName(item.status))), so \(how) could not be taken from it"
             return false
         }
+        // The item and the player are both ready in this turn: this is the moment the handoff stops
+        // waiting, and the number the diagnostics row reports as "ready" (v2.0-beta.14).
+        if readyAt == nil { readyAt = Date() }
         guard plugin.responds(to: Self.playSelector), let method = plugin.method(for: Self.playSelector) else {
             reason = "the audio plugin does not answer to play(assetId:), so \(how) could not be taken here"
             return false
@@ -928,6 +1064,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         )
         typealias PlayIMP = @convention(c) (AnyObject, Selector, AnyObject) -> Void
         let play = unsafeBitCast(method, to: PlayIMP.self)
+        playIssuedAt = Date()
         play(plugin, Self.playSelector, call)
         reason = "\(how) — the native player was asked for \(entry.songId)"
         return true
@@ -1011,6 +1148,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         // The incoming entry has no duration until its own slot plays: cleared, never guessed.
         info.removeValue(forKey: MPMediaItemPropertyPlaybackDuration)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        cardAnnouncedAt = Date()
         reason = "\(finished) ended and the app is away, so the card names \(entry.songId), which the native player is about to start"
     }
 
@@ -1072,6 +1210,9 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private func watchdogTick() {
         guard current(token: cardWatchdogToken), !awake, index >= 0, index < queue.count else { return }
         let session = AVAudioSession.sharedInstance()
+        // The system's own answer, not our memory of it (v2.0-beta.14): a session the system dropped
+        // while the app was away is the one fact that makes the app stop being the Now Playing app.
+        sessionActive = sessionIsActive
         if !sessionActive {
             do {
                 try session.setActive(true)
@@ -1187,12 +1328,20 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
 
     private func appDidBecomeActive() {
         guard index >= 0, !queue.isEmpty else { return }
+        let session = AVAudioSession.sharedInstance()
         do {
-            try AVAudioSession.sharedInstance().setActive(true)
+            /*
+             * Asserted, then counted (v2.0-beta.14). `setActive(true)` on a session that is already
+             * active is a no-op, so asserting it on every return is safe and is the only thing that
+             * rescues a session the system dropped without a notification — which the flag cannot
+             * see. The retake counter only moves when the flag said the session was gone, so the
+             * number in the row stays a count of repairs rather than of returns.
+             */
+            let wasGone = !sessionIsActive
+            try session.setActive(true)
+            if wasGone { sessionRetakes += 1 }
             sessionActive = true
-            sessionRetakes += 1
         } catch {
-            sessionActive = false
             reason = "the app came back, but the audio session could not be taken again: \(error.localizedDescription)"
             return
         }
