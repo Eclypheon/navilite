@@ -22,7 +22,7 @@ import { platformInfo } from '../platform.ts';
 import { LyricsService } from '../lyrics/service.ts';
 import { PlaybackQueue } from '../state/queue.ts';
 import { Library, type AlbumListType } from '../state/library.ts';
-import { OfflineStore, estimateBytes, formatBytes, formatSize, type DownloadActivity, type DownloadedPlaylist, type PlaylistBadge, type PlaylistDownloadState, type SizeEstimate } from '../state/offline.ts';
+import { OfflineStore, estimateBytes, formatBytes, formatSize, type DownloadActivity, type DownloadFailure, type DownloadedPlaylist, type PlaylistBadge, type PlaylistDownloadState, type SizeEstimate } from '../state/offline.ts';
 import { fillSong } from '../state/song-metadata.ts';
 import { createDownloadsBridge, localFileSrc } from '../player/native.ts';
 import { LyricsCache } from '../storage/lyrics.ts';
@@ -1011,6 +1011,16 @@ export interface DownloadControlFacts {
    * made into a fact the sentence depends on rather than a guess about the state name.
    */
   stalled: boolean;
+  /**
+   * The last failure the native side reported for this playlist
+   * (`OfflineStore.failureOf`, v2.0.0-beta.6), or null.
+   *
+   * This is the line the owner's report asks for: 500 MB arrived and the control said `0 of 233`,
+   * with no statement of what rejected the bytes. It is a **reading of a measurement** — the status
+   * and the native side's own words — printed on the download control only, and it is optional so
+   * every caller that has nothing to report (and every test of a healthy job) is unchanged.
+   */
+  failure?: DownloadFailure | null;
 }
 
 /**
@@ -1028,6 +1038,22 @@ export interface DownloadControlFacts {
 function controlFigures(facts: { done: number; total: number; songs: Song[] }): string {
   const { done, total } = downloadedFigures(facts, facts.songs.length);
   return `${done} of ${total}`;
+}
+
+/**
+ * The failure note the download control prints beside its figures (v2.0.0-beta.6).
+ *
+ * The owner's report, verbatim: *"even after 500 MB has been downloaded, it still shows 0 of 233"* —
+ * and the control said nothing about why. The native side has always known (its `failed` event
+ * carries `HTTP 206`, `byte count A != B`, a move error); this is the same sentence, on the control,
+ * so the next round is decided by a reading. It is capped because it shares a 393 px button with the
+ * figures, and it is not narration: every character of it is a value the native side measured.
+ */
+function failureNote(failure?: DownloadFailure | null): string {
+  if (!failure) return '';
+  const measured = failure.status !== undefined && failure.status > 0 ? `HTTP ${failure.status}` : failure.error;
+  const words = (measured || 'failed').replace(/\s+/g, ' ').trim();
+  return ` · failed: ${words.length > 48 ? `${words.slice(0, 47)}…` : words}`;
 }
 
 /**
@@ -1049,17 +1075,23 @@ export function downloadControlLabel(facts: DownloadControlFacts): string {
   /* The running sentence: **n of m · 1.2 GB of 4.8 GB**, the figure climbing to the same total the
    * finished control prints. It is the byte count the owner asked to see, driven by the job's own
    * `progress` events, and it is what the button says for as long as the job is alive — never
-   * `retry`, which now needs `facts.stalled` to be true (v2.0.0-beta.5). */
-  const running = (): string => `${controlFigures(facts)} · ${formatSize(facts.activity.bytes)} of ${facts.size}`;
+   * `retry`, which now needs `facts.stalled` to be true (v2.0.0-beta.5).
+   *
+   * v2.0.0-beta.6: the last failure rides on **every** unfinished state, including the moving one.
+   * The case that matters most is a job whose transfers all fail and are re-asked by the pump — it is
+   * never stalled, so a line printed only beside `retry` would be invisible in exactly the state the
+   * owner is reporting. */
+  const note = failureNote(facts.failure);
+  const running = (): string => `${controlFigures(facts)} · ${formatSize(facts.activity.bytes)} of ${facts.size}${note}`;
   switch (state) {
     case 'estimating':
-      return '…';
+      return `…${note}`;
     case 'downloading':
-      return facts.stalled ? `${controlFigures(facts)} · retry` : running();
+      return facts.stalled ? `${controlFigures(facts)} · retry${note}` : running();
     case 'partial':
       // One transfer short, and the pump is probably already re-asking it: the tap is offered only
       // once the job has been silent for the stall window — but the pair is still worth printing.
-      return `${controlFigures(facts)} · ${facts.stalled ? 'retry' : `${formatSize(facts.activity.bytes)} of ${facts.size}`}`;
+      return `${controlFigures(facts)} · ${facts.stalled ? 'retry' : `${formatSize(facts.activity.bytes)} of ${facts.size}`}${note}`;
     case 'complete': {
       // The playlist changed after it was downloaded: not complete any more, and it says so.
       if (facts.missing > 0) return grownControlLabel(facts.songs, facts.missing);
@@ -1073,7 +1105,7 @@ export function downloadControlLabel(facts: DownloadControlFacts): string {
       return `✓ ${facts.size}`;
     }
     case 'failed':
-      return facts.stalled ? 'Retry' : running();
+      return facts.stalled ? `Retry${note}` : `${running()}`;
   }
 }
 
@@ -1766,6 +1798,8 @@ function downloadControl(ctx: AppContext, playlistId: string, songs: Song[], nam
       activity: activity(),
       // The one question behind `retry`: has the job said anything inside the stall window?
       stalled: offline?.stallOf(playlistId).stalled ?? true,
+      // …and the last reason a transfer gave for not completing, printed beside the figures.
+      failure: offline?.failureOf(playlistId) ?? null,
     };
   };
   /*

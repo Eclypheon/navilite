@@ -14,6 +14,9 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   OfflineStore,
   STALL_MS,
@@ -413,4 +416,136 @@ test('a finished download taps to a removal, a grown one to a resume, and an emp
   assert.equal(downloadTapAction(facts('estimating', { stalled: true })), 'download', 'nor is a stalled estimate');
   assert.equal(downloadTapAction(facts('complete', { songs: [] })), 'none', 'nothing to download, nothing to do');
   assert.equal(downloadTapAction(facts('none', { songs: [] })), 'none');
+});
+
+/* ------------------------------------------ 5. "500 MB downloaded, still 0 of 233" (beta.6) */
+
+/**
+ * The owner, on the shipped beta.6: *"even after 500 MB has been downloaded, it still shows 0 of 233
+ * songs"*. The bytes arrived and nothing completed, and the control said nothing about why. Three
+ * readings below: the 206 door, the reason line, and the figure that counted settled transfers.
+ */
+
+const swiftSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'ios', 'App', 'App', 'NaviliteDownloads.swift'), 'utf8');
+
+test('a 206 completion is promoted, and its expected length is the Content-Range total', () => {
+  // Read out of the shipped source: this door sits behind Caddy, which passes Range through, so a
+  // resumed transfer answers 206 with perfectly good bytes.
+  assert.match(swiftSource, /guard status == 200 \|\| status == 206 else/, 'a range response is not a failure');
+  assert.match(swiftSource, /Content-Range/, 'a 206 is asked for its whole-file total');
+  const completion = swiftSource.slice(swiftSource.indexOf('let expected = responseExpected'));
+  assert.doesNotMatch(
+    completion.slice(0, 400),
+    /job\?\.expectedBytes/,
+    'the JS job\'s byte guess is no longer the fallback: an unknown length is unverifiable, not a mismatch',
+  );
+
+  /** The completion path's own verdict, as the shipped code states it. */
+  const promotes = (status: number, total: number, actual: number): boolean => {
+    if (status !== 200 && status !== 206) return false;
+    return total <= 0 || actual === total;
+  };
+  assert.equal(promotes(206, 27_972_305, 27_972_305), true, 'a finished resumed transfer promotes');
+  assert.equal(promotes(206, 27_972_305, 1_024), false, 'a range body alone is never promoted as the file');
+  assert.equal(promotes(200, 0, 5_000_000), true, 'an unknown length is unverifiable — the file\'s own bytes stand');
+});
+
+test('a failed transfer states its reason on the control, and a finished job takes it away', async () => {
+  const bridge = fakeBridge();
+  const offline = store(bridge);
+  await offline.download('pl-9', songs, { name: 'Jap' });
+  await settle();
+
+  const job = audioJobs(bridge)[0]!;
+  bridge.emit('failed', { songId: job.songId, kind: 'audio', status: 206, error: 'HTTP 206' });
+  await settle();
+
+  const failure = offline.failureOf('pl-9');
+  assert.equal(failure?.status, 206, 'the status the native side measured is kept');
+  assert.equal(failure?.error, 'HTTP 206');
+
+  const label = downloadControlLabel({
+    state: 'downloading',
+    done: 0,
+    total: TRACKS,
+    songs,
+    size: '1.0 GB',
+    missing: 0,
+    missingCovers: 0,
+    activity: offline.activityOf('pl-9'),
+    stalled: false,
+    failure,
+  });
+  assert.match(label, /· failed: HTTP 206/, `the control must say why, not only that nothing completed: ${label}`);
+
+  await offline.cancel('pl-9');
+  assert.equal(offline.failureOf('pl-9'), null, 'a cancelled job is not explaining a failure any more');
+});
+
+test('a failed transfer stops counting in the byte figure', async () => {
+  const bridge = fakeBridge();
+  const offline = store(bridge);
+  await offline.download('pl-f', songs, { name: 'Jap' });
+  await settle();
+
+  const job = audioJobs(bridge)[0]!;
+  bridge.emit('progress', { songId: job.songId, kind: 'audio', bytes: 4_000_000, total: SONG_BYTES });
+  assert.equal(offline.activityOf('pl-f').bytes, 4_000_000, 'a live transfer\'s count is what the figure adds');
+
+  /*
+   * The owner's figure: one failed transfer per track, none of them complete, and their last counts
+   * kept in the sum — 233 tracks × ~2 MB ≈ the 500 MB he watched climb under `0 of 233`. A transfer
+   * that has ended is not live, so its count goes with it.
+   */
+  bridge.emit('failed', { songId: job.songId, kind: 'audio', status: 206, error: 'HTTP 206' });
+  await settle();
+  assert.equal(
+    offline.activityOf('pl-f').bytes,
+    0,
+    'a failed transfer\'s last count must not keep climbing in the figure',
+  );
+
+  bridge.emit('done', { songId: songs[1]!.id, kind: 'audio', path: 'file:///s1.opus', bytes: SONG_BYTES });
+  await settle();
+  assert.equal(offline.activityOf('pl-f').bytes, SONG_BYTES, 'a complete row carries those bytes instead');
+});
+
+test('a finished job takes the failure note away with the last transfer that caused it', async () => {
+  const bridge = fakeBridge();
+  const offline = store(bridge);
+  await offline.download('pl-g', songs, { name: 'Jap' });
+  await settle();
+
+  bridge.emit('failed', { songId: songs[0]!.id, kind: 'audio', status: 500, error: 'timed out' });
+  await settle();
+  assert.match(
+    downloadControlLabel({
+      state: offline.record('pl-g')?.state ?? 'none',
+      done: offline.record('pl-g')?.done ?? 0,
+      total: offline.record('pl-g')?.total ?? 0,
+      songs,
+      size: '1.0 GB',
+      missing: 0,
+      missingCovers: 0,
+      activity: offline.activityOf('pl-g'),
+      stalled: false,
+      failure: offline.failureOf('pl-g'),
+    }),
+    /· failed/,
+    'the note is up while the job is unfinished',
+  );
+
+  // Everything lands, covers included: the job is complete, and it has nothing left to explain.
+  for (const job of audioJobs(bridge)) {
+    bridge.emit('done', { songId: job.songId, kind: 'audio', path: `file:///${job.songId}.opus`, bytes: SONG_BYTES });
+  }
+  for (const job of artJobs(bridge)) {
+    bridge.emit('done', { songId: job.songId, kind: 'art', path: `file:///${job.songId}.art`, bytes: 200_000 });
+  }
+  await settle();
+
+  assert.equal(offline.record('pl-g')?.state, 'complete', 'the job finished');
+  assert.equal(offline.failureOf('pl-g'), null, 'a completed download is not explaining a failure any more');
+  assert.doesNotMatch(labelOf(offline, 'pl-g'), /failed/, 'the finished control is a tick and a size');
+  offline.dispose();
 });

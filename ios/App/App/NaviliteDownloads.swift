@@ -122,6 +122,29 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
     }
 
     /**
+     * The whole-file byte count a completed response implies, or `0` for **"nothing to check
+     * against"** (v2.0.0-beta.6).
+     *
+     * A `200` answers with the file's own `Content-Length`. A `206` answers with the length of *that
+     * range*, so comparing the finished file to it fails every correct resumed transfer for ever —
+     * the file's total is the `Content-Range` total instead (`bytes 0-…/2097152`). `Content-Range:
+     * bytes 0-…/*`, a missing header, or a response that carried no length at all are honestly
+     * unknowable, and `0` says exactly that: the completion path promotes on `0` and trusts the
+     * file's own bytes rather than rejecting a correct file over a guessed one.
+     */
+    fileprivate static func expectedTotal(_ response: HTTPURLResponse?) -> Int {
+        guard let response else { return 0 }
+        if response.statusCode == 206 {
+            guard let range = response.value(forHTTPHeaderField: "Content-Range"),
+                  let slash = range.lastIndex(of: "/") else { return 0 }
+            let total = range[range.index(after: slash)...].trimmingCharacters(in: .whitespaces)
+            return Int(total) ?? 0
+        }
+        let length = Int(response.expectedContentLength)
+        return length > 0 ? length : 0
+    }
+
+    /**
      * The lyrics route's own "no sidecar" document —
      * `{"error": "no lyrics sidecar for this track", "path": …, "tried": […]}` — which arrives as a
      * **404 body**. Before v1.9.14 the completion handler never read the HTTP status, so such a body
@@ -623,9 +646,12 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
               let base = baseURL, let (kind, songId) = Self.splitKey(taskKey) else { return }
         let job = readJobs()[taskKey]
         let suffix = job?.suffix ?? (kind == Self.lyricsKind ? Self.lyricsKind : kind == Self.artKind ? Self.artKind : "mp3")
-        // The route's own `Content-Length` when the response carried one (the lyrics route does),
-        // else what the JS job promised. `0` means "nothing to check against".
-        let expected = responseExpected > 0 ? responseExpected : (job?.expectedBytes ?? 0)
+        // The response's own length for the whole file when it carried one (`expectedTotal`: a `206`
+        // is asked for its `Content-Range` total, never its range length). `0` means "nothing to
+        // check against" — an unknown length is **unverifiable, not a mismatch** (v2.0.0-beta.6):
+        // the JS job's `bytes` was the fallback here, and it can be a stale or rounded guess, which
+        // failed a correct file for ever on every retry.
+        let expected = responseExpected > 0 ? responseExpected : 0
         guard let staged = stagingFile(songId: songId, suffix: suffix) else { return }
         try? FileManager.default.removeItem(at: staged)
         do {
@@ -884,16 +910,26 @@ private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegat
          * arrived, so URLSession calls this and never `didCompleteWithError` (`error == nil`). The
          * lyrics route answers `404` with a JSON document for a track whose folder holds no sidecar —
          * normal and common — and promoting that body wrote the server's error into the offline copy
-         * as the words. Nothing but a `200` is ever promoted, for either axis: a non-200 body whose
-         * length happened to match would otherwise become audio just the same way.
+         * as the words. So only a whole (`200`) or partial (`206`) body is ever promoted, for either
+         * axis: a non-2xx body whose length happened to match would otherwise become audio just the
+         * same way.
          */
         let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else {
+        /*
+         * **A `206` is not a failure** (v2.0.0-beta.6). This door sits behind Caddy, which passes
+         * Range through: a transfer that asks for a range — or one the system resumes on the app's
+         * behalf — answers `206 Partial Content` with perfectly good bytes, and the old `status ==
+         * 200` guard deleted them and reported `HTTP 206` as an error. Every track was then re-fetched
+         * for ever and none ever completed, which is the owner's "500 MB downloaded, still 0 of 233".
+         * The status is still read *first*, and anything that is neither a whole response nor a
+         * partial one is still deleted and reported as failed.
+         */
+        guard status == 200 || status == 206 else {
             try? FileManager.default.removeItem(at: location)
             plugin?.didFail(task: downloadTask, error: NaviliteDownloads.statusError(status), status: status)
             return
         }
-        let expected = Int(downloadTask.response?.expectedContentLength ?? 0)
+        let expected = NaviliteDownloads.expectedTotal(downloadTask.response as? HTTPURLResponse)
         plugin?.didFinishDownload(task: downloadTask, from: location, responseExpected: expected)
     }
 

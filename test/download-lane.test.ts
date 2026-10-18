@@ -100,8 +100,8 @@ test('the shipped bug is reproducible: the lyrics enqueue does not touch the aud
 test('the transfer is staged, verified against a real byte count, and only then promoted', () => {
   assert.match(source, /staging\/<songId>\.<suffix>\.part/, 'the layout names the staging file');
   assert.ok(source.includes('"\\(songId).\\(suffix)\\(Self.stagingSuffix)"') || source.includes('"\\(songId).\\(suffix)\\(NaviliteDownloads.stagingSuffix)"'), 'a transfer writes into staging first');
-  assert.match(source, /let expected = responseExpected > 0 \? responseExpected : \(job\?\.expectedBytes \?\? 0\)/, 'the check uses the response Content-Length for lyrics too');
-  assert.match(source, /downloadTask\.response\?\.expectedContentLength/, 'which is the response’s own Content-Length');
+  assert.match(source, /let expected = responseExpected > 0 \? responseExpected : 0/, 'the check uses the response’s own length, never the JS job’s guess (v2.0.0-beta.6)');
+  assert.match(source, /response\.expectedContentLength/, 'which is the response’s own Content-Length');
   assert.match(source, /guard matches else \{/, 'a byte mismatch is not promoted');
 });
 
@@ -130,18 +130,19 @@ test('invariant 9 covers the files, not only the directory', () => {
  * (so the byte check agreed with it), moved to `<songId>.lyrics` and recorded `lyrics: {state:
  * "present"}` — the JSON blob in the Lyrics pane. Both assertions below fail against that tree.
  */
-test('the completion handler reads the HTTP status, and only a 200 is ever promoted', () => {
+test('the completion handler reads the HTTP status, and only a whole or partial body is ever promoted', () => {
   const handler = source.slice(source.indexOf('didFinishDownloadingTo'), source.indexOf('didWriteData'));
   assert.ok(handler.length > 0, 'the finish handler is in the file');
   assert.match(source, /let status = \(downloadTask\.response as\? HTTPURLResponse\)\?\.statusCode \?\? 0/, 'the response status is read');
-  assert.match(handler, /guard status == 200 else \{/, 'and only a 200 reaches the staging path');
+  // v2.0.0-beta.6: Caddy passes Range through, so a resumed transfer answers 206 with good bytes.
+  assert.match(handler, /guard status == 200 \|\| status == 206 else \{/, 'a whole OR a partial response reaches the staging path');
   assert.doesNotMatch(handler, /expectedContentLength[\s\S]*?\n\s*let status/, 'the status is read *before* the byte count, not after');
   assert.match(
     source,
     /plugin\?\.didFail\(task: downloadTask, error: NaviliteDownloads\.statusError\(status\), status: status\)/,
     'anything else is reported as failed, carrying the status JS maps to a miss',
   );
-  assert.match(handler, /guard status == 200 else \{\s+try\? FileManager\.default\.removeItem\(at: location\)/, 'the staged bytes are deleted, never promoted');
+  assert.match(handler, /guard status == 200 \|\| status == 206 else \{\s+try\? FileManager\.default\.removeItem\(at: location\)/, 'the staged bytes are deleted, never promoted');
   // The audio axis has the same hole (a non-200 body whose length matched would be promoted as
   // audio), so the guard is on the response, not on the kind.
   assert.doesNotMatch(handler, /kind == Self\.lyricsKind\) \{\s+let status/, 'the status check is not gated on the lyrics kind');

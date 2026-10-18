@@ -430,6 +430,29 @@ export interface DownloadActivity {
 }
 
 /**
+ * **The last thing that failed for this playlist** (v2.0.0-beta.6) — the status and the words, kept
+ * so the control can say *why* a download is not completing instead of only reporting that it has
+ * not.
+ *
+ * The native side has always computed this and sent it on the `failed` event
+ * (`{songId, kind, status, error}`: `HTTP 206`, `byte count 1048576 != 2097152`, a move error), and
+ * JS discarded it — which left the owner watching 500 MB arrive under `0 of 233` with no way to tell
+ * which door rejected the bytes. This is a **measurement, not narration**: it renders on the download
+ * control (never on the now-playing screen), the next failure replaces it, and a job that finishes
+ * takes it away.
+ */
+export interface DownloadFailure {
+  /** The HTTP status the transfer answered with, when it got that far. */
+  status?: number;
+  /** The native side's own words for it. */
+  error: string;
+  /** The track (or cover) whose transfer failed. */
+  songId: string;
+  /** When it was reported — the clock the control could date it by. */
+  at: number;
+}
+
+/**
  * §5 resume rule, the half that is pure: a `staging` row whose written bytes equal the expected
  * `Content-Length` is promoted to `complete` (the bytes arrived, only the callback was lost);
  * otherwise it is `partial` and re-fetched. "Correct or re-fetch", never "trust a partial".
@@ -491,6 +514,12 @@ export class OfflineStore {
    * screen is never a stale chunk added to a file that is already complete.
    */
   private readonly inFlight = new Map<string, number>();
+  /**
+   * The last failure the native side reported, per playlist id (v2.0.0-beta.6) — see
+   * `DownloadFailure`. Never persisted: it describes a transfer that is over, and a fresh launch
+   * asks the native index (the truth) rather than replaying a stale sentence.
+   */
+  private readonly lastFailure = new Map<string, DownloadFailure>();
   /**
    * One walk per playlist at a time (v2.0.0-beta.6). `download()` (the owner's tap), `resume()` (the
    * boot reconcile) and `pump()` (the self-completion pass) all enumerate the same playlist, and the
@@ -1037,6 +1066,15 @@ export class OfflineStore {
   }
 
   /**
+   * The last failure this playlist's transfers reported, or null (v2.0.0-beta.6) — the reason the
+   * control prints beside its figures, so "bytes arrive, nothing completes" is a stated cause and
+   * not a silence. Kept until the next failure replaces it, the job finishes, or it is cancelled.
+   */
+  failureOf(playlistId: string): DownloadFailure | null {
+    return this.lastFailure.get(playlistId) ?? null;
+  }
+
+  /**
    * What the playlist's job has actually moved (v2.0.0-beta.5), for the control's live indicator.
    *
    * Every byte here is **measured**: the file's own recorded length for a complete row, the lyric
@@ -1446,6 +1484,8 @@ export class OfflineStore {
     }
     this.clearPump(playlistId);
     record.state = record.done > 0 ? 'partial' : 'failed';
+    // A cancelled job is not explaining a failure any more (v2.0.0-beta.6).
+    this.lastFailure.delete(playlistId);
     // A cancelled manifest is never resumed by boot; only the owner's tap asks again.
     const manifest = this.manifests.get(playlistId);
     if (manifest) manifest.state = 'partial';
@@ -1459,6 +1499,7 @@ export class OfflineStore {
     if (!record) return;
     for (const song of record.songs) await this.dropRef(song.id, playlistId);
     this.clearPump(playlistId);
+    this.lastFailure.delete(playlistId);
     this.playlists.delete(playlistId);
     this.manifests.delete(playlistId);
     this.saveMirror();
@@ -1652,6 +1693,12 @@ export class OfflineStore {
       row.path = event.path ?? row.path;
       row.bytes = typeof event.bytes === 'number' ? event.bytes : row.bytes;
       row.downloadedAt = Date.now();
+      /*
+       * The transfer is over, so its last reported count is too (v2.0.0-beta.6): leaving it in the
+       * map added a settled transfer's bytes to every later reading of the figure, which is how the
+       * control could climb while `done` stood still. The complete row carries those bytes now.
+       */
+      this.inFlight.delete(event.songId);
     }
     for (const playlistId of row.refs) this.reconcileRecord(playlistId);
     this.saveMirror();
@@ -1687,6 +1734,19 @@ export class OfflineStore {
       row.lyrics = { state: 'failed', bytes: 0, fetchedAt: Date.now() };
     } else {
       row.state = 'failed';
+      /*
+       * The transfer is over, so its count settles with it (v2.0.0-beta.6) — and its own reason is
+       * kept for the control before the pump asks again, because a figure that keeps climbing over a
+       * track nothing ever completes is one half of the owner's report and a silence is the other.
+       */
+      this.inFlight.delete(event.songId);
+      const failure: DownloadFailure = {
+        status: typeof event.status === 'number' ? event.status : undefined,
+        error: typeof event.error === 'string' && event.error !== '' ? event.error : 'transfer failed',
+        songId: event.songId,
+        at: Date.now(),
+      };
+      for (const playlistId of row.refs) this.lastFailure.set(playlistId, failure);
       /*
        * v2.0.0-beta.4: a failed transfer used to sit there until the owner tapped retry. It goes
        * back through the pump instead, with a backoff, so one flaky track cannot hold a 269-track
@@ -2047,6 +2107,9 @@ export class OfflineStore {
     } else {
       record.state = done > 0 ? 'partial' : 'failed';
     }
+    // A job that has finished has nothing left to explain (v2.0.0-beta.6): the failure line goes
+    // with the last transfer that caused it, so a completed download never reads `· failed: …`.
+    if (record.state === 'complete') this.lastFailure.delete(playlistId);
     // The persisted half: only a manifest still `downloading` is resumed by the next boot, so a
     // cancelled (`partial`) or finished one is never re-enqueued behind the owner's back.
     const manifest = this.manifests.get(playlistId);
