@@ -355,6 +355,149 @@ patch({
                 }`,
 });
 
+/* ---------------------------------------------------------------------------------------------
+ *   The Now Playing card, the boundary, and the 0:00 start (v2.1).
+ *
+ *   The owner's wording is about the space between two tracks: the card shows something, then the
+ *   next start takes seconds to make a sound. Three separate things caused that, and they are
+ *   patches 11–14.
+ * ------------------------------------------------------------------------------------------- */
+
+/*
+ *   11. **iOS — the card is merged into, never replaced (v2.1).**
+ *
+ *       `updateNowPlayingInfo` rebuilds the dictionary from scratch at every `play:` and assigns it
+ *       wholesale. Anything the app itself wrote onto that card — the artwork, the external content
+ *       id, a duration it corrected — was therefore gone at every track boundary: the vendor's dict
+ *       only ever holds the metadata it was handed at load. Merging keeps both writers' keys, and
+ *       drops a non-positive duration before the merge, because a fresh slot reports 0 and a 0
+ *       duration on the card is a lie the layout engine acts on.
+ */
+patch({
+  file: PLUGIN,
+  id: 'ios-nowplaying-merge',
+  anchor: `            nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo`,
+  replacement: `            nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+
+            // <marker>: merge, never replace — the artwork, the external content id and the corrected
+            // duration on this card belong to the app's own writer, and a wholesale assign here is what
+            // dropped them at every track boundary.
+            var merged = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
+            if let duration = nowPlayingInfo[MPMediaItemPropertyPlaybackDuration] as? Double, duration <= 0 {
+                nowPlayingInfo.removeValue(forKey: MPMediaItemPropertyPlaybackDuration)
+            }
+            for (key, value) in nowPlayingInfo { merged[key] = value }
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = merged`,
+});
+
+/*
+ *   12. **iOS — a preloaded track is primed, not just constructed (v2.1).**
+ *
+ *       Nothing in the plugin ever asks AVFoundation for a byte of media until `play()`, so the
+ *       `AVPlayerItem` a `preload` left behind is an item with no bytes and no connection: the
+ *       boundary's `play` is where the connection opens and the transcode starts, which is the
+ *       multi-second silence the owner hears between tracks. `preroll` loads the media without
+ *       starting it, so that start has bytes to render.
+ */
+patch({
+  file: SWIFT,
+  id: 'ios-preroll',
+  anchor: `    override func play(time: TimeInterval, volume: Float? = nil) {`,
+  replacement: `    /// <marker>: load the media data without starting it, so the boundary's \`play\` has bytes to
+    /// render instead of a connection to open and a transcode to wait for.
+    func prerollForBoundary() {
+        owner?.executeOnAudioQueue { [weak self] in
+            guard let self else { return }
+            for player in self.players {
+                player.preroll(atRate: 1.0) { _ in }
+            }
+        }
+    }
+
+    override func play(time: TimeInterval, volume: Float? = nil) {`,
+});
+
+/*
+ *   13. **iOS — the app asks for the prime, on the one slot it is about to play (v2.1).**
+ *
+ *       Priming on every `preload` would have every warm slot open its own connection: on a link
+ *       with room for one stream that starves the audible one. So it is opt-in per call — the
+ *       caller that is about to start this slot passes \`preroll: true\`. The anchor is the remote
+ *       branch of \`preloadAsset\`, which is the branch the app's own preload takes
+ *       (\`isUrl: true\`, remote \`info.url\`):
+ *
+ *           self.audioList[audioId] = remoteAudioAsset
+ *           call.resolve()
+ *           return
+ */
+patch({
+  file: PLUGIN,
+  id: 'ios-preload-preroll',
+  anchor: `                    self.audioList[audioId] = remoteAudioAsset
+                    call.resolve()
+                    return`,
+  replacement: `                    self.audioList[audioId] = remoteAudioAsset
+                    // <marker>: only the entry the app is about to play is primed — priming every warm slot would
+                    // starve the audible stream, and the boundary is the one start somebody is waiting for.
+                    if call.getBool("preroll") == true, let primed = self.audioList[audioId] as? RemoteAudioAsset {
+                        primed.prerollForBoundary()
+                    }
+                    call.resolve()
+                    return`,
+});
+
+/*
+ *   14. **iOS — a start at 0:00 goes immediately (v2.1).**
+ *
+ *       `automaticallyWaitsToMinimizeStalling = false` (patch 3) removed AVFoundation's own
+ *       opinion about having buffered "enough", but `play()` still evaluates the buffer before it
+ *       starts. The start somebody is waiting for is the boundary — time 0:00 on a player that is
+ *       still at 0:00 — and that one skips the evaluation. Everything else keeps \`play()\`: a seek
+ *       or a restart mid-track is a different call with different semantics, and it is not what the
+ *       owner is describing.
+ */
+patch({
+  file: SWIFT,
+  id: 'ios-play-immediately',
+  anchor: `            player.volume = volume ?? self.initialVolume
+            player.play()`,
+  replacement: `            player.volume = volume ?? self.initialVolume
+            // <marker>: a start at 0:00 is the boundary — the one start a listener is waiting on — so it
+            // goes immediately rather than through the buffer evaluation play() still performs.
+            if time <= 0 && player.currentTime().seconds <= 0.1 {
+                player.playImmediately(atRate: 1.0)
+            } else {
+                player.play()
+            }`,
+});
+
+/*
+ *   15. **iOS — a finished `AVAudioPlayer` does not nil the card with notifications on (v2.1).**
+ *
+ *       `audioPlayerDidFinishPlaying` is the local-file channel's completion, and when it could not
+ *       name the asset that finished it cleared `nowPlayingInfo` outright — the one wholesale
+ *       assignment left in the writer question, and the same defect patch 9 fixed on the remote
+ *       channel one method away. Brought under the same `showNotification` guard.
+ */
+patch({
+  file: PLUGIN,
+  id: 'ios-persist-now-playing-on-finish',
+  anchor: `                if completedAssetId == nil, self.currentlyPlayingAssetId != nil {
+                    self.currentlyPlayingAssetId = nil
+                    self.clearNowPlayingInfo()
+                }`,
+  replacement: `                if completedAssetId == nil, self.currentlyPlayingAssetId != nil {
+                    self.currentlyPlayingAssetId = nil
+                    // <marker>: do not nil a card the app is still drawing just because the local
+                    // channel could not name the asset that finished.
+                    if !self.showNotification {
+                        self.clearNowPlayingInfo()
+                    }
+                }`,
+});
+
 for (const line of applied) console.log(`[navilite] ${line}`);
 if (failures.length > 0) {
   for (const line of failures) console.error(`[navilite] PATCH FAILED — ${line}`);

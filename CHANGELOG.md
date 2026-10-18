@@ -373,3 +373,10 @@ Plain language, user-visible changes only. The app shows this same list under
 - Album art is pushed to the lock screen, Control Center, and Dynamic Island player for both streamed and downloaded songs.
 - Tapping the Dynamic Island or lock screen player opens the app directly via registered system URL schemes.
 
+## 2.0-beta.13 — 2026-10-18
+
+- The player card in the Dynamic Island and on the Lock Screen no longer disappears between songs: it stays on screen with the song you can still hear while the next one starts on that same card.
+- The pause between songs is much shorter: the next track is prepared before the current one finishes, so it starts as that song ends instead of opening the stream at that moment.
+- The cover art shows on the card for streamed and downloaded songs, and it stays there when the card moves on to the next track.
+- Tapping the song name or artist in the Lock Screen player brings you back to the app, and so does the small pill in the Dynamic Island once the phone is unlocked; the cover itself keeps its own tap, which iOS gives to full-screen artwork and no app can redirect.
+

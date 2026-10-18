@@ -195,9 +195,33 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private static let cardGrace = 0.75
     /// The outside of the refresh — long enough for an indefinite item to resolve a duration, short
     /// enough that nothing here writes to the card for a whole track.
-    private static let cardDeadline = 8.0
+    /// Twelve seconds covers the seconds around a boundary and no more: Apple advises against
+    /// periodic `nowPlayingInfo` pushes, so this window must end rather than become a steady-state
+    /// writer (v2.1).
+    private static let cardDeadline = 12.0
     /// Which refresh is current; a newer one retires the older one's ladder.
     private var cardTicket = 0
+    /// How often the watchdog **reads** the card, and never more than that (v2.1).
+    private static let watchdogStep = 2.0
+    /// The read-mostly watchdog, and the statement it was started under.
+    private var cardWatchdog: DispatchSourceTimer?
+    private var cardWatchdogToken = 0
+    /// A handed-off boundary is running: the card deliberately names the **incoming** entry while
+    /// `index` still names the finished one, so the watchdog must not read a verdict from it.
+    private var boundaryInFlight = false
+    /// What the repairs have done, for the reason line and the `now()` payload.
+    private var cardRepairs = 0
+    private var sessionRetakes = 0
+    /// Whether the audio session is believed to be active.
+    ///
+    /// **iOS has no public getter for this** — `AVAudioSession` exposes no `isActive` — so this is
+    /// kept the only way it can be: set true by every successful `setActive(true)` here, and set false
+    /// by the system's own media-services reset. It is a fact this side has a reason for, not a guess.
+    private var sessionActive = true
+    /// The return-to-foreground observation, installed with the end observer and removed with it.
+    private var activeObserver: NSObjectProtocol?
+    /// The session's own notifications (reset, interruption ended).
+    private var sessionObservers: [NSObjectProtocol] = []
 
     /// Cached artwork: songId -> MPMediaItemArtwork (v2.0-beta.12).
     private var artworkCache: [String: MPMediaItemArtwork] = [:]
@@ -246,6 +270,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 self.targets.append((command: center.previousTrackCommand, token: previous))
             }
             self.installEndObserver()
+            self.installActiveObserver()
             call.resolve(["attached": true])
         }
     }
@@ -261,6 +286,9 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             }
             self.targets.removeAll()
             self.removeEndObserver()
+            self.removeActiveObserver()
+            self.cancelWatchdog()
+            self.boundaryInFlight = false
             if let plugin = self.bridge?.plugin(withName: Self.audioPluginName) {
                 for slot in Self.windowSlots {
                     self.unloadSlot(plugin: plugin, slot: slot)
@@ -314,6 +342,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 call.reject("plugin deallocated")
                 return
             }
+            /*
+             * A new statement supersedes any boundary in flight (v2.1): that boundary was taken under
+             * the queue this replaces, so nothing is left half-announced and the watchdog may read
+             * the card this statement writes.
+             */
+            self.boundaryInFlight = false
             self.queue = entries.compactMap { entry in
                 guard let songId = entry["songId"] as? String, !songId.isEmpty,
                       let url = entry["url"] as? String, !url.isEmpty else { return nil }
@@ -356,6 +390,25 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
              * it, so a repeated statement costs nothing and cannot replace a warm slot.
              */
             if !self.awake { self.preloadAhead(token: self.generation) }
+            /*
+             * Art arrives at **statement** time, not card time (v2.1): by the time the card needs an
+             * image the track is already playing, and the missing image is the visible defect. The
+             * playing entry and the next two — those are the three the next boundaries can reach.
+             */
+            if self.index >= 0 {
+                for offset in 0...2 where self.index + offset < self.queue.count {
+                    self.loadArtwork(for: self.queue[self.index + offset])
+                }
+            }
+            /*
+             * The watchdog belongs to exactly one state (v2.1): the app away with a queue to walk.
+             * Everywhere else it is cancelled — while the app is on screen the web layer owns the card.
+             */
+            if !self.awake, self.index >= 0, !self.queue.isEmpty {
+                self.startWatchdog(token: self.generation)
+            } else {
+                self.cancelWatchdog()
+            }
             self.reason = self.queue.isEmpty
                 ? "the app published no queue, so there is nothing to advance to"
                 : self.index < 0
@@ -400,7 +453,13 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 "failures": self.failures,
                 "ignored": self.ignored,
                 "awake": self.awake,
-                "reason": self.reason
+                "reason": self.reason,
+                "cardRepairs": self.cardRepairs,
+                "sessionRetakes": self.sessionRetakes,
+                "sessionActive": self.sessionActive,
+                "cardTitle": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String) ?? "",
+                "cardRate": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? NSNumber)?.doubleValue ?? 0,
+                "artCached": playing.map { self.artworkCache[$0.songId] != nil } ?? false
             ])
         }
     }
@@ -452,6 +511,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          * The statement in force at this moment travels with the boundary (v1.9.10). Everything the
          * advance goes on to do — a fetch, each rung of its readiness poll, the play — re-checks it, so
          * a queue the app replaces while this is in flight can no longer be advanced into.
+         */
+        /*
+         * The card names the **incoming** entry before the handoff starts (v2.1) — but that is now
+         * `take()`'s own job, so every boundary gets it, automatic or from a button. Without it the
+         * finished track is published as paused for the whole fetch, which is the second the owner
+         * hears as "the card went dead at the boundary". `commit()` corrects it with the real slot.
          */
         takeNext(how: "the track ended while the app was away", automatic: true, token: generation)
     }
@@ -535,6 +600,16 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             fail("\(how): the entry it points at is not in the published queue")
             return false
         }
+        /*
+         * **Every boundary arms the window here, in one place (v2.1).** `announceUpcoming` writes the
+         * incoming entry's card before the handoff starts, and `boundaryInFlight` stops the watchdog
+         * and the refresh ladder from calling that card wrong while `index` still names the finished
+         * track. It used to be set only by `itemDidEnd`, so a lock-screen next/previous — which comes
+         * in through `advanceIfAble`/`previousIfAble` — crossed its boundary with the finished track
+         * on the card at rate 0 for the whole fetch. `commit()` and `fail()` close it.
+         */
+        boundaryInFlight = true
+        announceUpcoming(token: token)
         let entry = queue[target]
         let slot = holding(entry.songId)
         if let slot {
@@ -687,6 +762,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// main thread** as the `playSlot` that succeeded — which is where the statement was checked — so
     /// the check that let the play through is the check that applies here.
     private func commit(target: Int, slot: String, entry: Entry, how: String) {
+        // The handed-off boundary has landed on a real slot: the card now matches `index` again.
+        boundaryInFlight = false
         index = target
         audible = (slot, entry.songId)
         if fetchWindow?.slot == slot {
@@ -718,7 +795,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         if holding(entry.songId) != nil { return }
         guard let plugin = bridge?.plugin(withName: Self.audioPluginName) else { return }
         let slot = fetchSlot()
-        guard preloadSlot(plugin: plugin, slot: slot, entry: entry) else { return }
+        // It fetches exactly the entry after the audible one: that is the boundary, so it is primed.
+        guard preloadSlot(plugin: plugin, slot: slot, entry: entry, preroll: true) else { return }
         fetchWindow = (slot, entry.songId)
     }
 
@@ -749,23 +827,28 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      *
      * The metadata goes with it so the lock screen names the track that is being fetched rather than
      * the one that ended, which is the same reason the play goes through the plugin.
+     *
+     * With `preroll` the vendor is asked to prime the slot for an immediate start (patch 13). Only a
+     * boundary asks for it: `fetch()` is about to play the slot itself, where priming is pointless.
      */
-    private func preloadSlot(plugin: CAPPlugin, slot: String, entry: Entry) -> Bool {
+    private func preloadSlot(plugin: CAPPlugin, slot: String, entry: Entry, preroll: Bool = false) -> Bool {
         guard plugin.responds(to: Self.preloadSelector), let method = plugin.method(for: Self.preloadSelector) else {
             return false
         }
         unloadSlot(plugin: plugin, slot: slot)
         var metadata: [String: String] = ["title": entry.title, "artist": entry.artist, "album": entry.album]
         if let artworkUrl = entry.artworkUrl { metadata["artworkUrl"] = artworkUrl }
+        var options: [String: Any] = [
+            "assetId": slot,
+            "assetPath": entry.url,
+            "isUrl": true,
+            "notificationMetadata": metadata
+        ]
+        if preroll { options["preroll"] = true }
         let call: CAPPluginCall = CAPPluginCall(
             callbackId: "navilite-native-fetch",
             methodName: "preload",
-            options: [
-                "assetId": slot,
-                "assetPath": entry.url,
-                "isUrl": true,
-                "notificationMetadata": metadata
-            ],
+            options: options,
             success: { _, _ in },
             error: { _ in }
         )
@@ -885,11 +968,235 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         guard ticket == cardTicket, waited < Self.cardDeadline else { return }
         after(Self.cardStep) { [weak self] in
             guard let self, ticket == self.cardTicket else { return }
-            let known = self.publishCard()
-            // Everything is on the card once the duration is known and the grace has passed.
-            if known && waited >= Self.cardGrace { return }
+            let settled = self.publishCard()
+            // Everything is on the card once the duration is known, the player says it is playing
+            // (or was paused on purpose) and the grace has passed.
+            if settled && waited >= Self.cardGrace { return }
             self.stepCard(ticket: ticket, waited: waited + Self.cardStep)
         }
+    }
+
+    /* ------------------------------------------- keeping the card true (v2.1) */
+
+    /// Whether the audible player says audio is being heard or is on its way.
+    ///
+    /// `.waitingToPlayAtSpecifiedRate` is "the listener pressed play and audio is coming" — that is a
+    /// track boundary — and `.paused` is a real pause from any surface, the lock screen included.
+    /// Nil when there is no audible slot to ask.
+    private func audibleIsPlaying() -> Bool? {
+        guard let audible, let found = AudibleBridgePlayer.player(audible.assetId, from: bridge) else { return nil }
+        let status = found.player.timeControlStatus
+        return status == .playing || status == .waitingToPlayAtSpecifiedRate
+    }
+
+    /// The card for the entry that is **about to** start, written before the handoff begins (v2.1).
+    ///
+    /// Between the finished item's end and `commit()` the card would otherwise name the track that
+    /// just ended and say it is paused — for the whole fetch, when a fetch is what the handoff needs.
+    /// `commit()` corrects this with the real slot and the real position, as it always has.
+    private func announceUpcoming(token: Int) {
+        guard current(token: token), index >= 0, index < queue.count else { return }
+        var target = index + 1
+        if target >= queue.count {
+            guard repeatMode == "all", !queue.isEmpty else { return }
+            target = 0
+        }
+        guard target < queue.count else { return }
+        let finished = queue[index].songId
+        let entry = queue[target]
+        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
+        applyEntry(entry, to: &info)
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+        // The incoming entry has no duration until its own slot plays: cleared, never guessed.
+        info.removeValue(forKey: MPMediaItemPropertyPlaybackDuration)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        reason = "\(finished) ended and the app is away, so the card names \(entry.songId), which the native player is about to start"
+    }
+
+    /**
+     * An entry's own fields on the card — written by **both** writers (v2.1).
+     *
+     * There are two of them: `publishCard` for the entry that is playing, `announceUpcoming` for the
+     * one the player is about to start. While each spelled its own keys out, the media type existed
+     * on one of them and not the other, so the card the viewer actually reads — the one published on
+     * the first track and on every track started with the app awake — carried no statement of what
+     * kind of item it is, which is what the artwork view reads. One function, so the two writers
+     * cannot drift apart again.
+     *
+     * A field the entry does not have is left alone rather than written empty: an empty title is not
+     * a title, and the calling writers decide the position, duration and rate, which differ between
+     * them.
+     */
+    private func applyEntry(_ entry: Entry, to info: inout [String: Any]) {
+        if !entry.title.isEmpty { info[MPMediaItemPropertyTitle] = entry.title }
+        if !entry.artist.isEmpty { info[MPMediaItemPropertyArtist] = entry.artist }
+        if !entry.album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = entry.album }
+        info[MPNowPlayingInfoPropertyExternalContentIdentifier] = entry.songId
+        info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
+        info[MPNowPlayingInfoPropertyIsLiveStream] = false
+        if let cached = artworkCache[entry.songId] {
+            info[MPMediaItemPropertyArtwork] = cached
+        } else {
+            loadArtwork(for: entry)
+        }
+    }
+
+    /// Start the watchdog. It exists only in the state it is for — the app away with a queue — and it
+    /// carries the statement it was started under, so a replaced queue retires it.
+    private func startWatchdog(token: Int) {
+        if cardWatchdog != nil, cardWatchdogToken != token {
+            cardWatchdog?.cancel()
+            cardWatchdog = nil
+        }
+        guard cardWatchdog == nil else { return }
+        cardWatchdogToken = token
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + Self.watchdogStep, repeating: Self.watchdogStep)
+        timer.setEventHandler { [weak self] in
+            self?.watchdogTick()
+        }
+        timer.resume()
+        cardWatchdog = timer
+    }
+
+    private func cancelWatchdog() {
+        cardWatchdog?.cancel()
+        cardWatchdog = nil
+    }
+
+    /// One tick: **read** the facts that can drift, and write only the one that is wrong.
+    ///
+    /// Nothing is written when nothing is wrong, and the session is never taken unconditionally —
+    /// this is a repair, not a second writer. Apple advises against periodic `nowPlayingInfo` pushes.
+    private func watchdogTick() {
+        guard current(token: cardWatchdogToken), !awake, index >= 0, index < queue.count else { return }
+        let session = AVAudioSession.sharedInstance()
+        if !sessionActive {
+            do {
+                try session.setActive(true)
+                sessionActive = true
+                sessionRetakes += 1
+                reason = "the audio session had been deactivated while the app was away, so the native player took it again"
+            } catch {
+                reason = "the audio session had been deactivated and could not be taken again: \(error.localizedDescription)"
+            }
+        }
+        /*
+         * A handed-off boundary is in flight (v2.1): `announceUpcoming` deliberately wrote a card that
+         * names a track which is **not** `index` yet, and `queue[index]` plus `audibleIsPlaying()`
+         * still describe the finished one. Reading a verdict here would call that card wrong and
+         * republish the finished entry at rate 0 — the exact "card goes dead at the boundary" symptom
+         * this release removes. So while the boundary is in flight the session is checked, and
+         * nothing is judged: `commit()` or `fail()` ends the window and the next tick reads again.
+         */
+        if boundaryInFlight { return }
+        /*
+         * A player this side cannot read is not a paused one (v2.1). `audibleIsPlaying()` answers nil
+         * when the slot is not on the bridge, which is a state `publishCard` refuses to write from —
+         * folding that nil into rate 0 here posted a paused card mid-playback, and because the card
+         * then matched the rate being asked for, nothing ever repaired it. Judge nothing this tick;
+         * the next one reads again.
+         */
+        guard let playing = audibleIsPlaying() else { return }
+        let entry = queue[index]
+        let card = MPNowPlayingInfoCenter.default().nowPlayingInfo
+        let cardTitle = card?[MPMediaItemPropertyTitle] as? String
+        let cardRate = (card?[MPNowPlayingInfoPropertyPlaybackRate] as? NSNumber)?.doubleValue
+        /*
+         * The artwork is part of the verdict too (v2.1): a card that is right in title and rate but
+         * carries no image was never repaired, because `loadArtwork` writes the card without the
+         * image it is still fetching and `publishCard` could leave that as the last word — while
+         * `now()` went on reporting the art as cached. Read as "cached here, absent there", so an
+         * image that has never been loaded is not by itself a reason to write.
+         */
+        let cardArt = card?[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork
+        let wantRate: Double = playing ? 1.0 : 0.0
+        let why: String?
+        if card == nil {
+            why = "there was no card at all"
+        } else if !entry.title.isEmpty && cardTitle != entry.title {
+            /*
+             * An entry with no title is not a disagreement (v2.1): `publishCard` never writes an
+             * empty title, so comparing against one made the mismatch permanently true and the tick a
+             * 2 s steady-state writer — the one thing the watchdog must never become.
+             */
+            why = "the card named \"\(cardTitle ?? "")\" instead of \"\(entry.title)\""
+        } else if cardRate != wantRate {
+            why = "the card said \(cardRate ?? -1) while the player said \(wantRate)"
+        } else if cardArt == nil, artworkCache[entry.songId] != nil {
+            why = "the card had no artwork while \(entry.songId)'s was cached"
+        } else {
+            why = nil
+        }
+        guard let why else { return }
+        refreshNowPlaying()
+        cardRepairs += 1
+        reason = "the card disagreed with the player — \(why) — so it was written again"
+    }
+
+    /// Watch the app coming back (v2.1). After any suspension the app must still be the Now Playing
+    /// app when the tap lands, so the session is taken again and the card re-stated.
+    private func installActiveObserver() {
+        guard activeObserver == nil else { return }
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.appDidBecomeActive()
+        }
+        /*
+         * The two facts that can invalidate the session without anything here asking (v2.1): a media
+         * services reset tears it down, and an interruption that ends is the moment it may be taken
+         * again. Both are recorded rather than acted on periodically.
+         */
+        sessionObservers.append(NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.sessionActive = false
+            self?.reason = "the system reset media services, so the audio session must be taken again"
+        })
+        sessionObservers.append(NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self else { return }
+            let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
+            guard AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+            try? AVAudioSession.sharedInstance().setActive(true)
+            self.sessionActive = true
+            self.sessionRetakes += 1
+            self.refreshNowPlaying()
+        })
+    }
+
+    private func removeActiveObserver() {
+        if let activeObserver {
+            NotificationCenter.default.removeObserver(activeObserver)
+            self.activeObserver = nil
+        }
+        for observer in sessionObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        sessionObservers.removeAll()
+    }
+
+    private func appDidBecomeActive() {
+        guard index >= 0, !queue.isEmpty else { return }
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            sessionActive = true
+            sessionRetakes += 1
+        } catch {
+            sessionActive = false
+            reason = "the app came back, but the audio session could not be taken again: \(error.localizedDescription)"
+            return
+        }
+        refreshNowPlaying()
     }
 
     /**
@@ -907,7 +1214,15 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.fetchingArtworkSongIds.remove(songId)
-                let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                /*
+                 * Built with a resizing handler (v2.1): the system asks for the artwork at the size it
+                 * is going to draw — island, lock screen, Control Centre — and handing back the original
+                 * image unchanged is what makes a large image draw wrong at island size.
+                 */
+                let artwork = MPMediaItemArtwork(boundsSize: image.size) { size in
+                    let renderer = UIGraphicsImageRenderer(size: size)
+                    return renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+                }
                 self.artworkCache[songId] = artwork
                 // Keep cache bounded
                 if self.artworkCache.count > 50 {
@@ -922,6 +1237,21 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                     info[MPMediaItemPropertyArtwork] = artwork
                     MPNowPlayingInfoCenter.default().nowPlayingInfo = info
                 }
+            }
+        }
+
+        /*
+         * A downloaded track's art is stated as `capacitor://localhost/_capacitor_file_/<path>`, which
+         * no loader here can open (v2.1) — the reason downloaded art never appeared. The path under the
+         * prefix is the same absolute file path the plain-path branch below already handles.
+         */
+        let capacitorPrefix = "capacitor://localhost/_capacitor_file_"
+        if artworkUrlString.hasPrefix(capacitorPrefix) {
+            let encoded = String(artworkUrlString.dropFirst(capacitorPrefix.count))
+            let path = encoded.removingPercentEncoding ?? encoded
+            if let image = UIImage(contentsOfFile: path) {
+                applyImage(image)
+                return
             }
         }
 
@@ -965,6 +1295,16 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      */
     @discardableResult
     private func publishCard() -> Bool {
+        /*
+         * While a boundary is in flight the card deliberately names the entry the player is **about
+         * to** start, and `queue[index]` plus the audible player still describe the finished one
+         * (v2.1). A write here would overwrite that announcement with the finished track at rate 0 —
+         * the "card goes dead at the boundary" symptom this window exists to remove. The watchdog
+         * already refuses to judge in this state; this guard is the one both callers go through, so
+         * the refresh ladder cannot do it either. `commit()` re-opens the card by calling
+         * `refreshNowPlaying()` once the window has closed.
+         */
+        if boundaryInFlight { return true }
         guard let entry = (index >= 0 && index < queue.count) ? queue[index] : nil else { return true }
         /*
          * The player the card is about is the slot the app named as **audible** — never a warm slot and
@@ -973,15 +1313,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          */
         guard let audible, let found = AudibleBridgePlayer.player(audible.assetId, from: bridge) else { return true }
         var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [String: Any]()
-        if !entry.title.isEmpty { info[MPMediaItemPropertyTitle] = entry.title }
-        if !entry.artist.isEmpty { info[MPMediaItemPropertyArtist] = entry.artist }
-        if !entry.album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = entry.album }
-        info[MPNowPlayingInfoPropertyExternalContentIdentifier] = entry.songId
-        if let cached = artworkCache[entry.songId] {
-            info[MPMediaItemPropertyArtwork] = cached
-        } else {
-            loadArtwork(for: entry)
-        }
+        applyEntry(entry, to: &info)
         let player = found.player
         /*
          * The duration, and **only from an item that has already been inspected (v1.9.11)**.
@@ -1000,14 +1332,32 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         if known { info[MPMediaItemPropertyPlaybackDuration] = duration }
         let elapsed = player.currentTime().seconds
         if elapsed.isFinite { info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed }
-        info[MPNowPlayingInfoPropertyPlaybackRate] = player.timeControlStatus == .playing ? 1.0 : 0.0
+        /*
+         * The player's own two-state reading (v2.1), not "has it started yet". The old line wrote 0
+         * for the whole of a track boundary — after the vendor had written 1.0 — so a paused card was
+         * the last word for the rest of the track. `.waitingToPlayAtSpecifiedRate` means the listener
+         * pressed play and audio is coming, which is exactly the boundary; `.paused` is a real pause
+         * from any surface, and a lock-screen pause must still be able to post 0.
+         */
+        let status = player.timeControlStatus
+        let playing = status == .playing || status == .waitingToPlayAtSpecifiedRate
+        info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? 1.0 : 0.0
+        /*
+         * `MPNowPlayingInfoCenter.default().playbackState` is deliberately **not** set: Apple's page
+         * says that property is macOS-only, so on iOS the rate is the only statement available.
+         */
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        return known
+        // Settled once the duration is known and the player is not still waiting to start; a pause is
+        // settled too, because the 0 written there is the true state rather than a race with the start.
+        return known && (playing || status == .paused)
     }
 
     /// A boundary that could not be taken, always with a reason (v1.9.9): the one thing this side may
     /// never do is stop the music without saying why.
     private func fail(_ why: String) {
+        // Every path that ends a boundary goes through `commit` or through here, so this is where a
+        // handed-off boundary stops being in flight even when it never reached a slot.
+        boundaryInFlight = false
         failures += 1
         reason = why
         notifyListeners("advanceFailed", data: ["reason": why, "index": index])
