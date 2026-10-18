@@ -213,6 +213,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// A handed-off boundary is running: the card deliberately names the **incoming** entry while
     /// `index` still names the finished one, so the watchdog must not read a verdict from it.
     private var boundaryInFlight = false
+    /// A play has been issued and the player has not yet said either *playing* or *waiting* for it
+    /// (v2.0-beta.15). While this is true, `.paused` is a race with the start rather than a pause, so
+    /// the card ladder must not accept it as settled — otherwise the head of a new track can be the
+    /// moment the ladder stops, with 0.0 as the last word.
+    private var awaitingFirstPlayback = false
     /// What the repairs have done, for the reason line and the `now()` payload.
     private var cardRepairs = 0
     private var sessionRetakes = 0
@@ -496,9 +501,33 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 "timeline": self.boundaryTimeline(),
                 "cardTitle": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String) ?? "",
                 "cardRate": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? NSNumber)?.doubleValue ?? 0,
-                "artCached": playing.map { self.artworkCache[$0.songId] != nil } ?? false
+                "artCached": playing.map { self.artworkCache[$0.songId] != nil } ?? false,
+                /*
+                 * What the system says the session's own shape is, and whether a card exists at all
+                 * (v2.0-beta.15). Attribution is the thing the owner's tap test is about — the module
+                 * expanded, the card named a track, and the tap opened nothing — and neither fact can
+                 * be read from JavaScript. Category options including `mixWithOthers` are the one
+                 * setting that costs the Now Playing entry outright.
+                 */
+                "sessionCategory": AVAudioSession.sharedInstance().category.rawValue,
+                "sessionOptions": Self.optionNames(AVAudioSession.sharedInstance().categoryOptions),
+                "cardPresent": MPNowPlayingInfoCenter.default().nowPlayingInfo != nil
             ])
         }
+    }
+
+    /// The session's category options as words, for the diagnostics row (v2.0-beta.15): `none` when
+    /// there are none, which is the state a Now Playing entry needs.
+    private static func optionNames(_ options: AVAudioSession.CategoryOptions) -> String {
+        var names: [String] = []
+        if options.contains(.mixWithOthers) { names.append("mixWithOthers") }
+        if options.contains(.duckOthers) { names.append("duckOthers") }
+        if options.contains(.allowBluetooth) { names.append("allowBluetooth") }
+        if options.contains(.allowBluetoothA2DP) { names.append("allowBluetoothA2DP") }
+        if options.contains(.defaultToSpeaker) { names.append("defaultToSpeaker") }
+        if options.contains(.interruptSpokenAudioAndMixWithOthers) { names.append("interruptSpokenAudioAndMixWithOthers") }
+        if options.contains(.allowAirPlay) { names.append("allowAirPlay") }
+        return names.isEmpty ? "none" : names.joined(separator: "+")
     }
 
     /* ------------------------------------------------------------ taking the boundary */
@@ -898,10 +927,16 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// The last boundary, in milliseconds from its item end — the five numbers §6 asks for. `-1`
     /// is "did not happen on this boundary": a warm start has no fetch, and a boundary still in
     /// flight has no audible frame yet.
+    ///
+    /// **Only an away boundary is timed here** (v2.0-beta.15): `beginBoundary()` is reached from
+    /// `take()`, which runs only while the app is away. So the reading travels with its own clock —
+    /// `startedAt` (epoch ms) and `ageMs` (how long ago that boundary began) — and the row names it as
+    /// the last *away* boundary, so a stale reading can never be mistaken for the current one.
     private func boundaryTimeline() -> [String: Any] {
         guard let start = boundaryStart else {
             return [
-                "path": "none", "cardMs": -1, "fetchMs": -1, "readyMs": -1, "playMs": -1, "audibleMs": -1
+                "path": "none", "startedAt": -1, "ageMs": -1,
+                "cardMs": -1, "fetchMs": -1, "readyMs": -1, "playMs": -1, "audibleMs": -1
             ]
         }
         func ms(_ at: Date?) -> Int {
@@ -910,6 +945,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         }
         return [
             "path": fetchIssuedAt == nil ? "warm" : "fetch",
+            "startedAt": Int((start.timeIntervalSince1970 * 1000).rounded()),
+            "ageMs": Int((Date().timeIntervalSince(start) * 1000).rounded()),
             "cardMs": ms(cardAnnouncedAt),
             "fetchMs": ms(fetchIssuedAt),
             "readyMs": ms(readyAt),
@@ -1065,6 +1102,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         typealias PlayIMP = @convention(c) (AnyObject, Selector, AnyObject) -> Void
         let play = unsafeBitCast(method, to: PlayIMP.self)
         playIssuedAt = Date()
+        awaitingFirstPlayback = true
         play(plugin, Self.playSelector, call)
         reason = "\(how) — the native player was asked for \(entry.songId)"
         return true
@@ -1209,20 +1247,15 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// this is a repair, not a second writer. Apple advises against periodic `nowPlayingInfo` pushes.
     private func watchdogTick() {
         guard current(token: cardWatchdogToken), !awake, index >= 0, index < queue.count else { return }
-        let session = AVAudioSession.sharedInstance()
-        // The system's own answer, not our memory of it (v2.0-beta.14): a session the system dropped
-        // while the app was away is the one fact that makes the app stop being the Now Playing app.
-        sessionActive = sessionIsActive
-        if !sessionActive {
-            do {
-                try session.setActive(true)
-                sessionActive = true
-                sessionRetakes += 1
-                reason = "the audio session had been deactivated while the app was away, so the native player took it again"
-            } catch {
-                reason = "the audio session had been deactivated and could not be taken again: \(error.localizedDescription)"
-            }
-        }
+        /*
+         * The session is **asserted** here, on this loop's own cadence, rather than read (v2.0-beta.15).
+         * There is no getter for its activation state, so `setActive(true)` is the repair itself: a
+         * no-op while the session is live, and the one thing that takes it back when the system
+         * dropped it while the app was away without a notification — the case this loop exists for.
+         * It moves the retake count only when the flag already said the session was gone, so the
+         * number stays a count of rescues rather than of ticks.
+         */
+        retakeSession("the audio session had been deactivated while the app was away")
         /*
          * A handed-off boundary is in flight (v2.1): `announceUpcoming` deliberately wrote a card that
          * names a track which is **not** `index` yet, and `queue[index]` plus `audibleIsPlaying()`
@@ -1307,10 +1340,19 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         ) { [weak self] notification in
             guard let self else { return }
             let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
-            guard AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
-            try? AVAudioSession.sharedInstance().setActive(true)
-            self.sessionActive = true
-            self.sessionRetakes += 1
+            guard let kind = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            /*
+             * An interruption takes the session away, and the end of it is the moment the session may
+             * be taken again (v2.0-beta.15). The flag is cleared at the start so the re-take below is
+             * counted once, as the rescue it is — where it used to be counted on every interruption,
+             * whether or not the session had gone.
+             */
+            if kind == .began {
+                self.sessionActive = false
+                return
+            }
+            guard kind == .ended else { return }
+            self.retakeSession("an interruption ended and the audio session had to be taken again")
             self.refreshNowPlaying()
         })
     }
@@ -1326,25 +1368,40 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         sessionObservers.removeAll()
     }
 
+    /// Take the audio session again, and count a **rescue** rather than an attempt (v2.0-beta.15).
+    ///
+    /// The flag is the only record of the session's state this side has, so it is the receipt this
+    /// helper counts: the number moves exactly when the flag said the session was gone and the call
+    /// returned, which is once per rescue no matter how many of the three doorways report the same
+    /// event — the watchdog, an interruption that ended, or the app coming back. On a session that is
+    /// already active this is a silent no-op, and the reason line is left alone when nothing was wrong.
+    @discardableResult
+    private func retakeSession(_ what: String) -> Bool {
+        let wasGone = !sessionIsActive
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            reason = "\(what), and it could not be taken again: \(error.localizedDescription)"
+            return false
+        }
+        sessionActive = true
+        if wasGone {
+            sessionRetakes += 1
+            reason = "\(what), and the native player took it again"
+        }
+        return true
+    }
+
     private func appDidBecomeActive() {
         guard index >= 0, !queue.isEmpty else { return }
-        let session = AVAudioSession.sharedInstance()
-        do {
-            /*
-             * Asserted, then counted (v2.0-beta.14). `setActive(true)` on a session that is already
-             * active is a no-op, so asserting it on every return is safe and is the only thing that
-             * rescues a session the system dropped without a notification — which the flag cannot
-             * see. The retake counter only moves when the flag said the session was gone, so the
-             * number in the row stays a count of repairs rather than of returns.
-             */
-            let wasGone = !sessionIsActive
-            try session.setActive(true)
-            if wasGone { sessionRetakes += 1 }
-            sessionActive = true
-        } catch {
-            reason = "the app came back, but the audio session could not be taken again: \(error.localizedDescription)"
-            return
-        }
+        /*
+         * Asserted on every return (v2.0-beta.14), and counted only when the session was known to be
+         * gone (v2.0-beta.15). `setActive(true)` on a session that is already active is a no-op, so
+         * asserting it on every return is safe and is the only thing that rescues a session the
+         * system dropped without a notification — which the flag cannot see. The same helper the
+         * watchdog and the interruption end use, so one rescue is one count rather than three.
+         */
+        guard retakeSession("the app came back to a session that had been deactivated") else { return }
         refreshNowPlaying()
     }
 
@@ -1490,6 +1547,13 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          */
         let status = player.timeControlStatus
         let playing = status == .playing || status == .waitingToPlayAtSpecifiedRate
+        /*
+         * Once the player has said it is playing or on its way, `.paused` is a pause again (v2.0-beta.15).
+         * Before that it is a race with the play that was just issued — `commit()` writes the card in
+         * the same turn — and accepting it as settled at the head of a track stopped the ladder there
+         * with 0.0 as the last word.
+         */
+        if playing { awaitingFirstPlayback = false }
         info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? 1.0 : 0.0
         /*
          * `MPNowPlayingInfoCenter.default().playbackState` is deliberately **not** set: Apple's page
@@ -1497,8 +1561,9 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          */
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         // Settled once the duration is known and the player is not still waiting to start; a pause is
-        // settled too, because the 0 written there is the true state rather than a race with the start.
-        return known && (playing || status == .paused)
+        // settled too, because the 0 written there is the true state rather than a race with the start
+        // — but only once this start has been seen playing or on its way at least once.
+        return known && (playing || (status == .paused && !awaitingFirstPlayback))
     }
 
     /// A boundary that could not be taken, always with a reason (v1.9.9): the one thing this side may
