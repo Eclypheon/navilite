@@ -519,4 +519,11 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The download figure no longer goes backwards while it is working, and the phone now walks a playlist once at a time instead of several passes cancelling each other.',
       ],
     },
+    {
+      version: '2.0-beta.7',
+      date: '2026-10-18',
+      items: [
+        'Downloads finish again: a resumed transfer\'s bytes are no longer thrown away, and the download button now says why a track failed.',
+      ],
+    },
   ];

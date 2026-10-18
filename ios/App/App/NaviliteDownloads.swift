@@ -128,7 +128,8 @@ public class NaviliteDownloads: CAPPlugin, CAPBridgedPlugin {
      * A `200` answers with the file's own `Content-Length`. A `206` answers with the length of *that
      * range*, so comparing the finished file to it fails every correct resumed transfer for ever —
      * the file's total is the `Content-Range` total instead (`bytes 0-…/2097152`). `Content-Range:
-     * bytes 0-…/*`, a missing header, or a response that carried no length at all are honestly
+     * bytes 0-…/2097152`). A `Content-Range` whose byte range is a literal `*` (a star, then the
+     * total), a missing header, or a response that carried no length at all are honestly
      * unknowable, and `0` says exactly that: the completion path promotes on `0` and trusts the
      * file's own bytes rather than rejecting a correct file over a guessed one.
      */

@@ -344,3 +344,7 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - Downloads work again. In the last build every download stopped a few milliseconds after it started, so no song ever finished and the bytes it had already received were thrown away — that is why the count climbed, dropped back, and no playlist ever got past 0. Transfers now run to the end and keep what they have received.
 - The download figure no longer goes backwards while it is working, and the phone now walks a playlist once at a time instead of several passes cancelling each other.
+
+## 2.0-beta.7 — 2026-10-18
+
+- Downloads finish again: a resumed transfer's bytes are no longer thrown away, and the download button now says why a track failed.
