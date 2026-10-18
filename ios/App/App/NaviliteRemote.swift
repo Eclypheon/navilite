@@ -181,8 +181,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private var fetchWindow: (slot: String, songId: String)?
     /// How long a fetch here may take before it is reported as a boundary that could not be taken.
     private static let fetchDeadline = 12.0
-    /// How often a fetched slot is asked whether it can start yet.
-    private static let fetchStep = 0.1
+    /// How often a fetched slot is asked whether it can start yet (50ms for responsive background handoff).
+    private static let fetchStep = 0.05
 
     /* --------------------------------------------------- the lock-screen card (v1.9.10) */
 
@@ -200,6 +200,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
 
     private static let playSelector = NSSelectorFromString("play:")
     private static let preloadSelector = NSSelectorFromString("preload:")
+    private static let unloadSelector = NSSelectorFromString("unload:")
     private static let audioPluginName = "NativeAudio"
 
     @objc func attach(_ call: CAPPluginCall) {
@@ -254,6 +255,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             }
             self.targets.removeAll()
             self.removeEndObserver()
+            if let plugin = self.bridge?.plugin(withName: Self.audioPluginName) {
+                for slot in Self.windowSlots {
+                    self.unloadSlot(plugin: plugin, slot: slot)
+                }
+            }
             self.queue = []
             self.index = -1
             self.fetchWindow = nil
@@ -529,6 +535,21 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 return true
             }
             /*
+             * If the slot holds the item and is still buffering (v2.0-beta.11) — not failed and
+             * has not played to its end — wait for it to become ready rather than throwing away
+             * the preloaded bytes and forcing a full cold re-fetch over the network.
+             */
+            if let found = AudibleBridgePlayer.player(slot, from: bridge),
+               let item = found.player.currentItem,
+               found.player.currentItem === item,
+               item.status != .failed,
+               found.player.status != .failed,
+               !NaviliteSpectrum.hasEnded(item) {
+                reason = "\(how): \(entry.songId) is already buffering in \(slot), waiting for readiness"
+                awaitReady(slot: slot, entry: entry, target: target, how: how, waited: 0, token: token)
+                return true
+            }
+            /*
              * The slot the app named refused the play — reported, then the entry's own URL is
              * fetched here rather than the boundary being lost: the app's slot may have been
              * unloaded or never have held this track, and "the warm slot was wrong" is not a reason
@@ -660,6 +681,9 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     private func commit(target: Int, slot: String, entry: Entry, how: String) {
         index = target
         audible = (slot, entry.songId)
+        if fetchWindow?.slot == slot {
+            fetchWindow = nil
+        }
         advances += 1
         reason = "\(how) — the native player is playing \(entry.songId) (entry \(target + 1) of \(queue.count))"
         notifyListeners("advanced", data: ["songId": entry.songId, "assetId": slot, "index": target])
@@ -690,6 +714,28 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     }
 
     /**
+     * Unload a named slot from the audio plugin before re-using it (v2.0-beta.11).
+     *
+     * `NativeAudio` rejects `preload` calls if the assetId already exists in `audioList`.
+     * Explicitly unloading frees the previous track's AVPlayer and clears the entry from `audioList`.
+     */
+    private func unloadSlot(plugin: CAPPlugin, slot: String) {
+        guard plugin.responds(to: Self.unloadSelector), let method = plugin.method(for: Self.unloadSelector) else {
+            return
+        }
+        guard let call = CAPPluginCall(
+            callbackId: "navilite-native-unload",
+            methodName: "unload",
+            options: ["assetId": slot],
+            success: { _, _ in },
+            error: { _ in }
+        ) else { return }
+        typealias UnloadIMP = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+        let unload = unsafeBitCast(method, to: UnloadIMP.self)
+        unload(plugin, Self.unloadSelector, call)
+    }
+
+    /**
      * One entry into one of this side's own slots, **through the audio plugin's own `preload`**.
      *
      * The metadata goes with it so the lock screen names the track that is being fetched rather than
@@ -699,6 +745,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         guard plugin.responds(to: Self.preloadSelector), let method = plugin.method(for: Self.preloadSelector) else {
             return false
         }
+        unloadSlot(plugin: plugin, slot: slot)
         var metadata: [String: String] = ["title": entry.title, "artist": entry.artist, "album": entry.album]
         if let artworkUrl = entry.artworkUrl { metadata["artworkUrl"] = artworkUrl }
         let call: CAPPluginCall = CAPPluginCall(

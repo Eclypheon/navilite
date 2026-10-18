@@ -363,3 +363,7 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - Downloads run in-process directly within the app, resolving the system daemon's "cannot create file (-3000)" error on sideloaded and standalone installs.
 
+## 2.0-beta.11 — 2026-10-18
+
+- Autoadvance to the next track while in the background now transitions immediately, without the multi-second delay between songs.
+

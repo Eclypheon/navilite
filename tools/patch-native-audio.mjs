@@ -257,9 +257,30 @@ patch({
             for _ in 0..<channelCount {`,
 });
 
+/*
+ *   7. **iOS — skip seek when starting at zero on a preloaded player (v2.0-beta.11).**
+ *
+ *      `RemoteAudioAsset.play` unconditionally seeks to `max(time, 0)` even when `time == 0`.
+ *      On a preloaded player whose buffer is already primed at 0:00, seeking forces AVPlayer
+ *      to discard its pre-decoded buffer and perform an asynchronous seek round trip, causing
+ *      a noticeable audio hitch or delay at track boundaries when running in the background.
+ */
+patch({
+  file: SWIFT,
+  id: 'ios-play-zero-skip-seek',
+  anchor: `            let player = players[playIndex]
+            player.seek(to: CMTimeMakeWithSeconds(max(time, 0), preferredTimescale: 1))`,
+  replacement: `            let player = players[playIndex]
+            // <marker>: skip seek when already at 0:00 so preloaded buffers are not flushed.
+            if time > 0 || player.currentTime().seconds > 0.1 {
+                player.seek(to: CMTimeMakeWithSeconds(max(time, 0), preferredTimescale: 1))
+            }`,
+});
+
 for (const line of applied) console.log(`[navilite] ${line}`);
 if (failures.length > 0) {
   for (const line of failures) console.error(`[navilite] PATCH FAILED — ${line}`);
   process.exit(1);
 }
 console.log(`[navilite] native audio sources patched (${MARKER})`);
+
