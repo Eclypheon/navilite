@@ -585,4 +585,14 @@ export const CHANGELOG: ChangelogRelease[] = [
         'Correction to beta.12: that release said taps were handled by registered URL schemes. They are not, and never were — the schemes changed nothing about a tap, and the entry was wrong to say so.',
       ],
     },
+    {
+      version: '2.0-beta.15',
+      date: '2026-10-18',
+      items: [
+        'The audio session is taken back while the app is still away, not only when you come back to it: if the system drops it after a call or another app takes the sound, NaviLite re-claims it on the few-second check that already runs in the background, instead of waiting for you to bring the app up by its icon to become the app the Lock Screen and Dynamic Island card belong to. The row counts the losses it noticed and took back — one per rescue, not one per attempt.',
+        'The row under the settings gear now says which boundary it measured, and when: the away one is named "last away-boundary" and stamped with how long ago it was taken, and a second line times the boundary that happens while you are in the app — starting a track to its first sound — with its own age. An old reading can no longer be read as the current song\'s.',
+        'The player card no longer flickers to paused at the head of a new track: a paused status read in the same moment the play was issued is waited out instead of shown, until the player has once reported playing.',
+        'Tapping the card is unchanged by this build, and still iOS\'s decision: the pill in the Dynamic Island opens NaviLite once the phone is unlocked, the song name and artist on the Lock Screen card and the expanded player open it, and the cover art keeps the tap iOS gives it (full-screen artwork), which no app can redirect. Whether the session re-take above brings the tap back is something only the phone can answer.',
+      ],
+    },
   ];
