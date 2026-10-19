@@ -194,7 +194,7 @@ Plain language, user-visible changes only. The app shows this same list under
 ## 1.9.9 — 2026-10-13
 
 - The app no longer closes itself on the first song you tap. It was asking the phone's player to get a song ready in a state the player refuses, which took the app down the moment a song was tapped — and then again every time it opened, because it opened on the song that had been playing. Nothing is asked of the player now until it says it is ready for it.
-- A song that ends while the app is in your pocket always goes on to the next one, however many go by. The phone's player is given the whole queue to walk now, and when the next song is not already sitting in it, it fetches that song itself.
+- A song that ends while the app is in your pocket goes on to the next one. The phone's player is given the next two songs of the queue to walk by itself, and it asks for a song itself only when the next one is not one of those two — or when one of them will not play.
 - Next and previous no longer wait for a song that is being got ready in the background. Starting a song and preparing the following one were sharing one line, so a tap could sit behind a whole download and look like it had done nothing.
 - Previous does what it says now. More than three seconds into a song it restarts that song; inside the first three seconds it goes back a song. It used to restart the song and then play the previous one anyway, so going forward was the only thing that ever worked.
 - A song you are waiting for is never a smaller copy of the file on your server. The app was still asking for a lower-quality version for the next songs and then playing it, so on a slow connection the song you tapped was quietly the reduced one.

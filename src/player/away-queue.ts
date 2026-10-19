@@ -103,7 +103,12 @@ export type AwayDecision =
  * the entry this boundary needs?
  *
  * `failed` is the one reading the model cannot take for itself — on the device it is the attached
- * item's own `status == .failed`, which is a refusal and never a guess.
+ * item's own `status == .failed`, or `AVPlayerItemFailedToPlayToEndTime` arriving for it.
+ *
+ * **It is asked BEFORE ownership (v2.0-beta.17 rework).** Answering `queue` as soon as `owned` made the
+ * failure branch unreachable in exactly the state the device needs it: once the queue owns the sound
+ * the failure is what the phone is in when a 404 sits inside the queue, and a queue that stops on a
+ * dead item is silence, not an advance.
  */
 export function decideAwaySeam(input: {
   statement: AwayStatement;
@@ -116,20 +121,6 @@ export function decideAwaySeam(input: {
     return { kind: 'fetch', target, songId: '', why: 'the published order has no entry after the one playing' };
   }
   const entry = statement.list[target];
-  /*
-   * Once the queue owns the sound, the advance has already happened inside AVFoundation — the item
-   * after the one that ended is the player's own `currentItem` — so there is nothing for this side to
-   * issue and certainly nothing to fetch.
-   */
-  if (state.owned && state.cursor >= 0) return { kind: 'queue', songId: entry.songId, target };
-  if (state.attached[0] !== entry.songId) {
-    return {
-      kind: 'fetch',
-      songId: entry.songId,
-      target,
-      why: `the queue does not hold ${entry.songId}, so the boundary is being fetched here`,
-    };
-  }
   if (failed?.has(entry.songId)) {
     return {
       kind: 'fetch',
@@ -138,7 +129,45 @@ export function decideAwaySeam(input: {
       why: `the away queue's item for ${entry.songId} would not load, so it is being fetched again here`,
     };
   }
+  /*
+   * Once the queue owns the sound, the advance has already happened inside AVFoundation — the item
+   * after the one that ended is the player's own `currentItem`. That is only a boundary while the
+   * queue still HELD that entry: a drained queue (nothing attached after the one that ended, a top-up
+   * that added nothing, or repeat-all at the last entry where the wrapped entry was never attached)
+   * stops there, so it is a fetch here rather than a stop that says `playing`.
+   */
+  if (state.owned && state.cursor >= 0) {
+    if (state.attached.includes(entry.songId)) {
+      return { kind: 'queue', songId: entry.songId, target };
+    }
+    return {
+      kind: 'fetch',
+      songId: entry.songId,
+      target,
+      why: `the away queue had no item left for ${entry.songId} (it drained at the boundary), so it is being fetched here`,
+    };
+  }
+  if (state.attached[0] !== entry.songId) {
+    return {
+      kind: 'fetch',
+      songId: entry.songId,
+      target,
+      why: `the queue does not hold ${entry.songId}, so the boundary is being fetched here`,
+    };
+  }
   return { kind: 'queue', songId: entry.songId, target };
+}
+
+/**
+ * Whether the queue already holds an entry **ahead of the one sounding**, and therefore whether a
+ * look-ahead fetch for it would be a second decode of the same track (v2.0-beta.17 rework). While the
+ * app is away the two decodes compete for the same connection, and the one that wins is the one the
+ * boundary needs.
+ */
+export function queueHolds(state: AwaySeamState, songId: string): boolean {
+  const from = Math.max(state.cursor + 1, 0);
+  if (state.cursor < 0) return state.attached.includes(songId);
+  return state.attached.slice(from).includes(songId);
 }
 
 /**

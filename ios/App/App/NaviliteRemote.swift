@@ -210,6 +210,18 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// attached are everything after it. Attachment only appends, so the two cannot drift.
     private var awayEntries: [String] = []
     private var awayCursor = -1
+    /// The attached items, in `awayEntries` order — so a notification about one of them can be named as
+    /// an entry instead of being anonymous (v2.0-beta.17 rework).
+    private var awayItems: [AVPlayerItem] = []
+    /// Entries whose attached item refused to play. A boundary for one of these is fetched, never
+    /// played from the queue: a dead item inside an `AVQueuePlayer` is a stop, not an advance.
+    private var awayFailed: Set<String> = []
+    /// The observation of an attached item failing to play to its end — the notification
+    /// `AVQueuePlayer` does post when it stops on a dead item, and the only signal that seam has.
+    private var failureObserver: NSObjectProtocol?
+    /// What the queue had reached when the app came back: the entry, the index and the position, so a
+    /// return can resume where the queue was rather than at the app's own last clock reading.
+    private var awayResume: (songId: String, index: Int, positionMs: Int)?
     /// Whether the sound being heard comes from the queue rather than a plugin slot. Every reader of
     /// the audible state goes through `audiblePlayer()` so this one flag is the only difference.
     private var awayOwnsAudible = false
@@ -217,6 +229,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// preloaded plugin slot played) or `fetch` (this side loaded the entry itself). Nil falls back to
     /// what the timestamps say, which is what every build before this one reported.
     private var boundaryPath: String?
+    /// Whether this file itself issued the play for the boundary being recorded (finding 3): the
+    /// **first** away seam after leaving is still hand-walked — `awayStart` reads the queue's status and
+    /// issues `queuePlayer.play()` — so `path: "queue"` alone would overstate it. From the second away
+    /// boundary on, AVFoundation advances by itself and nothing here runs at the seam.
+    private var boundaryAppCode = false
     /// How long a fetch here may take before it is reported as a boundary that could not be taken.
     private static let fetchDeadline = 12.0
     /// How often a fetched slot is asked whether it can start yet (50ms for responsive background handoff).
@@ -529,10 +546,27 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
              * playing to an `AVQueuePlayer` that AVFoundation can advance by itself, so the boundary that
              * happens in his pocket needs no preload and no fetch. A statement that says `awake: true`
              * while the queue owns the sound means the app is back and its own player must take over —
-             * the queue stops rather than doubling the track that is about to start.
+             * the queue hands the sound over rather than doubling the track that is about to start.
              */
+            /*
+             * **A handover, not a teardown (finding 5).** This used to stop the sounding queue before the
+             * web layer had played anything: the music stopped, and the app's own start then had to
+             * reach the network — the audible hole at every return. The queue is paused instead (one
+             * player sounding), its items kept, and what it reached written down; and the app's stated
+             * index is compared against that, because a watch that never tracked the queue's advance
+             * comes back naming the track it left, which is the position jumping backwards.
+             */
+            if isAwake, let resumed = self.awayResume,
+               statedIndex != resumed.index || (statedIndex >= 0 && statedIndex < self.queue.count && self.queue[statedIndex].songId != resumed.songId) {
+                self.record("queue-handover-jump", [
+                    "queueSongId": resumed.songId, "queueIndex": resumed.index, "queuePositionMs": resumed.positionMs,
+                    "statedIndex": statedIndex,
+                    "statedSongId": (statedIndex >= 0 && statedIndex < self.queue.count) ? self.queue[statedIndex].songId : "",
+                    "why": "the app stated a different entry from the one the away queue had reached, so its own play resumes there rather than where the queue was"
+                ])
+            }
             if self.awake, self.awayOwnsAudible {
-                self.stopAwayQueue(why: "the app came back and stated the queue, so its own player owns the sound again")
+                self.handOverAwayQueue(why: "the app came back and stated the queue, so its own player takes the sound from the position the queue reached")
             }
             self.armAwayQueue(token: self.generation)
             /*
@@ -599,6 +633,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 "failures": self.failures,
                 "ignored": self.ignored,
                 "awake": self.awake,
+                /*
+                 * What the away queue had reached when the app came back (finding 5): the entry, the
+                 * index and the position, so the app's own play can resume where the queue was instead
+                 * of where its last clock reading stood. Empty once the app's player has taken over.
+                 */
+                "resume": self.awayResume.map { ["songId": $0.songId, "index": $0.index, "positionMs": $0.positionMs] } ?? [:],
                 "reason": self.reason,
                 "cardRepairs": self.cardRepairs,
                 "sessionRetakes": self.sessionRetakes,
@@ -746,12 +786,78 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         ) { [weak self] notification in
             self?.itemDidEnd(notification)
         }
+        /*
+         * **The other end of an item: one that will not play at all (v2.0-beta.17 rework).**
+         * `AVQueuePlayer` stops at a 404/invalid item inside its queue and posts nothing else — no
+         * end-of-item notification, no `commitQueue`, no fetch, no card change — so before this
+         * observer a dead entry was indistinguishable from silence while the card still said playing.
+         * Object `nil` for the same reason as the end observer: the item is checked when it fires.
+         */
+        failureObserver = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.AVPlayerItemFailedToPlayToEndTime,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.awayItemDidFail(notification)
+        }
     }
 
     private func removeEndObserver() {
         guard let endObserver else { return }
         NotificationCenter.default.removeObserver(endObserver)
         self.endObserver = nil
+        if let failureObserver {
+            NotificationCenter.default.removeObserver(failureObserver)
+            self.failureObserver = nil
+        }
+    }
+
+    /// An item could not be played to its end. When it is one the away queue holds, the boundary for it
+    /// is taken by the **fetch** path, with the player's own reason in the log and on the card.
+    ///
+    /// This is finding 1 of the rework: the only status read on the queue path was `awayStart`'s, which
+    /// runs once at the first seam, so a track that resolved and then died (a 404 that lands after
+    /// `play()` was issued) was never noticed by anything — and a queue that stops inside its own items
+    /// never emits the end-of-item notification that would have advanced it.
+    private func awayItemDidFail(_ notification: Notification) {
+        guard let item = notification.object as? AVPlayerItem else { return }
+        let why = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
+            ?? item.error?.localizedDescription
+            ?? "no reason given by the player"
+        guard let at = awayItems.firstIndex(where: { $0 === item }) else {
+            // Not an item this side attached: the app's own slot, or one already taken out.
+            record("away-item-failed-unattached", ["awake": awake, "why": why])
+            return
+        }
+        let songId = at < awayEntries.count ? awayEntries[at] : ""
+        // The item that should be sounding now, or the first one the seam was going to start from.
+        let sounding = awayOwnsAudible ? at <= awayCursor + 1 : at == 0
+        awayFailed.insert(songId)
+        record("away-item-failed", [
+            "songId": songId, "at": at, "cursor": awayCursor, "owned": awayOwnsAudible,
+            "sounding": sounding, "awake": awake, "why": why
+        ])
+        // It comes out of the queue, so the queue cannot stop on it a second time.
+        awayQueue?.remove(item)
+        awayItems.remove(at: at)
+        if at < awayEntries.count { awayEntries.remove(at: at) }
+        if awayCursor >= at { awayCursor = max(awayCursor - 1, -1) }
+        guard sounding, !awake else { return }
+        /*
+         * The entry that should be sounding is the one that died: this boundary belongs to the fetch
+         * path. The queue stops owning the sound first, so exactly one player issues the play, and the
+         * card is corrected before the fetch starts — the screen never says "playing" over a track
+         * that is not sounding.
+         */
+        awayOwnsAudible = false
+        awayCursor = -1
+        audible = nil
+        boundaryPath = nil
+        let target = queue.firstIndex(where: { $0.songId == songId }) ?? max(index + 1, 0)
+        reason = "the away queue's item for \(songId) failed to play (\(why)), so it is being fetched here"
+        boundaryWhyNotWarm = reason
+        notifyListeners("advanceFailed", data: ["reason": reason, "index": index])
+        take(entry: target, how: "the away queue's item failed to play", token: generation)
     }
 
     /// The audible item reached its end. Play the next entry, or say why not.
@@ -770,19 +876,55 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          * fetches), reported as exactly that.
          */
         if awayOwnsAudible, let queuePlayer = awayQueue {
+            /*
+             * The entry the queue has advanced to is read from the queue's own list and the ORDER — not
+             * `index + 1`, which refused the wrapped advance at the last entry and dead-ended the seam
+             * (finding 2 of the rework).
+             */
             let next = awayCursor + 1
-            if next < awayEntries.count, queuePlayer.currentItem != nil, index + 1 < queue.count {
+            let held = next < awayEntries.count ? awayEntries[next] : nil
+            let target = held.flatMap { songId in queue.firstIndex(where: { $0.songId == songId }) } ?? -1
+            let dead = held.map { awayFailed.contains($0) } ?? true
+            if held != nil, target >= 0, !dead, queuePlayer.currentItem != nil {
                 awayCursor = next
                 beginBoundary()
                 boundaryInFlight = true
                 boundaryPath = "queue"
-                commitQueue(entry: queue[index + 1], target: index + 1, how: "the track ended while the app was away")
+                commitQueue(entry: queue[target], target: target, how: "the track ended while the app was away")
                 return
             }
+            /*
+             * **A drained queue must not dead-end (finding 2).** This branch used to clear
+             * `awayOwnsAudible` and then fall into the plugin-slot guard below, where `audible` still
+             * named `navilite-away-queue` — a name no plugin player answers to — so every drained
+             * boundary was logged `end-ignored` and returned: no fetch, no advance, music stopped while
+             * the card said playing. Three routes reach it: repeat-all at the last entry, a top-up that
+             * added nothing, and any boundary before a top-up ran.
+             *
+             * The boundary now goes to the fetch path in the same turn, with the route in the log.
+             */
+            let route = held == nil
+                ? "the away queue had no entry attached after the one that ended"
+                : dead
+                    ? "the away queue's item for \(held ?? "that entry") had already failed"
+                    : "the next entry the queue held is no longer in the published order"
+            record("queue-drained", [
+                "attached": awayEntries.count, "cursor": awayCursor, "held": held ?? "none",
+                "target": target, "dead": dead, "why": "\(route), so this boundary goes to the fetch path"
+            ])
+            queuePlayer.pause()
             awayOwnsAudible = false
+            awayCursor = -1
+            awayEntries = []
+            awayItems = []
+            // The queue's sound was published under a name no plugin player answers to; it is gone now.
+            audible = nil
             boundaryPath = nil
-            record("queue-drained", ["attached": awayEntries.count, "cursor": awayCursor,
-                                     "why": "the away queue had no entry attached after the one that ended, so this boundary goes to the fetch path"])
+            boundaryWhyNotWarm = "\(route), so this boundary is fetched here"
+            beginBoundary()
+            boundaryInFlight = true
+            takeNext(how: "the away queue drained at the boundary", automatic: true, token: generation)
+            return
         }
         guard let recorded = audible, let found = AudibleBridgePlayer.player(recorded.assetId, from: bridge), found.player.currentItem === item else {
             ignored += 1
@@ -1109,6 +1251,17 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         // The boundary's own line in the persisted log (v2.0-beta.16), written **before** the
         // look-ahead is re-armed: `preloadAhead` replaces the record this one is about.
         recordBoundary(outcome: "taken")
+        /*
+         * The app's own player is now sounding this entry on screen, so the queue's paused items are
+         * dropped and the handover reading is spent (finding 5). While the app is away the queue must
+         * stay armed — it is the thing that takes the next boundary — so this is gated on `awake`.
+         */
+        if awake {
+            awayResume = nil
+            if awayQueue != nil, !awayItems.isEmpty {
+                stopAwayQueue(why: "the app's own player is sounding this entry on screen, so the queue's items are dropped")
+            }
+        }
         preloadAhead(token: generation)
     }
 
@@ -1164,6 +1317,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             guard queuePlayer.canInsert(item, after: nil) else { continue }
             queuePlayer.insert(item, after: nil)
             awayEntries.append(entry.songId)
+            awayItems.append(item)
         }
         if !awayEntries.isEmpty {
             record("queue-armed", [
@@ -1179,6 +1333,23 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// twice (repeat all) is still attached a second time.
     private func topUpAwayQueue(token: Int) {
         guard current(token: token), awayOwnsAudible, let queuePlayer = awayQueue else { return }
+        /*
+         * **Cancel by identity, in the owned state too (finding 4).** Only appending here left an entry
+         * the app had taken out of the order attached to a player that would still sound it later: the
+         * statement is the app's current order, so anything attached after the cursor that is no longer
+         * in `awayPlan()` is a cancellation and comes out of the queue. The item being heard is never
+         * touched — only what is attached after it.
+         */
+        let wanted = Set(awayPlan().map { $0.songId })
+        var removed = 0
+        for at in stride(from: awayEntries.count - 1, through: max(awayCursor + 1, 0), by: -1) {
+            guard at < awayEntries.count, at < awayItems.count else { continue }
+            guard !wanted.contains(awayEntries[at]) else { continue }
+            queuePlayer.remove(awayItems[at])
+            awayEntries.remove(at: at)
+            awayItems.remove(at: at)
+            removed += 1
+        }
         let from = min(max(awayCursor + 1, 0), awayEntries.count)
         let attached = Set(awayEntries[from...])
         var added = 0
@@ -1189,11 +1360,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             guard queuePlayer.canInsert(item, after: nil) else { continue }
             queuePlayer.insert(item, after: nil)
             awayEntries.append(entry.songId)
+            awayItems.append(item)
             added += 1
         }
-        if added > 0 {
-            record("queue-topup", ["added": added, "attached": awayEntries.count,
-                                   "why": "the queue was topped up so the next boundary is still an advance"])
+        if added > 0 || removed > 0 {
+            record("queue-topup", ["added": added, "removed": removed, "attached": awayEntries.count,
+                                   "why": "the queue was topped up (and any entry the app has cancelled was taken out) so the next boundary is still an advance"])
         }
     }
 
@@ -1210,11 +1382,20 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         guard let queuePlayer = awayQueue, awayCursor < 0,
               let first = awayEntries.first, first == entry.songId else { return false }
         guard let item = queuePlayer.currentItem else { return false }
-        if item.status == .failed || queuePlayer.status == .failed {
-            let why = item.error?.localizedDescription ?? queuePlayer.error?.localizedDescription ?? "no reason given by the player"
+        /*
+         * A dead item is a refusal, whether it reports it now or failed before it was current (finding
+         * 1: the status read alone missed a 404 that landed after `play()` was issued, because the
+         * notification for that arrives later and is handled in `awayItemDidFail`; `awayFailed` is how
+         * that earlier verdict survives to this seam).
+         */
+        if item.status == .failed || queuePlayer.status == .failed || awayFailed.contains(entry.songId) {
+            let why = awayFailed.contains(entry.songId)
+                ? "its item failed to play to its end"
+                : (item.error?.localizedDescription ?? queuePlayer.error?.localizedDescription ?? "no reason given by the player")
             record("queue-refused", ["songId": entry.songId, "slot": Self.awaySlotName, "why": why])
             queuePlayer.remove(item)
             awayEntries.removeFirst()
+            if !awayItems.isEmpty { awayItems.removeFirst() }
             reason = "\(how): the away queue's item for \(entry.songId) would not load (\(why)), so it is being fetched again here"
             boundaryWhyNotWarm = reason
             return false
@@ -1222,6 +1403,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         awayCursor = 0
         awayOwnsAudible = true
         boundaryPath = "queue"
+        // The first away seam is played from here, and the log says so (finding 3).
+        boundaryAppCode = true
         queuePlayer.play()
         commitQueue(entry: entry, target: target, how: how)
         return true
@@ -1252,9 +1435,41 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         awayOwnsAudible = false
         awayCursor = -1
         awayEntries = []
+        awayItems = []
         if owned {
             record("queue-stopped", ["why": why])
         }
+    }
+
+    /// Give the sound back to the app's own player **without tearing the queue down first** (finding 5).
+    ///
+    /// The return path used to `pause` + `removeAllItems` the sounding queue before the web layer had
+    /// played anything, so the music stopped and then waited for the app's own start to reach the
+    /// network — an audible hole at every return. This pauses (exactly one player is sounding), keeps
+    /// the items (a quick re-suspend is then instant), and writes down the entry, index and position the
+    /// queue had reached, so the app can resume *there* instead of where its own clock last stood.
+    private func handOverAwayQueue(why: String) {
+        guard let queuePlayer = awayQueue, awayOwnsAudible else { return }
+        let seconds = queuePlayer.currentTime().seconds
+        let positionMs = seconds.isFinite && seconds > 0 ? Int((seconds * 1000).rounded()) : 0
+        let songId = awayCursor >= 0 && awayCursor < awayEntries.count ? awayEntries[awayCursor] : (audible?.songId ?? "")
+        awayResume = (songId: songId, index: index, positionMs: positionMs)
+        queuePlayer.pause()
+        awayOwnsAudible = false
+        record("queue-handover", [
+            "songId": songId, "index": index, "positionMs": positionMs,
+            "attached": awayEntries.count,
+            "why": why
+        ])
+    }
+
+    /// Whether the away queue already holds an entry ahead of the one sounding — the fact the look-ahead
+    /// checks so it does not decode the same track a second time (finding 6).
+    private func awayHoldsEntry(_ songId: String) -> Bool {
+        guard awayQueue != nil else { return false }
+        let from = max(awayCursor + 1, 0)
+        guard from < awayEntries.count else { return false }
+        return awayEntries[from...].contains(songId)
     }
 
     /// The player actually making the sound: the away queue while it owns the audible item, else the
@@ -1280,6 +1495,17 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         }
         let entry = queue[target]
         loadArtwork(for: entry)
+        /*
+         * **One decode, not two (finding 6).** When the away queue already holds this entry, the
+         * boundary will be AVFoundation's own advance — so a fetch into a plugin slot here is a second
+         * decode of the same track, competing with the one that matters for the same connection. While
+         * the app is away the listener hears whichever loses as a slow boundary.
+         */
+        if awayHoldsEntry(entry.songId) {
+            record("ahead-skipped", ["songId": entry.songId, "attached": awayEntries.count,
+                                     "why": "the away queue already holds this entry, so the look-ahead does not decode it a second time"])
+            return
+        }
         /*
          * **"Something holds it" is not "it can start" (v2.0-beta.16).** The old early return treated
          * a slot's name as a promise. The look-ahead's own record is the honest test: if this side
@@ -1596,6 +1822,15 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             "queued": queue.count,
             "reason": reason
         ]
+        /*
+         * **Who was at the seam (finding 3).** `path: "queue"` means the queue took it; it does not mean
+         * no app code ran. The first away boundary is hand-walked (`awayStart` reads the status and
+         * issues the play), and only from the second one on is the advance AVFoundation's own — the log
+         * says which, per boundary, so the claim can be checked instead of believed.
+         */
+        facts["appCodeAtSeam"] = boundaryAppCode
+            ? "yes — the first away seam is played by this file after it checked the item"
+            : (boundaryPath == "queue" ? "no — AVFoundation advanced to its own next item" : "n/a — no queue boundary")
         if index >= 0, index < queue.count {
             facts["songId"] = queue[index].songId
             facts["title"] = queue[index].title
@@ -1631,6 +1866,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         boundaryWhyNotWarm = nil
         // Which route this boundary took is decided by the route, never inherited from the last one.
         boundaryPath = nil
+        boundaryAppCode = false
     }
 
     /// The last boundary, in milliseconds from its item end — the five numbers §6 asks for. `-1`
