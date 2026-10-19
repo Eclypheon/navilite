@@ -43,7 +43,7 @@
  * says so in one line and draws the album-art theme rather than animating a lie.
  */
 import { platformInfo, type OsName } from '../platform.ts';
-import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativePlaybackFacts, type NativeSpectrumFrame } from './native.ts';
+import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativeHandover, type NativePlaybackFacts, type NativeSpectrumFrame } from './native.ts';
 import { STOPPED_WORD, reduce } from './engine-contract.ts';
 import type { EngineOptions, EngineState, EngineStatus, PlaybackBackend, PlayerEvent, QueueStatement, TrackRequest, VisualiserTone, VisualiserWord } from './engine-contract.ts';
 import { askedRate, measuredDurationIsBelievable, spectrumChecksum, withDeadline } from './engine-helpers.ts';
@@ -613,6 +613,16 @@ export class AudioEngine {
   private nativeDurationMs = 0;
   /** True while the app is on screen — the only time the clock is allowed to extrapolate. */
   private foreground = true;
+  /**
+   * **The away queue's reading, waiting to be adopted (v2.0-beta.18).**
+   *
+   * The queue hands the sound back at a position of its own (it kept playing while the app was away,
+   * and the app's clock did not). That reading belongs to ONE entry: it is applied when that entry is
+   * started — `play` uses it as the start position instead of 0 — and the queue is released only after
+   * that start has committed, so the paused items stay the only thing that knows the position until
+   * the app's own player has taken it over.
+   */
+  private handover: NativeHandover | null = null;
   /** True while the clock ticker is running, so only one ever runs. */
   private clockTimer: ReturnType<typeof setInterval> | null = null;
   /**
@@ -1647,7 +1657,16 @@ export class AudioEngine {
 
   /* ------------------------------------------------------------------- transport */
 
-  async play(track: TrackRequest, startMs = 0): Promise<void> {
+  async play(track: TrackRequest, startMs = 0, force = false): Promise<void> {
+    /*
+     * **A handover reading applies to the entry it names, and to that entry only (v2.0-beta.18).**
+     * A fresh start of that track (a tap on it, the queue's own start after the return) begins where the
+     * queue was rather than at zero, which is the whole point of keeping the reading: the sound never
+     * went back to the beginning of the song, and the app's own clock was not the one that was running.
+     */
+    if (this.handover && this.handover.songId === track.id && startMs === 0) {
+      startMs = this.handover.positionMs;
+    }
     /*
      * The same track, **already playing**, is a second press on the same thing — not a second
      * playback. Nothing is reloaded, nothing is replayed and nothing is re-attached.
@@ -1660,7 +1679,12 @@ export class AudioEngine {
      * already running for that very track, so the play still goes through and the second press
      * changes nothing except that the row stops being drawn as waiting.
      */
-    if (this.track?.id === track.id && this.state === 'playing') {
+    /*
+     * `force` is the handover's own start (v2.0-beta.18): the engine may believe it is playing — an
+     * adoption said so a moment ago — while the queue has just been PAUSED by the handover, so the
+     * idempotence rule would swallow the one start that gives the sound back.
+     */
+    if (!force && this.track?.id === track.id && this.state === 'playing') {
       this.emit();
       return;
     }
@@ -1693,6 +1717,12 @@ export class AudioEngine {
         return;
       }
       await this.startNative(track, startMs, ready);
+      /*
+       * **And only now does the queue let go (v2.0-beta.18).** The app's own player has taken the entry
+       * at the adopted position; until this line the paused items were the only thing that knew where
+       * the track was. A failed start keeps the reading, so the next attempt still starts there.
+       */
+      if (!this.startFailed) await this.releaseHandover(track.id);
       return;
     }
     await this.startWeb(track, startMs);
@@ -1957,6 +1987,50 @@ export class AudioEngine {
     this.concludeStart('player');
     this.attachSpectrum(track);
     this.emit();
+  }
+
+  /**
+   * **Adopt the position the away queue handed back (v2.0-beta.18).**
+   *
+   * Called on the return, after the boundary adoption above has moved the queue onto the entry the
+   * native player reached. The reading is taken from the plugin's own handover — the call that pauses
+   * the queue, so from this moment exactly one player is sounding — and it is spent in two halves:
+   *
+   *  - the entry is the one the app is about to play: `play(track, positionMs, force)` starts it there
+   *    (forced, because an adoption a moment ago said "playing" about a track the handover just
+   *    paused), and the queue is released from `play`'s tail once that start has committed;
+   *  - it is not (yet): the reading is kept, and the next start of that entry uses it as its position.
+   *
+   * Nothing is started for an entry the app has no track for: a reading about a track the queue
+   * reached is not an instruction to play it.
+   */
+  async adoptHandover(): Promise<void> {
+    if (this.backend !== 'native') return;
+    const bridge = this.native ?? (await this.ensureNative());
+    const reading = (await bridge?.handover?.()) ?? null;
+    if (!reading || !reading.songId) return;
+    const positionMs = Math.max(0, Math.round(reading.positionMs));
+    this.handover = { songId: reading.songId, index: reading.index, positionMs };
+    const track = this.track;
+    if (!track || track.id !== reading.songId) {
+      this.modeReason = `the away queue reached ${reading.songId} at ${Math.round(positionMs / 1000)}s — that entry is started from there when it is played`;
+      return;
+    }
+    this.modeReason = `the away queue handed the sound back ${Math.round(positionMs / 1000)}s into ${reading.songId}, so the app's own player starts there`;
+    await this.play(track, positionMs, true);
+  }
+
+  /**
+   * **The app's own player has taken the entry the queue handed back (v2.0-beta.18)** — so the queue
+   * stops holding a reading about items it no longer sounds.
+   *
+   * Keyed on the entry, because a reading is only ever spent by a start of the track it names: a start
+   * of any other track must not release it.
+   */
+  private async releaseHandover(songId: string): Promise<void> {
+    if (this.handover?.songId !== songId) return;
+    this.handover = null;
+    await this.native?.releaseHandover?.();
   }
 
   async toggle(): Promise<void> {
@@ -2254,6 +2328,18 @@ export class AudioEngine {
       // published, which is the only thing that is right when that order is shuffled.
       await this.onAdvancedNatively?.(moved.songId, moved.index);
     }
+    /*
+     * **And the sound the queue was making comes back to the app, at the QUEUE's position
+     * (v2.0-beta.18).**
+     *
+     * `handOverAwayQueue` is a pause: the queue stopped on the item it was sounding and took the
+     * position down, so what the app has on this return is a paused player, a reading nothing had ever
+     * consumed, and its own clock standing at where it left. `adoptHandover` takes that reading, starts
+     * the app's own player at it (the entry the queue reached is the entry the queue just adopted
+     * above), and releases the queue only once that start has committed — see `play`'s tail and
+     * `releaseHandover`.
+     */
+    await this.adoptHandover();
     // And with the web layer running again, the boundary goes back to it (v1.9.8).
     await this.syncQueue();
     const stateBefore = this.state;

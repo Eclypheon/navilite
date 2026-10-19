@@ -125,6 +125,17 @@ interface NaviliteRemotePlugin {
     failures?: number;
     ignored?: number;
     awake?: boolean;
+    /**
+     * **What the away queue had reached when it handed the sound back (v2.0-beta.18)** — the entry it
+     * was sounding, its index in the published order, and the position in ms.
+     *
+     * The plugin has published this since the handover became a pause rather than a teardown, and
+     * nothing read it: the app's own player then started the entry from *its* last clock reading, so
+     * the queue's position was dropped on the floor at every return. It is the reading
+     * `NativeBridge.handover()` adopts, and it rides here as well so the row can say what was adopted.
+     * Empty (`{}`) once the app's own player has taken it.
+     */
+    resume?: { songId?: string; index?: number; positionMs?: number };
     reason?: string;
     /**
      * The last away boundary's five moments, in milliseconds from the item end (v2.0-beta.14): the
@@ -178,6 +189,14 @@ interface NaviliteRemotePlugin {
      */
     scene?: NativeSceneEvents;
   }>;
+  /**
+   * The away queue's reading, taken back with the sound (v2.0-beta.18): `NaviliteRemote.swift`'s
+   * `handover` pauses the queue on the item it was sounding and answers with the entry, its index and
+   * the position the app's own player is to start from; `releaseHandover` is the app saying that start
+   * has committed, so the paused items can go.
+   */
+  handover?(): Promise<{ songId?: string; index?: number; positionMs?: number }>;
+  releaseHandover?(): Promise<{ released?: boolean }>;
   /**
    * The persisted boundary log (v2.0-beta.16): every look-ahead and every boundary, one JSON object
    * per line, so the phone's own numbers can leave the phone instead of being read off a row.
@@ -466,6 +485,20 @@ export interface NativeBridge {
    */
   setQueue?(statement: NativeQueueStatement): Promise<boolean>;
   /**
+   * **What the away queue reached, taken back with the sound (v2.0-beta.18).**
+   *
+   * The one call that performs the handover natively: the queue pauses on the item it was sounding
+   * (so exactly one player is sounding from this moment) and answers with the entry, its index and its
+   * position. The app's own player is then started at that position, and `releaseHandover` is what lets
+   * the paused items go — after the commit, never before.
+   */
+  handover?(): Promise<NativeHandover>;
+  /**
+   * **The app's own player has started that entry** (v2.0-beta.18) — so the queue stops holding a
+   * reading about items that are no longer the sound. Called only after the start has committed.
+   */
+  releaseHandover?(): Promise<boolean>;
+  /**
    * Ask the native side which entry it is playing now, and adopt its answer (v1.9.8, by index since
    * v1.9.9).
    *
@@ -475,7 +508,7 @@ export interface NativeBridge {
    * as well as the track — an index is what a shuffled play order needs, and the id lookup it used
    * to do was the hole once shuffle was on.
    */
-  reconcile?(): Promise<{ changed: boolean; songId: string | null; index: number } | null>;
+  reconcile?(): Promise<{ changed: boolean; songId: string | null; index: number; resume?: NativeHandover | null } | null>;
   /** What the native boundary has done, as numbers and a sentence — for the reason line (v1.9.8). */
   nativeAdvance?(): {
     armed: number;
@@ -580,6 +613,18 @@ export interface NativeBridge {
  * sitting at its end from an item that had been paused in the middle: the two facts that separate
  * them (where it is, how long it is) were thrown away at the door.
  */
+/**
+ * The away queue's own reading at the moment it handed the sound back (v2.0-beta.18).
+ *
+ * One entry, one index and one position: the app's own player adopts them by starting *that* entry at
+ * *that* position, and only once the start has committed does the queue let go of its paused items.
+ */
+export interface NativeHandover {
+  songId: string;
+  index: number;
+  positionMs: number;
+}
+
 export interface NativePlaybackFacts {
   /** The item's own position, in seconds, as the plugin reported it. */
   currentTime?: number;
@@ -1386,6 +1431,21 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
      * slot, which is not a gap — it is the instruction to fetch that entry itself at the boundary,
      * and that is why the queue cannot run out.
      */
+    /**
+     * The plugin's handover reading, normalised (v2.0-beta.18): `{}` is "nothing to adopt", and a
+     * position that is not a number is a reading with no position rather than `NaN` in the clock.
+     */
+    const handoverOf = (raw: unknown): NativeHandover | null => {
+      if (!raw || typeof raw !== 'object') return null;
+      const record = raw as { songId?: unknown; index?: unknown; positionMs?: unknown };
+      const songId = typeof record.songId === 'string' ? record.songId : '';
+      if (!songId) return null;
+      const index = Number.isFinite(Number(record.index)) ? Number(record.index) : -1;
+      const asked = Number(record.positionMs);
+      const positionMs = Number.isFinite(asked) && asked > 0 ? Math.round(asked) : 0;
+      return { songId, index, positionMs };
+    };
+
     const stateQueue = async (): Promise<boolean> => {
       if (!remote?.setQueue) {
         boundaryArmed = false;
@@ -1754,6 +1814,16 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         };
         return stateQueue();
       },
+      async handover() {
+        if (!remote?.handover) return { songId: '', index: -1, positionMs: 0 };
+        const answer = await bounded(remote.handover(), null, 'handover');
+        return handoverOf(answer) ?? { songId: '', index: -1, positionMs: 0 };
+      },
+      async releaseHandover() {
+        if (!remote?.releaseHandover) return false;
+        const answer = await bounded(remote.releaseHandover(), null, 'releaseHandover');
+        return answer?.released === true;
+      },
       async reconcile() {
         if (!remote?.now) return null;
         const state = await bounded(remote.now(), null, 'reconcile');
@@ -1798,7 +1868,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          * to come out of the slot the app expected.
          */
         const movedIndex = nativeIndex >= 0 && nativeIndex !== statement.index;
-        if (slot === null || (slot === audibleId && !movedIndex)) return { changed: false, songId: state.songId ?? null, index: nativeIndex };
+        if (slot === null || (slot === audibleId && !movedIndex)) {
+          return { changed: false, songId: state.songId ?? null, index: nativeIndex, resume: handoverOf(state.resume) };
+        }
         /*
          * The native player is on another entry than the app believed. That is a track the app
          * advanced to without being told, and the answer is to move onto it — never to play anything:
@@ -1811,7 +1883,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         audibleSongId = typeof state.songId === 'string' && state.songId ? state.songId : null;
         // The load that moves the app onto this entry is an adoption, not a new clock (v2.0-beta.15).
         adoptingNextLoad = true;
-        return { changed: true, songId: audibleSongId, index: nativeIndex };
+        return { changed: true, songId: audibleSongId, index: nativeIndex, resume: handoverOf(state.resume) };
       },
       nativeAdvance() {
         return {
