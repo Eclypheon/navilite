@@ -605,4 +605,13 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The player row and that log also say which app id the phone is playing as, whether it is the id this build was signed for, and whether the phone has asked the app to come back to the front since it started. Those are the facts that decide a tap on the Now Playing card that opens nothing — they are reported, not assumed, and this build makes no claim that the tap now works.',
       ],
     },
+    {
+      version: '2.0-beta.17',
+      date: '2026-10-20',
+      items: [
+        'Songs that change while the app is off screen now come from the player the phone already has running: the next two tracks sit in it, and a change to one of those two does not open a stream at all.',
+        'Coming back to the app picks up at the position the phone reached, not at the point where you left it.',
+        'The boundary log now says whether a song change came from the queue the phone already had or from a stream it had to open.',
+      ],
+    },
   ];

@@ -401,3 +401,9 @@ Plain language, user-visible changes only. The app shows this same list under
 - The player row says how many seconds of audio the song change had to work with, what was loaded ahead for the next one, and — when it did not start from the track that was meant to be ready — which one refused and why. "Warm" on that row used to be possible for a change with no audio at all behind it.
 - Every song change made while the app is in your pocket is written to a log on the phone, and Settings now has Copy boundary log: what was loaded ahead, how many seconds of audio it held, how long each step took, and why a change did not start from the ready track. If this build still has a gap, that log says where the seconds went instead of costing another round of guessing. Copying it and sending it on is the one thing this build cannot do for you.
 - The player row and that log also say which app id the phone is playing as, whether it is the id this build was signed for, and whether the phone has asked the app to come back to the front since it started. Those are the facts that decide a tap on the Now Playing card that opens nothing — they are reported, not assumed, and this build makes no claim that the tap now works.
+
+## 2.0-beta.17 — 2026-10-20
+
+- Songs that change while the app is off screen now come from the player the phone already has running: the next two tracks sit in it, and a change to one of those two does not open a stream at all.
+- Coming back to the app picks up at the position the phone reached, not at the point where you left it.
+- The boundary log now says whether a song change came from the queue the phone already had or from a stream it had to open.
