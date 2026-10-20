@@ -664,6 +664,7 @@ export class AudioEngine {
   private nativeDurationMs = 0;
   /** True while the app is on screen — the only time the clock is allowed to extrapolate. */
   private foreground = true;
+  private visibilityInFlight: Promise<void> | null = null;
   /**
    * **The away queue's reading, waiting to be adopted (v2.0-beta.18).**
    *
@@ -2528,164 +2529,177 @@ export class AudioEngine {
    * cannot have been receiving frames while the web view was suspended.
    */
   async handleVisibility(hidden: boolean): Promise<void> {
-    this.dispatch({ type: 'lifecycle', phase: hidden ? 'hidden' : 'foreground' });
-    if (!this.track) {
-      this.foreground = !hidden;
-      return;
+    if (this.visibilityInFlight) {
+      await this.visibilityInFlight;
+      if (hidden === !this.foreground) return;
     }
-    if (this.backend !== 'native') {
-      // A browser: nothing carries the audio but the element, and iOS suspends it. Re-resume the
-      // audio context on the way in; that is all that helps.
-      this.foreground = !hidden;
-      if (!hidden && this.state === 'playing') await this.resumeContext();
-      return;
-    }
-    if (hidden) {
-      this.foreground = false;
-      this.wasPlayingBeforeHide = this.state === 'playing';
+    if (hidden === !this.foreground) return;
+    const task = (async () => {
+      this.dispatch({ type: 'lifecycle', phase: hidden ? 'hidden' : 'foreground' });
+      if (!this.track) {
+        this.foreground = !hidden;
+        return;
+      }
+      if (this.backend !== 'native') {
+        // A browser: nothing carries the audio but the element, and iOS suspends it. Re-resume the
+        // audio context on the way in; that is all that helps.
+        this.foreground = !hidden;
+        if (!hidden && this.state === 'playing') await this.resumeContext();
+        return;
+      }
+      if (hidden) {
+        this.foreground = false;
+        this.wasPlayingBeforeHide = this.state === 'playing';
+        /*
+         * A start that was still waiting for the player's word ends here (v1.9.2) — but not as a
+         * failure. Off screen the reports stop arriving, so the wait could only ever end in a timeout
+         * the listener would be told about on the way back for a track that may be playing perfectly;
+         * the return path reads the player itself (`sync`) and settles it from the truth.
+         */
+        this.concludeStart('background');
+        // The player keeps playing and keeps reporting *to nobody* — the web view is suspended and
+        // no callback arrives. So the clock stops counting here rather than at an unknown later
+        // moment; what it shows is the last position the player was known to be at.
+        this.stopClockTick();
+        /*
+         * **And this is the moment the boundary changes hands (v1.9.8).** The web layer is about to
+         * stop running, so the native player is handed the queue — with `awake: false` — and it is
+         * henceforth the owner of every track end until the app is on screen again. The statement is
+         * re-made rather than assumed, and it is the same call in both directions, so there is no flag
+         * that could stick.
+         */
+        await this.syncQueue();
+        return;
+      }
+      this.foreground = true;
       /*
-       * A start that was still waiting for the player's word ends here (v1.9.2) — but not as a
-       * failure. Off screen the reports stop arriving, so the wait could only ever end in a timeout
-       * the listener would be told about on the way back for a track that may be playing perfectly;
-       * the return path reads the player itself (`sync`) and settles it from the truth.
+       * **The app comes back to a player that may have moved on without it.** Nothing in the web
+       * layer heard the track end, so before anything is read from the player the native side is
+       * asked which slot it is playing now, and its answer is adopted: the queue moves onto that
+       * track (it is already sounding — nothing is started, nothing is re-fetched) and everything
+       * else below reads the player that is actually playing. This is the return half of the native
+       * boundary, and the reason a track that advanced while the app was away is never lost.
        */
-      this.concludeStart('background');
-      // The player keeps playing and keeps reporting *to nobody* — the web view is suspended and
-      // no callback arrives. So the clock stops counting here rather than at an unknown later
-      // moment; what it shows is the last position the player was known to be at.
-      this.stopClockTick();
+      /* **This return's own start count (unreleased).** Everything below is one return, and a start
+       * issued from here on is that return's start — the fact the `return` record carries. */
+      const startsBefore = this.startsIssued;
+      const t0 = this.clockNow();
+      const moved = await this.native?.reconcile?.();
+      const measuredAt = moved?.measuredAt ?? t0;
+      if (moved?.changed && moved.songId) {
+        this.modeReason = `the native player moved to another track while the app was away (${moved.songId}) — the app is adopting the track that is already playing`;
+        // The index travels with the track (v1.9.9): the queue adopts by position in the order it
+        // published, which is the only thing that is right when that order is shuffled.
+        await this.onAdvancedNatively?.(moved.songId, moved.index, moved.reading?.positionMs, measuredAt);
+      }
       /*
-       * **And this is the moment the boundary changes hands (v1.9.8).** The web layer is about to
-       * stop running, so the native player is handed the queue — with `awake: false` — and it is
-       * henceforth the owner of every track end until the app is on screen again. The statement is
-       * re-made rather than assumed, and it is the same call in both directions, so there is no flag
-       * that could stick.
+       * **The return is an ADOPTION when the player already holds the entry the queue is on
+       * (unreleased).**
+       *
+       * `reconcile` above has already asked the player what it is sounding, and the answer carries the
+       * route that owns the sound as well as the entry. Three facts decide this, in this order, and not
+       * one of them is a flag:
+       *
+       *   - the entry it names is the entry the queue's cursor is on (`this.track.id`);
+       *   - the owner is the app's own player — `plugin` or `fetch` — never the away queue, which is a
+       *     player of its own: it can only give the sound back by the app starting that entry over;
+       *   - something is sounding at all. An empty `songId` is "nothing this side can name", which is
+       *     the handover's business, not the adoption's.
+       *
+       * When all three hold, the return is a **pure read**: position, duration, playing state, the
+       * clock, the spectrum. Nothing is loaded, started, paused or seeked, so `loading` is not merely
+       * avoided on this path — neither door that dispatches `select` is on it (`play` and
+       * `retryPlayInPlace`), so there is nothing that could reach it. This is the owner's ordinary
+       * return: he leaves the app while a track is playing and comes back to it, and it must be
+       * invisible to the music.
+       *
+       * **And it states the queue on the way out (unreleased).** `syncQueue` is not a write to the
+       * player: it is the statement of the queue to the native boundary, and `awake: this.foreground`
+       * inside it is the *only* thing that ever tells the phone the app is back on screen
+       * (`NaviliteRemote.setQueue` is the sole writer of `awake`). Returning from a read without that
+       * statement left the native side believing the app was still away while the owner was looking at
+       * it: Swift's `itemDidEnd` then took the next track end itself *and* the foreground web layer
+       * took it, which is heard as a skip or a double start at the first seam after a return, and the
+       * card watchdog went on rewriting the Now Playing card over a screen it does not own.
        */
+      const held = moved?.reading ?? null;
+      /*
+       * **Which player holds the sound at this instant (unreleased, `t_05775526`).**
+       *
+       * `reconcile` has already asked the phone which player is sounding, on which entry, and by which
+       * route. `path: 'queue'` on the entry that is on screen is the owner's scenario: the away queue is
+       * making the sound and the app's own player holds the same entry, loaded and silent. It is a
+       * **flag for this return only** — the take below is still attempted, because a return that ends
+       * with the app's own player sounding the track at the queue's position is the outcome the owner
+       * remembers as instant, with the spectrum alive. What the flag decides is the *tail*: if that take
+       * does not commit, the queue is still the sound, and the row must be the queue's (playing,
+       * ticking, controllable) instead of the silent player's (a play icon over audible music).
+       */
+      const queueHoldsSound = held?.path === 'queue' && !!held.songId && held.songId === this.track?.id;
+      /*
+       * **And whether it is still sounding at all (unreleased, `t_05775526`).** A queue the owner paused
+       * himself is the same player and the same reading, but nothing is coming out of it — so the row is
+       * `paused` and no reading is rendered over it. Only a queue that is *sounding* owns the row.
+       */
+      const queueSounding = queueHoldsSound && held?.sounding !== false;
+      const shouldAdopt = this.returnIsAdoption(held) || (moved?.changed && queueHoldsSound);
+      if (shouldAdopt) {
+        this.claimSound(held?.path === 'queue' ? 'queue' : 'app', held?.songId ?? '');
+        this.returnPath = 'adopt';
+        this.returnAdoptions += 1;
+        this.modeReason = `the return adopted ${this.track?.id ?? 'the visible entry'} — the player is already sounding it at ${Math.round((held?.positionMs ?? 0) / 1000)} s (${held?.path ?? 'plugin'}), so nothing was loaded, started, paused or seeked`;
+        await this.readReturn('adopt', queueSounding, held, measuredAt);
+        /*
+         * The boundary goes back to the web layer here exactly as it does on the handover below — the
+         * same statement, made in both directions, so no flag can stick (v1.9.8).
+         */
+        await this.syncQueue();
+        await this.recordReturn('adopt', held, startsBefore);
+        if (this.state === 'playing') this.verifySpectrum();
+        return;
+      }
+      this.returnPath = 'handover';
+      /*
+       * **The other half: the player does not hold the entry, so the sound comes back to the app.**
+       *
+       * `adoptHandover` takes the away queue's reading, starts the app's own player at it (the entry the
+       * queue reached is the entry the queue just adopted above), and releases the queue only once that
+       * start has committed — see `play`'s tail and `releaseHandover`. This branch runs only when the
+       * player is NOT already sounding the visible entry (a track that stopped, an entry `reconcile`
+       * moved to, nothing sounding), because a start over a player that already holds the sound is the
+       * restart this release takes off the screen.
+       */
+      await this.adoptHandover();
+      /*
+       * **A take that did not commit leaves the queue the sound — so the queue owns the row
+       * (unreleased, `t_05775526`).**
+       *
+       * This is the branch the owner is looking at. The offer is refused (`handover-refused` names the
+       * entry the queue is sounding), the app's own start never reaches the speakers, and the app's
+       * player stays loaded and silent at the queue's position: right track, right second, and a play
+       * icon. `releaseHandover` is the only thing that moves ownership to the app's player, and it only
+       * runs when that start commits — so if it did not, the queue still holds the sound and it is the
+       * row's transport, its clock and its presses (`queueTransport`) that must follow it. The settle to
+       * `paused` below is then a lie about a track that is audibly playing.
+       */
+      if (queueSounding && this.soundOwner !== 'app' && held?.songId) {
+        this.claimSound(
+          'queue',
+          held.songId,
+          `the return could not take the sound: the away queue is still sounding ${held.songId} at ${Math.round((held.positionMs ?? 0) / 1000)} s, so the queue owns the row — playing, ticking from its reading, with the presses routed to it`,
+        );
+      }
+      // And with the web layer running again, the boundary goes back to it (v1.9.8).
       await this.syncQueue();
-      return;
+      await this.readReturn('handover', queueSounding, held);
+      await this.recordReturn('handover', held, startsBefore);
+    })();
+    this.visibilityInFlight = task;
+    try {
+      await task;
+    } finally {
+      this.visibilityInFlight = null;
     }
-    this.foreground = true;
-    /*
-     * **The app comes back to a player that may have moved on without it.** Nothing in the web
-     * layer heard the track end, so before anything is read from the player the native side is
-     * asked which slot it is playing now, and its answer is adopted: the queue moves onto that
-     * track (it is already sounding — nothing is started, nothing is re-fetched) and everything
-     * else below reads the player that is actually playing. This is the return half of the native
-     * boundary, and the reason a track that advanced while the app was away is never lost.
-     */
-    /* **This return's own start count (unreleased).** Everything below is one return, and a start
-     * issued from here on is that return's start — the fact the `return` record carries. */
-    const startsBefore = this.startsIssued;
-    const t0 = this.clockNow();
-    const moved = await this.native?.reconcile?.();
-    const measuredAt = moved?.measuredAt ?? t0;
-    if (moved?.changed && moved.songId) {
-      this.modeReason = `the native player moved to another track while the app was away (${moved.songId}) — the app is adopting the track that is already playing`;
-      // The index travels with the track (v1.9.9): the queue adopts by position in the order it
-      // published, which is the only thing that is right when that order is shuffled.
-      await this.onAdvancedNatively?.(moved.songId, moved.index, moved.reading?.positionMs, measuredAt);
-    }
-    /*
-     * **The return is an ADOPTION when the player already holds the entry the queue is on
-     * (unreleased).**
-     *
-     * `reconcile` above has already asked the player what it is sounding, and the answer carries the
-     * route that owns the sound as well as the entry. Three facts decide this, in this order, and not
-     * one of them is a flag:
-     *
-     *   - the entry it names is the entry the queue's cursor is on (`this.track.id`);
-     *   - the owner is the app's own player — `plugin` or `fetch` — never the away queue, which is a
-     *     player of its own: it can only give the sound back by the app starting that entry over;
-     *   - something is sounding at all. An empty `songId` is "nothing this side can name", which is
-     *     the handover's business, not the adoption's.
-     *
-     * When all three hold, the return is a **pure read**: position, duration, playing state, the
-     * clock, the spectrum. Nothing is loaded, started, paused or seeked, so `loading` is not merely
-     * avoided on this path — neither door that dispatches `select` is on it (`play` and
-     * `retryPlayInPlace`), so there is nothing that could reach it. This is the owner's ordinary
-     * return: he leaves the app while a track is playing and comes back to it, and it must be
-     * invisible to the music.
-     *
-     * **And it states the queue on the way out (unreleased).** `syncQueue` is not a write to the
-     * player: it is the statement of the queue to the native boundary, and `awake: this.foreground`
-     * inside it is the *only* thing that ever tells the phone the app is back on screen
-     * (`NaviliteRemote.setQueue` is the sole writer of `awake`). Returning from a read without that
-     * statement left the native side believing the app was still away while the owner was looking at
-     * it: Swift's `itemDidEnd` then took the next track end itself *and* the foreground web layer
-     * took it, which is heard as a skip or a double start at the first seam after a return, and the
-     * card watchdog went on rewriting the Now Playing card over a screen it does not own.
-     */
-    const held = moved?.reading ?? null;
-    /*
-     * **Which player holds the sound at this instant (unreleased, `t_05775526`).**
-     *
-     * `reconcile` has already asked the phone which player is sounding, on which entry, and by which
-     * route. `path: 'queue'` on the entry that is on screen is the owner's scenario: the away queue is
-     * making the sound and the app's own player holds the same entry, loaded and silent. It is a
-     * **flag for this return only** — the take below is still attempted, because a return that ends
-     * with the app's own player sounding the track at the queue's position is the outcome the owner
-     * remembers as instant, with the spectrum alive. What the flag decides is the *tail*: if that take
-     * does not commit, the queue is still the sound, and the row must be the queue's (playing,
-     * ticking, controllable) instead of the silent player's (a play icon over audible music).
-     */
-    const queueHoldsSound = held?.path === 'queue' && !!held.songId && held.songId === this.track?.id;
-    /*
-     * **And whether it is still sounding at all (unreleased, `t_05775526`).** A queue the owner paused
-     * himself is the same player and the same reading, but nothing is coming out of it — so the row is
-     * `paused` and no reading is rendered over it. Only a queue that is *sounding* owns the row.
-     */
-    const queueSounding = queueHoldsSound && held?.sounding !== false;
-    const shouldAdopt = this.returnIsAdoption(held) || (moved?.changed && queueHoldsSound);
-    if (shouldAdopt) {
-      this.claimSound(held?.path === 'queue' ? 'queue' : 'app', held?.songId ?? '');
-      this.returnPath = 'adopt';
-      this.returnAdoptions += 1;
-      this.modeReason = `the return adopted ${this.track?.id ?? 'the visible entry'} — the player is already sounding it at ${Math.round((held?.positionMs ?? 0) / 1000)} s (${held?.path ?? 'plugin'}), so nothing was loaded, started, paused or seeked`;
-      await this.readReturn('adopt', queueSounding, held, measuredAt);
-      /*
-       * The boundary goes back to the web layer here exactly as it does on the handover below — the
-       * same statement, made in both directions, so no flag can stick (v1.9.8).
-       */
-      await this.syncQueue();
-      await this.recordReturn('adopt', held, startsBefore);
-      if (this.state === 'playing') this.verifySpectrum();
-      return;
-    }
-    this.returnPath = 'handover';
-    /*
-     * **The other half: the player does not hold the entry, so the sound comes back to the app.**
-     *
-     * `adoptHandover` takes the away queue's reading, starts the app's own player at it (the entry the
-     * queue reached is the entry the queue just adopted above), and releases the queue only once that
-     * start has committed — see `play`'s tail and `releaseHandover`. This branch runs only when the
-     * player is NOT already sounding the visible entry (a track that stopped, an entry `reconcile`
-     * moved to, nothing sounding), because a start over a player that already holds the sound is the
-     * restart this release takes off the screen.
-     */
-    await this.adoptHandover();
-    /*
-     * **A take that did not commit leaves the queue the sound — so the queue owns the row
-     * (unreleased, `t_05775526`).**
-     *
-     * This is the branch the owner is looking at. The offer is refused (`handover-refused` names the
-     * entry the queue is sounding), the app's own start never reaches the speakers, and the app's
-     * player stays loaded and silent at the queue's position: right track, right second, and a play
-     * icon. `releaseHandover` is the only thing that moves ownership to the app's player, and it only
-     * runs when that start commits — so if it did not, the queue still holds the sound and it is the
-     * row's transport, its clock and its presses (`queueTransport`) that must follow it. The settle to
-     * `paused` below is then a lie about a track that is audibly playing.
-     */
-    if (queueSounding && this.soundOwner !== 'app' && held?.songId) {
-      this.claimSound(
-        'queue',
-        held.songId,
-        `the return could not take the sound: the away queue is still sounding ${held.songId} at ${Math.round((held.positionMs ?? 0) / 1000)} s, so the queue owns the row — playing, ticking from its reading, with the presses routed to it`,
-      );
-    }
-    // And with the web layer running again, the boundary goes back to it (v1.9.8).
-    await this.syncQueue();
-    await this.readReturn('handover', queueSounding, held);
-    await this.recordReturn('handover', held, startsBefore);
   }
 
   /**
