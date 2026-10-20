@@ -181,78 +181,6 @@ const ZERO_FRAMES_BEFORE_THEME = 18;
  * owner can see of a bar is its height, so 30 measurements a second is motion, not stepping.
  */
 const SNAPSHOT_POLL_MS = 33;
-/** The clock is reported while playing at this rate, so the display never sits still. */
-/**
- * How recently a player report has to have arrived for the clock tick to skip its own redraw (v1.9.7).
- *
- * The player reports its position roughly every 100 ms, and every one of those reports already
- * redraws the screen through `emit()`. The tick is there so the clock keeps moving when nothing else
- * is arriving — it is not a second repaint on top of reports that are. A tick that lands within this
- * window of the player's own word does nothing but the end-of-track check.
- */
-/**
- * How long the engine waits before asking again about a tap that is on the wrong item.
- *
- * v1.8.0 — much shorter than {@link SPECTRUM_RECHECK_MS}, because this is not a tap that is broken,
- * it is a track change: the tap has to be moved onto the item that is now playing, and the bars are
- * dark for exactly as long as that takes. One second is the backstop; the load's own install is the
- * path that gets it right on the first try.
- */
-/**
- * How often a tap that has stopped answering is allowed to be *checked* against the player.
- *
- * v1.7.2 armed the tap on the way in and then never looked at it again: if iOS tore the silent
- * `AVPlayer` down while the app was suspended, the tap stayed dead for the rest of the track and the
- * visualiser never came back on its own. That is the owner's *"it somehow automatically switches off
- * the spectrum like it's in native only mode"*. A consumer that goes quiet while the engine is
- * playing is now looked at again, no more than once every five seconds, and it is never simply left
- * off.
- *
- * v1.7.7 — what that look *is* matters, and it is why this is no longer a "restart". It is a verify:
- * one read of the plugin, which finds the audible item and, if that item already carries this tap,
- * writes nothing at all. It only installs when the item is genuinely a different one (the plugin
- * replaced it), which is not a mid-song reconfiguration of audio the listener is hearing.
- */
-const SPECTRUM_RECHECK_MS = 5000;
-/**
- * How close to the end of a track the tap may report "not playing" without being rebuilt.
- *
- * Kept from v1.7.5, when the tap read a *silent copy* of the stream that finished a beat before the
- * audible player did, so at the end of every track the tap reported `playing: false` while sound was
- * still coming out. v1.7.6 deleted that copy — the tap is on the audible item now, so the two cannot
- * disagree — but the guard stays: the last seconds of a track are still not a dead tap, and treating
- * them as one tore the tap down and emptied the bars to the theme for the last seconds of every song.
- */
-/**
- * How close to the item's own end the clock has to sit to count as *pinned* there (v1.9.5).
- *
- * Much narrower than {@link NATIVE_END_SLACK_MS}: this is not "the last second of a track", it is
- * "the clock has stopped moving because the player stopped playing", and the position it has
- * stopped at is the end of the item because `nativeClock` clamps there while `playing`.
- */
-/**
- * How long the clock has to sit pinned at the end, with no live frame, before the app calls the
- * track over by itself (v1.9.5).
- *
- * This is the last door onto the end of a track, and it exists because every other one is a
- * message from the plugin: the vendored player's own completion fires only on an exact
- * `currentTime == duration` (see the tap's own notes), and a message that is never sent cannot be
- * waited for. Two seconds of a clock that has stopped at the end of the item, while the tap is
- * producing nothing, is not a track that is playing.
- */
-const PINNED_END_HOLD_MS = 2000;
-/**
- * v1.9.24 — **the slow poll that stood here is deleted, with the budget that drove it.**
- *
- * `SPECTRUM_SLOW_POLL_MS` (5 s) was the second half of `MAX_SPECTRUM_RECHECKS`: once three re-checks
- * had failed, the reads slowed down and the chip said *native audio* for the rest of the track. The
- * counts it was spent on were real facts — a tap on the wrong item, a tap reporting a player that is
- * not playing — but spending them as a *capability* verdict is the defect this release removes, and
- * a read that drops to one every five seconds is also five seconds of dark bars after a tap that
- * recovers. Both states are now re-asked, on the player's own item, with the reads left where they
- * are (one at a time, at {@link SNAPSHOT_POLL_MS}) so a tap that comes back is drawn on the next
- * frame rather than up to five seconds later.
- */
 /**
  * How many tracks are warm on the player at once (v1.9.5): the previous song and the next two.
  *
@@ -353,14 +281,6 @@ export class AudioEngine {
    * whether or not the call ever comes back.
    */
   private reportsMutedUntil = 0;
-  /**
-   * When the player last reported anything — a position or a state (v1.9.7).
-   *
-   * The player reports its own position about every 100 ms while it plays, and each of those reports
-   * already redraws the screen. {@link startClockTick} reads this so its own tick does not do the
-   * same work again a fraction of a second later: the tick exists to keep the clock moving when
-   * nothing else is, not to repaint on top of the reports that are arriving anyway.
-   */
   /**
    * The generation of the load that is in flight, or `null` when no load is (v1.9.7).
    *
@@ -534,6 +454,16 @@ export class AudioEngine {
   private remoteDetach: (() => void) | null = null;
   private meterTimer: ReturnType<typeof setInterval> | null = null;
   private listeners = new Set<(status: EngineStatus) => void>();
+  /**
+   * Handles this engine was *given* rather than minted — the canvas' animation frame, the lifecycle
+   * listeners in `app.ts` — registered through {@link own} so that {@link dispose} gives them back.
+   * A handle the engine cannot reach is a handle it cannot end.
+   */
+  private readonly owned = new Set<() => void>();
+  /** The 300 ms resume confirmations in flight, each released by {@link dispose}. */
+  private readonly resumeWaits = new Set<() => void>();
+  /** Once true, `dispose()` has run: nothing here starts a timer again. */
+  private disposed = false;
 
   /**
    * v1.9.0 — whether the track that is playing has already been reported as *finished*.
@@ -736,22 +666,6 @@ export class AudioEngine {
   }
 
   /**
-   * The last door onto the end of a track: the app's own clock (v1.9.5).
-   *
-   * Every other way the queue hears that a track is over is a message from the plugin, and the
-   * vendored player's messages are one fragile event (an exact `currentTime == duration`) plus a
-   * state word it reserves for assets that are not being heard. When that event is missed there is
-   * nothing left to wait for — so this reads the two facts the app does have and reports the end
-   * itself: the machine says `playing`, the clock is pinned at the end of the item, and the tap is
-   * producing no live frame. The clock is pinned exactly because the player stopped reporting: it
-   * advances only while playing and clamps at the duration, so a player that has quietly stopped
-   * at the end of its item looks like this and nothing else.
-   *
-   * Held for {@link PINNED_END_HOLD_MS} before it fires, so a momentary report gap in the last
-   * quarter-second of a track is not a track ending. `reportEnded` is idempotent, so a real
-   * completion arriving during the hold changes nothing.
-   */
-  /**
    * The player has said there is sound — and this is the only place a start may be called started
    * (v1.9.2).
    *
@@ -840,11 +754,14 @@ export class AudioEngine {
 
   /**
    * Start the one poll. `immediate` is false at the one site that has just made the read itself —
-   * the return to the app (`handleVisibility(false)`) — because a return is *one* read: a second one
-   * 0 ms after it would be the same answer twice and a second bridge call the card counts.
+   * the return to the app (`handleVisibility(false)`) — because a return is *one* read.
+   *
+   * **Bound to visibility (unreleased, S3):** a poll is a bridge call per 33 ms and there is nothing
+   * to hear it off screen, so while `foreground` is false this starts nothing. The bars hold the
+   * last frame the poll wrote, which is what a return redraws from.
    */
   private startSnapshotPoll(immediate = true): void {
-    if (this.snapshotPoll !== null) return;
+    if (!this.foreground || this.snapshotPoll !== null) return;
     this.snapshotPoll = setInterval(() => void this.pollSnapshot(), SNAPSHOT_POLL_MS);
     if (immediate) void this.pollSnapshot();
   }
@@ -864,6 +781,8 @@ export class AudioEngine {
   private async pollSnapshot(): Promise<void> {
     const bridge = this.native;
     if (!bridge?.snapshot || this.backend !== 'native') return;
+    // A tick that was already in flight when the app went out of sight is not a read anybody sees.
+    if (!this.foreground) return;
     if (this.snapshotReadInFlight) return;
     this.snapshotReadInFlight = true;
     let snap = null;
@@ -885,7 +804,17 @@ export class AudioEngine {
       if (snap.durationMs > 0) this.nativeDurationMs = snap.durationMs;
     }
     const frame = snap.spectrum;
-    const dated = frame.attached && frame.itemKey !== '' && frame.itemKey === snap.entry.key;
+    /*
+     * **A frame is drawn only when this item's own tap produced it (unreleased).** `frames` is the
+     * item's own count — zero at the item's install, growing only while its analysis measures — and
+     * the tap publishes its key with **64 zeros** until then (`NaviliteSpectrum.snapshot`), so a key
+     * and `attached` alone are not enough: a fresh item would be drawn as a measured flat line before
+     * a single sample of it existed, and the arming window that exists for exactly that moment would
+     * never be entered. A silent item is a different fact: its counter moves, and its zeros are its
+     * own frame, drawn as the silence it is.
+     */
+    const dated =
+      frame.attached && frame.frames > 0 && frame.itemKey !== '' && frame.itemKey === snap.entry.key;
     if (dated) {
       const bands = frame.bands;
       if (!this.nativeBands || this.nativeBands.length !== bands.length) this.nativeBands = new Uint8Array(bands.length);
@@ -2010,7 +1939,7 @@ export class AudioEngine {
      */
     const generation = this.generation;
     // A resumed AVPlayer is not instantaneous; asking immediately would restart healthy tracks.
-    await new Promise((resolve) => setTimeout(resolve, RESUME_CONFIRM_MS));
+    await this.resumeConfirmWindow();
     // The user may have moved on inside that window — a different track, or a pause.
     if (generation !== this.generation || this.state !== 'playing' || this.track !== track) return;
     const truth = await bridge.sync();
@@ -2180,6 +2109,63 @@ export class AudioEngine {
   }
 
   /**
+   * The 300 ms a resumed player is given before it is read (`RESUME_CONFIRM_MS`).
+   *
+   * A timer with an owner (unreleased, S3): the confirmation that is waiting on it is in
+   * {@link resumeWaits}, and {@link dispose} releases every one of them, so a teardown mid-wait
+   * ends the confirmation rather than leaving a promise — and a timeout — behind.
+   */
+  private resumeConfirmWindow(): Promise<void> {
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const release = (): void => {
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+        this.resumeWaits.delete(release);
+        resolve();
+      };
+      timer = setTimeout(release, RESUME_CONFIRM_MS);
+      this.resumeWaits.add(release);
+    });
+  }
+
+  /**
+   * **Every handle this engine minted or was given, given back (unreleased, S3).**
+   *
+   * The design's §4 expiry table, in code: the snapshot poll, the web path's meter, the start's
+   * deadline, the resume confirmation's window, the lock-screen command disposer, every handle the
+   * app registered through {@link own} (the canvas' frame, the lifecycle listeners) and the Web
+   * Audio graph. Called from the app's one teardown, and from nothing else. Idempotent; a bridge
+   * answer that lands after it is dropped by the same token that drops any other stale event.
+   */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.generation += 1;
+    this.concludeStart('superseded');
+    this.seekInFlight = null;
+    this.seekTarget = null;
+    this.stopSnapshotPoll();
+    this.stopMeter();
+    for (const release of [...this.resumeWaits]) release();
+    this.remoteDetach?.();
+    this.remoteDetach = null;
+    for (const disposer of [...this.owned]) disposer();
+    this.owned.clear();
+    // The web path's graph is the last thing holding a thread: closing it also ends its listener.
+    void this.ctx?.close?.()?.catch(() => undefined);
+  }
+
+  /**
+   * Hand a handle to the engine so that {@link dispose} can end it — the returned function takes it
+   * back (a screen that stops listening to itself before the app does).
+   */
+  own(disposer: () => void): () => void {
+    this.owned.add(disposer);
+    return () => this.owned.delete(disposer);
+  }
+
+  /**
    * Entering and leaving the background, on a wrapped build.
    *
    * **Nothing here touches the audio.** It is the native engine's, and native playback is not
@@ -2193,6 +2179,9 @@ export class AudioEngine {
     this.dispatch({ type: 'lifecycle', phase: hidden ? 'hidden' : 'foreground' });
     if (!this.track) {
       this.foreground = !hidden;
+      // Nothing is playing, so nothing is polled — and an engine that is hidden stops a poll it
+      // somehow still had rather than trusting the state machine to have done it.
+      this.stopSnapshotPoll();
       return;
     }
     if (this.backend !== 'native') {
@@ -2594,17 +2583,6 @@ export class AudioEngine {
     this.modeReason = reason;
     this.emit();
   }
-
-  /**
-   * One retry for an install that did not take is **deleted** (v1.9.24).
-   *
-   * It was a `setTimeout` of {@link SPECTRUM_RECHECK_MS} per failed install, and it existed because
-   * the recheck budget in `pollSpectrum` only reached a tap that was *polling* while an orphaned tap
-   * was the one case that reported anything. The retry is the poll's now, on the plugin's own
-   * evidence: an item with no tap on it reads `itemIsCurrent: false`, the orphan branch of
-   * {@link pollSpectrum} sees it and re-verifies, rate-limited — which is the same ask, keyed to the
-   * item rather than to a timer, and it is the shape §24.6.2 of the diagnosis requires.
-   */
 
   /**
    * Line the tap up with the position the audible player reports.
