@@ -2610,13 +2610,45 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             positionMs = queuePositionMs(queuePlayer)
             path = "queue"
         } else if let audible, audible.assetId != Self.awaySlotName,
-                  let found = AudibleBridgePlayer.player(audible.assetId, from: bridge) {
+                  let found = AudibleBridgePlayer.player(audible.assetId, from: bridge),
+                  let item = found.player.currentItem {
+            /*
+             * **F3 (unreleased) — the item, not the app's statement of it.**
+             *
+             * This branch used to answer `audible.songId`: the app's own statement of which slot is
+             * audible, with only the player's *existence* checked and never its `currentItem`. A slot
+             * re-loaded with another stream, or one the platform had stopped, then still "named" the
+             * entry the app believed, the return decided the player was already sounding it, started
+             * nothing — and the owner was left with silence under a bar that said the track was there.
+             *
+             * The bar the queue branch is held to applies here too: the player's own item, named first
+             * by identity and then by the url it was built from.
+             *
+             *   - the item's url names an entry of the published order: that is the player's own fact,
+             *     and it is used whatever the transport is doing (a paused item is still *that* entry,
+             *     and adopting the pause is the rule — never resuming over a decision the listener made);
+             *   - otherwise the app's statement is kept only while the player is actually making sound
+             *     (a sounding player whose url did not match — a rung change, a re-encode — still holds
+             *     the track the app played);
+             *   - a player holding an item this side cannot name, that is not sounding, answers no
+             *     songId at all. "Nothing is sounding this side" is then the reading, which sends the
+             *     return down the handover and lets it end in a decision instead of in silence.
+             */
+            let itemUrl = (item.asset as? AVURLAsset)?.url.absoluteString ?? ""
+            let namedByUrl = itemUrl.isEmpty ? nil : queue.first(where: { $0.url == itemUrl })?.songId
+            let sounding = Self.isSounding(found.player)
+            songId = namedByUrl ?? (sounding ? audible.songId : "")
             let seconds = found.player.currentTime().seconds
-            songId = audible.songId
             positionMs = seconds.isFinite && seconds > 0 ? Int((seconds * 1000).rounded()) : 0
             path = fetchWindow?.songId == songId && !songId.isEmpty ? "fetch" : "plugin"
         } else {
-            songId = audible?.songId ?? ""
+            /*
+             * No player of ours, or none holding an item: a slot name is a statement, not a sound. The
+             * away slot is the one exception — the queue's own player is read above, and this is the
+             * queue holding an entry it is not currently making sound with, which the app adopts as a
+             * pause.
+             */
+            songId = audible?.assetId == Self.awaySlotName ? (audible?.songId ?? "") : ""
             positionMs = 0
             path = fetchWindow == nil ? "plugin" : "fetch"
         }

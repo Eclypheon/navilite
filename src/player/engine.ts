@@ -351,9 +351,12 @@ export class AudioEngine {
   /**
    * Starts issued through {@link play} since this engine was built.
    *
-   * The one number a return that adopted must leave alone: `play` is the only door that dispatches
-   * `engine-state: 'loading'`, so "the counter did not move" and "the state never became loading" are
-   * the same claim, and it is checkable on the phone as well as in the test.
+   * The one number a return that adopted must leave alone. Two doors dispatch `select`, and `select`
+   * is what draws `loading`: {@link play} (which moves this counter, past its own early returns) and
+   * {@link retryPlayInPlace} (which does not — it re-asks the player that already holds the item, and
+   * no new start is issued). So the counter is **one** door's count, not the state: a return that
+   * adopted is asserted on both, the counter here and the state never reaching `loading`, and neither
+   * claim may be stated as the other.
    */
   private startsIssued = 0;
   private nativeBands: Uint8Array | null = null;
@@ -930,6 +933,16 @@ export class AudioEngine {
    * {@link START_DEADLINE_MS} to run out. Resolved by {@link concludeStart} from anywhere.
    */
   private awaitStart(): Promise<'player' | 'background' | 'timeout' | 'superseded'> {
+    /*
+     * **A start that has already ended is not waited on a second time (unreleased).**
+     *
+     * `concludeStart` records the ending even when no caller is waiting yet — the app leaving the
+     * screen in the middle of a load is exactly that, and it is not a failure: the reports stop
+     * arriving and the return path reads the player. Without this line the start was waited on again
+     * afterwards, ran its whole deadline, and turned that harmless ending into `failure`/`error`
+     * fifteen seconds later, over a row that was only ever waiting for a read.
+     */
+    if (this.startOutcome !== null) return Promise.resolve(this.startOutcome);
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.startWait = null;
@@ -2391,9 +2404,19 @@ export class AudioEngine {
      *
      * When all three hold, the return is a **pure read**: position, duration, playing state, the
      * clock, the spectrum. Nothing is loaded, started, paused or seeked, so `loading` is not merely
-     * avoided on this path — it is unreachable, because `play` is the only door that dispatches it and
-     * `play` is not on this path. This is the owner's ordinary return: he leaves the app while a track
-     * is playing and comes back to it, and it must be invisible to the music.
+     * avoided on this path — neither door that dispatches `select` is on it (`play` and
+     * `retryPlayInPlace`), so there is nothing that could reach it. This is the owner's ordinary
+     * return: he leaves the app while a track is playing and comes back to it, and it must be
+     * invisible to the music.
+     *
+     * **And it states the queue on the way out (unreleased).** `syncQueue` is not a write to the
+     * player: it is the statement of the queue to the native boundary, and `awake: this.foreground`
+     * inside it is the *only* thing that ever tells the phone the app is back on screen
+     * (`NaviliteRemote.setQueue` is the sole writer of `awake`). Returning from a read without that
+     * statement left the native side believing the app was still away while the owner was looking at
+     * it: Swift's `itemDidEnd` then took the next track end itself *and* the foreground web layer
+     * took it, which is heard as a skip or a double start at the first seam after a return, and the
+     * card watchdog went on rewriting the Now Playing card over a screen it does not own.
      */
     const held = moved?.reading ?? null;
     if (this.returnIsAdoption(held)) {
@@ -2401,6 +2424,14 @@ export class AudioEngine {
       this.returnAdoptions += 1;
       this.modeReason = `the return adopted ${this.track?.id ?? 'the visible entry'} — the player is already sounding it at ${Math.round((held?.positionMs ?? 0) / 1000)} s (${held?.path ?? 'plugin'}), so nothing was loaded, started, paused or seeked`;
       await this.readReturn('adopt');
+      /*
+       * The boundary goes back to the web layer here exactly as it does on the handover below — the
+       * same statement, made in both directions, so no flag can stick (v1.9.8). Safe on this branch:
+       * `returnIsAdoption` is false whenever the away queue owns the sound (`path === 'queue'`), so
+       * the native side's `awake && awayOwnsAudible` handover cannot fire, `armAwayQueue` only
+       * attaches items, and `preloadAhead` only fetches bytes. No `play`, `pause` or `seek`.
+       */
+      await this.syncQueue();
       return;
     }
     this.returnPath = 'handover';
@@ -2479,6 +2510,20 @@ export class AudioEngine {
       // The player would not answer. Never leave a "playing" on screen that no tap can act on.
       this.dispatch({ type: 'interruption' });
     }
+    /*
+     * **And it ends in a decision, never in a phase (unreleased).**
+     *
+     * `engine-state: playing false` does not move a machine that is still `loading` — `reduce` returns
+     * that state unchanged — so a start the handover issued that never produced sound would leave the
+     * visible row spinning over a track nothing is sounding. That is the owner's "stuck in a loading
+     * phase", and it is reachable on the handover branch (the adopt branch never dispatches `select`
+     * at all). The row is settled to `paused`: a decision, one tap from playing, and this is a
+     * dispatch to the state machine — nothing is written to the player.
+     */
+    if (this.state === 'loading') {
+      this.dispatch({ type: 'transport', action: 'pause' });
+      this.modeReason = `the return found nothing sounding ${this.track?.id ?? 'the visible entry'} — the row settles to paused, one tap away from playing, rather than sitting in loading; nothing was written to the player`;
+    }
     if (this.state === 'playing') {
       /*
        * The state did not change (the player was playing all along), but the web view was suspended
@@ -2492,12 +2537,13 @@ export class AudioEngine {
       if (truth?.playing && stateBefore === 'playing' && this.backend === 'native') this.verifySpectrum();
     }
     /*
-     * **The guard, where the return decides (unreleased).** An adoption that started a player, or
-     * that ended with the bar drawing `loading`, is the defect this branch exists to remove — so it is
-     * named here rather than left to a test on the other side of the build. `startsIssued` is the
-     * counter `play` increments past its own early returns; `loading` is the state only `play`
-     * dispatches. Neither moves when the branch is what it says it is; if either does, this line says
-     * so on the phone's log and in the reason line.
+     * **The guard, where the return decides (unreleased).** An adoption that started a player is the
+     * defect this branch exists to remove — so it is named here rather than left to a test on the
+     * other side of the build. `startsIssued` is the counter `play` increments past its own early
+     * returns; it is not the same claim as "the state never became `loading`", because
+     * `retryPlayInPlace` dispatches `select` too and does not move this counter. Both are asserted
+     * separately: the counter here, and the row's ending state above, which is settled to a decision
+     * (`paused`) rather than left in `loading`.
      */
     if (path === 'adopt' && (this.startsIssued !== startsBefore || this.state === 'loading')) {
       console.warn('[navilite] the adoption branch of the return wrote to the player');

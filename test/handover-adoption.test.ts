@@ -54,6 +54,13 @@ interface Record {
   plays: string[];
   /** Everything that happened, so an ORDER can be asserted rather than two separate facts. */
   order: string[];
+  /**
+   * **Every statement of the queue, with the `awake` flag it carried.** `setQueue` is the boundary's
+   * only writer — `awake: true` is the sole way the native side learns the app is on screen again —
+   * so the statement itself has to be recordable, or a return that never re-states the queue reads as
+   * a pass (which is exactly how the `awake: false` defect stayed green in this file).
+   */
+  statements: { index: number; awake: boolean }[];
   /** What the plugin answers `handover()` with — the queue's own reading. */
   reading: NativeHandover | null;
   /** What the plugin puts in `now().return` — the player's own reading of what is sounding. */
@@ -63,18 +70,25 @@ interface Record {
   syncPositionMs: number;
   released: number;
   songNow: string;
+  /** When set, `load` waits on it: a start that is genuinely still in flight. */
+  loadGate: Promise<void> | null;
+  /** When true the player accepts `play` and never reports a position — a start that makes no sound. */
+  silent: boolean;
 }
 
 const blank = (): Record => ({
   events: null,
   plays: [],
   order: [],
+  statements: [],
   reading: null,
   sounding: null,
   playing: true,
   syncPositionMs: 42_000,
   released: 0,
   songNow: '',
+  loadGate: null,
+  silent: false,
 });
 
 const track = (id: string) => ({
@@ -99,6 +113,7 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
     record.events = events;
     return {
       async load(info: NativeTrackInfo) {
+        if (record.loadGate) await record.loadGate;
         await wait(ROUND_TRIP_MS);
         return { assetId: `slot-${info.id ?? 'x'}`, cached: false };
       },
@@ -111,7 +126,8 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
         record.plays.push(seconds.toFixed(0));
         await wait(ROUND_TRIP_MS);
         // The player's own answer that sound exists, a moment after the call — after the engine's wait.
-        setTimeout(() => events.onPosition(Math.max(0, seconds)), 5);
+        // A `silent` player takes the call and never answers: a start that produced no sound.
+        if (!record.silent) setTimeout(() => events.onPosition(Math.max(0, seconds)), 5);
       },
       async adopt() {
         record.order.push('adopt');
@@ -119,8 +135,15 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
         return false;
       },
       async discard() {},
-      async setQueue() {
-        record.order.push('setQueue');
+      async setQueue(options?: { index?: number; awake?: boolean }) {
+        /*
+         * The statement, with the flag it carried. `awake` is the whole subject of the boundary
+         * finding: this call is the only writer of the native side's `awake`, so the fake has to
+         * carry it or the suite cannot see a return that never re-states the queue.
+         */
+        const awake = options?.awake === true;
+        record.order.push(`setQueue:awake=${awake}`);
+        record.statements.push({ index: options?.index ?? -1, awake });
         await wait(ROUND_TRIP_MS);
         return true;
       },
@@ -265,6 +288,7 @@ test('a player already sounding the visible entry is READ on every return — ne
       await engine.handleVisibility(true);
       record.plays = [];
       record.order = [];
+      record.statements = [];
       states.length = 0;
       record.syncPositionMs = 42_000 + cycle * 5_000;
       record.sounding = { songId: 'a', index: 0, positionMs: record.syncPositionMs, path: 'plugin', sounding: true };
@@ -284,6 +308,21 @@ test('a player already sounding the visible entry is READ on every return — ne
       assert.ok(!record.order.includes('handover'), `cycle ${cycle}: the queue is never asked to hand over (${record.order.join(' → ')})`);
       assert.ok(!record.order.includes('release'), `cycle ${cycle}: and nothing is released`);
       assert.ok(!states.includes('loading'), `cycle ${cycle}: the return never draws loading (${states.join(' → ')})`);
+      /*
+       * **The boundary is re-stated, and it says the app is here.** This is the finding this
+       * assertion exists for: the adoption returned before `syncQueue()`, so `awake` stayed `false` on
+       * the native side while the app was on screen — two owners at the next track end (Swift's
+       * `itemDidEnd` and the foreground web layer) and the card watchdog running over a screen it does
+       * not own. The last statement after each return must therefore carry `awake: true`, and it must
+       * be a statement of *this* queue.
+       */
+      const statement = record.statements[record.statements.length - 1];
+      assert.ok(statement, `cycle ${cycle}: the queue is stated to the native boundary on the way back (${record.order.join(' → ')})`);
+      assert.equal(statement.awake, true, `cycle ${cycle}: and the statement says the app is on screen (\`awake: true\`, got ${JSON.stringify(statement)})`);
+      assert.ok(
+        record.order.lastIndexOf('setQueue:awake=true') > record.order.indexOf('reconcile'),
+        `cycle ${cycle}: it is made on the way back, after the player was read (${record.order.join(' → ')})`,
+      );
       assert.equal(status.returnPath.path, 'adopt', `cycle ${cycle}: the return took the adoption branch`);
       assert.equal(status.state, 'playing', `cycle ${cycle}: the music is still playing`);
       assert.ok(
@@ -340,6 +379,56 @@ test('a player that is not on the visible entry still reaches the handover, and 
   }
 });
 
+/* ------------------------- the return always ends in a decision (unreleased) */
+
+test('a return that reaches the handover with nothing sounding settles to a decision, never to loading', async () => {
+  const record = blank();
+  const engine = engineFor(record);
+  try {
+    /*
+     * The owner starts a track and leaves the screen while the load is still in flight. The machine is
+     * at `loading`, and nothing will move it: the player never reports sound (the web view is
+     * suspended, which is exactly the window the owner describes as "stuck in a loading phase").
+     */
+    let release!: () => void;
+    record.loadGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    record.silent = true;
+    const starting = engine.play(track('a'));
+    await wait(10);
+    await engine.handleVisibility(true);
+    record.loadGate = null;
+    release();
+    await starting;
+    await settle();
+    assert.equal(engine.status().state, 'loading', 'the start never produced sound, so the row is still waiting');
+
+    /*
+     * The return finds nothing this side can name: no player reading, and the queue offers no entry
+     * either. Nothing is started — and the row must still reach a decision rather than stay in the
+     * phase it was left in.
+     */
+    record.plays = [];
+    record.order = [];
+    record.statements = [];
+    record.sounding = null;
+    record.reading = { songId: '', index: -1, positionMs: 0 };
+    record.playing = false;
+    await engine.handleVisibility(false);
+    await settle();
+
+    const status = engine.status();
+    assert.equal(status.returnPath.path, 'handover', 'nothing was sounding this side, so this is the handover branch');
+    assert.deepEqual(record.plays, [], 'and no entry is started for a reading that names none');
+    assert.notEqual(status.state, 'loading', 'the row reaches a decision instead of sitting in loading over a silent track');
+    assert.equal(status.state, 'paused', 'the decision is paused — one tap from playing');
+  } finally {
+    await engine.stop();
+    await settle();
+  }
+});
+
 /* ------------------------------------ the Swift side: three readings, each a named defect */
 
 const swift = readFileSync(
@@ -371,6 +460,35 @@ test('an entry that failed to play is not attached again by the next top-up', ()
     'the top-up skips every entry that already failed, so a 404 is not removed and re-created per statement',
   );
   assert.match(topUp, /queue-topup-skip/, 'and the skip is on the phone’s log rather than silent');
+});
+
+test('the plugin/fetch reading names the player’s own item, not the app’s statement of the slot', () => {
+  const reading = body('private func returnReading()', '@objc func handover(');
+  assert.match(
+    reading,
+    /let item = found\.player\.currentItem/,
+    'the slot’s own item is required before an entry is named — a player that holds nothing has nothing sounding',
+  );
+  assert.match(
+    reading,
+    /queue\.first\(where: \{ \$0\.url == itemUrl \}\)/,
+    'and the entry is named by the url the item was built from (identity, then the url — the queue branch’s bar)',
+  );
+  assert.match(
+    reading,
+    /Self\.isSounding\(found\.player\)/,
+    'the app’s own statement of the slot is kept only while the player is actually making sound',
+  );
+  assert.doesNotMatch(
+    reading,
+    /songId = audible\.songId/,
+    'no branch answers the app’s statement of the slot as if it were the player’s item',
+  );
+  assert.match(
+    reading,
+    /audible\?\.assetId == Self\.awaySlotName \? \(audible\?\.songId \?\? ""\) : ""/,
+    'the only name kept with no player of ours is the away slot’s, which the queue reads above',
+  );
 });
 
 test('only the entry the queue is SOUNDING reaches the fetch path, and the queue is paused first', () => {
