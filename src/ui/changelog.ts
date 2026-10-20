@@ -614,4 +614,24 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The boundary log now says whether a song change came from the queue the phone already had or from a stream it had to open.',
       ],
     },
+    {
+      version: '2.0-beta.18',
+      date: '2026-10-20',
+      items: [
+        'Coming back to the app while a song is playing takes the sound from the player the phone already has running, instead of opening a second one behind it.',
+        'A song that changed while the app was off screen is identified from the list the phone\'s own player holds, so the app knows which track the phone actually reached instead of trusting its own note about it.',
+      ],
+    },
+    {
+      version: '2.0-beta.19',
+      date: '2026-10-20',
+      items: [
+        'Coming back to the app while a song is playing leaves that song alone: the app reads the player that is already sounding it and takes it over, so the track is not started again and the row does not fall back into loading.',
+        'The app now tells the phone it is back on screen, so the phone stops holding the playing track as if the app were still away.',
+        'If you come back to a song that is no longer playing, the row settles to paused — one tap from playing — instead of sitting in the loading phase.',
+        'If you left the app while a song was still loading, coming back no longer turns that into a fifteen-second failure.',
+        'Which track is playing is read from the player itself, and the app keeps its own note of it only while that player is sounding.',
+        'One limit on this build: the return was checked against the app\'s own playback logic, not on the phone, so whether it sounds right at the seam is something the phone has to answer.',
+      ],
+    },
   ];
