@@ -200,7 +200,7 @@ export class PlaybackQueue {
      * already playing, so the queue moves its cursor onto the track that is sounding and never
      * asks the engine to start anything.
      */
-    engine.onAdvancedNatively = (songId, index) => this.adoptNativeAdvance(songId, index);
+    engine.onAdvancedNatively = (songId, index, positionMs) => this.adoptNativeAdvance(songId, index, positionMs);
   }
 
   get current(): QueueItem | null {
@@ -942,7 +942,7 @@ export class PlaybackQueue {
    *     queue was replaced can name a song that is not in this list any more, and moving the cursor
    *     to it would be inventing one.
    */
-  async adoptNativeAdvance(songId: string, index = -1): Promise<void> {
+  async adoptNativeAdvance(songId: string, index = -1, positionMs?: number): Promise<void> {
     /*
      * **By index first (v1.9.9), and by id only as a fallback.**
      *
@@ -963,6 +963,18 @@ export class PlaybackQueue {
     if (at === -1) return;
     if (this.currentSong?.id === songId) {
       this.loading = false;
+      /*
+       * **The entry is already the visible one, and the reading still has to be rendered
+       * (unreleased).** This branch used to clear `loading` and nothing else — the *engine's* machine
+       * was left where the return's own start had put it, on `loading`, because that start never
+       * committed and no release ever came. That is the owner's spinner: the song on the label, the
+       * queue making the sound, and a row that says it is still waiting. A reading that names a
+       * position is the answer, and it is rendered.
+       */
+      if (typeof positionMs === 'number' && Number.isFinite(positionMs) && positionMs >= 0) {
+        this.engine.renderReading(positionMs);
+      }
+      this.pendingStartMs = 0;
       this.warmNeighbours();
       return;
     }
@@ -977,7 +989,7 @@ export class PlaybackQueue {
     const song = this.items[this.order[at]!]!.song;
     const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
     this.onChanged?.();
-    await this.engine.adoptNativeAdvance?.(this.trackRequest(song, this.engine.warmedUrl?.(song.id) ?? null, artworkUrl));
+    await this.engine.adoptNativeAdvance?.(this.trackRequest(song, this.engine.warmedUrl?.(song.id) ?? null, artworkUrl), positionMs);
     this.reportNowPlaying(song);
     this.setupMediaSession(song, artworkUrl);
     this.scheduleSaveQueue();

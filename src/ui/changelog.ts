@@ -634,4 +634,19 @@ export const CHANGELOG: ChangelogRelease[] = [
         'One limit on this build: the return was checked against the app\'s own playback logic, not on the phone, so whether it sounds right at the seam is something the phone has to answer.',
       ],
     },
+    {
+      version: '2.0-beta.20',
+      date: '2026-10-20',
+      items: [
+        'Tapping a track while the queue the phone already has is playing takes the sound over: that queue is silenced first, instead of the tap being refused while it plays on.',
+        'A refusal that names the track is an answer: the row shows that track at its live position instead of a spinner, and the app stops asking again every three seconds.',
+        'Coming back to a song that is playing no longer starts it again: the app\'s own player is not loaded at 0:00, the row does not fall back into loading, and the position it was showing survives the return.',
+        'Before the app takes the sound from the queue it has to prove it is on the same track at the same place: a start at 0:00 no longer wins over a queue four minutes in, and the row reads the position the phone held instead of 0:00.',
+        'A queue you paused is not handed over on return: the app starts nothing and writes no resume.',
+        'Coming back over a song you paused settles the row on paused, at your own position with the clock stopped, instead of a clock running on with no sound behind it.',
+        'The phone answers "is this queue making a sound" from the player it is running rather than from a note the app kept, so a pause you took from the Lock Screen is read as a pause.',
+        'The log on the phone now names the version and build that wrote it, writes exactly one line per return, and names the branch that return took beside the route it took — so a return can be dated and read off the log instead of guessed.',
+        'One limit on this build: every line above was checked against the app\'s own playback logic, not on the phone, so the seam itself is still the phone\'s to answer — and on a row the phone\'s own queue owns, the spectrum still shows the album art\'s colours rather than a live reading.',
+      ],
+    },
   ];

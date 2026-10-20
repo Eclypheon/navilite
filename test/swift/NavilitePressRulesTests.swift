@@ -431,6 +431,279 @@ struct PressRulesTests {
         check("and if the app's own player IS sounding, the queue stops rather than playing under it",
               stopsTheQueue(NavilitePressRules.unreleasedOffer(appSounding: true)))
 
+        print("\n# the owner's choice takes the sound; a press already answered moves nothing")
+
+        /* THE CARD: play a song, leave until it ends, come back — the return attaches (return #1).
+         * The next return sits on `loading`, and the owner leaves to the playlist and picks another
+         * track: the app refuses it because the queue is sounding, so he is stuck with a song he
+         * cannot change and gets two players once he forces it. Two rules answer that: a source the
+         * sweep has already been asked to stop cannot refuse his tap (`startDecision`), and a
+         * statement naming an entry the app's own player is sounding is his choice, not a jump to
+         * correct (`statementChoice`). */
+
+        func silencedBy(_ answer: NavilitePressRules.Start) -> [String]? {
+            if case .start(let silenced) = answer { return silenced }
+            return nil
+        }
+        func startRefusal(_ answer: NavilitePressRules.Start) -> String? {
+            if case .refuse(let why) = answer { return why }
+            return nil
+        }
+
+        let repeatRefusal = NavilitePressRules.refusalForRepeat(
+            move: "next", lastMove: "next", lastAt: t0.addingTimeInterval(-1.0), now: t0,
+            soundingNow: "18", leftByLastPress: "18", inFlightMove: "")
+        let crossRefusal = NavilitePressRules.refusalForCrossMove(move: "previous", inFlightMove: "next")
+
+        check("a selection over a sounding queue SILENCES it first and starts — no refusal",
+              silencedBy(NavilitePressRules.startDecision(intent: .selection, answered: nil,
+                                                          target: "slot-0", sounding: ["away"],
+                                                          silenced: ["away"])) == ["away"])
+        check("...and a second source the sweep silenced does not refuse it either",
+              silencedBy(NavilitePressRules.startDecision(intent: .selection, answered: nil,
+                                                          target: "slot-0",
+                                                          sounding: ["away", "slot-1"],
+                                                          silenced: ["away", "slot-1"]))
+              == ["away", "slot-1"])
+        check("a selection with nothing else sounding starts without silencing anything",
+              silencedBy(NavilitePressRules.startDecision(intent: .selection, answered: nil,
+                                                          target: "slot-0", sounding: ["slot-0"],
+                                                          silenced: [])) == [])
+        isRefusal("a selection is still refused by a source the sweep could not reach",
+                  startRefusal(NavilitePressRules.startDecision(intent: .selection, answered: nil,
+                                                               target: "slot-0", sounding: ["away", "slot-1"],
+                                                               silenced: ["away"])),
+                  expect: true)
+        isRefusal("an automatic start over a queue that is still sounding is refused, as before",
+                  startRefusal(NavilitePressRules.startDecision(intent: .automatic, answered: nil,
+                                                               target: "slot-0", sounding: ["away"],
+                                                               silenced: ["away"])),
+                  expect: true)
+        check("an automatic start with nothing else sounding starts and silences nothing",
+              silencedBy(NavilitePressRules.startDecision(intent: .automatic, answered: nil,
+                                                          target: "slot-0", sounding: ["slot-0"],
+                                                          silenced: [])) == [])
+
+        check("a redelivered press is refused even when it would otherwise be a selection",
+              startRefusal(NavilitePressRules.startDecision(intent: .selection, answered: repeatRefusal,
+                                                            target: "slot-0", sounding: ["away"],
+                                                            silenced: ["away"])) == repeatRefusal)
+        check("a press that crossed a boundary in flight is refused, and the refusal is the press's own",
+              startRefusal(NavilitePressRules.startDecision(intent: .selection, answered: crossRefusal,
+                                                            target: "slot-0", sounding: [],
+                                                            silenced: [])) == crossRefusal)
+        check("a refused repeat silences nothing — nothing moves",
+              startRefusal(NavilitePressRules.startDecision(intent: .automatic, answered: repeatRefusal,
+                                                            target: "slot-0", sounding: ["away"],
+                                                            silenced: ["away"])) != nil
+              && silencedBy(NavilitePressRules.startDecision(intent: .automatic, answered: repeatRefusal,
+                                                             target: "slot-0", sounding: ["away"],
+                                                             silenced: ["away"])) == nil)
+
+        print("\n# a statement that names another entry is a choice or a jump — decided by the app's player")
+
+        func isSelection(_ answer: NavilitePressRules.Statement) -> Bool {
+            if case .selection = answer { return true }
+            return false
+        }
+        func keepsQueue(_ answer: NavilitePressRules.Statement) -> Bool {
+            if case .keepQueue = answer { return true }
+            return false
+        }
+
+        check("the app's own player is sounding the entry it stated — the owner chose it, the queue is silenced",
+              isSelection(NavilitePressRules.statementChoice(statedSongId: "b", audibleSongId: "b",
+                                                             appSounding: true, queueSongId: "a")))
+        check("nothing of the app's is sounding yet — the queue is the authority and the statement is corrected",
+              keepsQueue(NavilitePressRules.statementChoice(statedSongId: "b", audibleSongId: "",
+                                                            appSounding: false, queueSongId: "a")))
+        check("a player that is not sounding the stated entry is not a selection",
+              keepsQueue(NavilitePressRules.statementChoice(statedSongId: "b", audibleSongId: "b",
+                                                            appSounding: false, queueSongId: "a")))
+        check("the app stated the entry the queue is sounding — nothing to decide",
+              keepsQueue(NavilitePressRules.statementChoice(statedSongId: "a", audibleSongId: "a",
+                                                            appSounding: true, queueSongId: "a")))
+
+        print("\n# a return with something sounding answers with a POSITION — never a pending start")
+
+        func adoptAnswer(_ decision: NavilitePressRules.Return?) -> (songId: String, index: Int, positionMs: Int)? {
+            if case .adopt(let songId, let index, let positionMs)? = decision { return (songId, index, positionMs) }
+            return nil
+        }
+        func offerAnswer(_ decision: NavilitePressRules.Return?) -> (songId: String, index: Int, positionMs: Int)? {
+            if case .offer(let songId, let index, let positionMs)? = decision { return (songId, index, positionMs) }
+            return nil
+        }
+
+        let queueSounding = NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: "b",
+                                                              soundingIndex: 1, positionMs: 3588)
+        check("the queue is sounding: the return yields the entry at the queue's own position",
+              offerAnswer(queueSounding)?.songId == "b" && offerAnswer(queueSounding)?.index == 1
+              && offerAnswer(queueSounding)?.positionMs == 3588)
+        check("...and `loading` is not among the answers a return can give",
+              offerAnswer(queueSounding) != nil || adoptAnswer(queueSounding) != nil || stopped(queueSounding))
+        let appSounding = NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: "b",
+                                                            soundingIndex: 1, positionMs: 3588,
+                                                            appSoundingSongId: "b", appPositionMs: 3600)
+        check("the app's own player is already sounding it: the return ADOPTS it at the app's position",
+              adoptAnswer(appSounding)?.songId == "b" && adoptAnswer(appSounding)?.positionMs == 3600)
+        check("...and the adoption is not an offer, so no start is waited on",
+              offerAnswer(appSounding) == nil)
+        /*
+         * **THE CARD (F1): a start that has just begun does not beat a queue four minutes in.**
+         *
+         * The app's own player is sounding the queue's entry at 0:00 (its start this return issued,
+         * or one that never got further) while the queue is at 240 s. "Sounding" alone used to be
+         * the whole gate: the return answered `adopt` at 0:00 and `stopAwayQueue` followed, so the
+         * listener's 4:00 became 0:00 and nothing could take it back. A take already refuses exactly
+         * this (`releaseTake` → `.seekThenTake`), and the return now asks the same question.
+         */
+        let justStarted = NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: "b",
+                                                            soundingIndex: 1, positionMs: 240_000,
+                                                            appSoundingSongId: "b", appPositionMs: 0)
+        check("(F1) a player sounding it at 0:00 against a queue at 240 s is NOT an adoption",
+              adoptAnswer(justStarted) == nil)
+        check("(F1) ...it is an offer, which is the seek route: the app starts it at the queue's 240 s",
+              offerAnswer(justStarted)?.positionMs == 240_000
+              && offerAnswer(justStarted)?.songId == "b" && offerAnswer(justStarted)?.index == 1)
+        check("(F1) ...and the queue is not stopped by the return — the offer keeps it sounding",
+              !stopped(justStarted))
+        let barelyDrifted = NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: "b",
+                                                              soundingIndex: 1, positionMs: 240_000,
+                                                              appSoundingSongId: "b",
+                                                              appPositionMs: 240_000
+                                                                - NavilitePressRules.maxDriftMs)
+        check("(F1) the bound is the take's own: at exactly maxDriftMs the adoption still holds",
+              adoptAnswer(barelyDrifted)?.positionMs == 240_000 - NavilitePressRules.maxDriftMs)
+        let unreadable = NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: "b",
+                                                           soundingIndex: 1, positionMs: 240_000,
+                                                           appSoundingSongId: "b", appPositionMs: nil)
+        check("(F1) an entry with no readable position is not proof of where it is — offer, not adopt",
+              adoptAnswer(unreadable) == nil && offerAnswer(unreadable)?.positionMs == 240_000)
+        let elsewhere = NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: "b",
+                                                         soundingIndex: 1, positionMs: 240_000,
+                                                         appSoundingSongId: "c", appPositionMs: 5_000)
+        check("(F1) a player sounding a DIFFERENT entry is still an adoption — one owner, the app's",
+              adoptAnswer(elsewhere)?.songId == "c" && adoptAnswer(elsewhere)?.positionMs == 5_000)
+        check("nothing sounding and nothing of the app's: no reading to give, nothing to wait for",
+              NavilitePressRules.returnDecision(queueOwnsSound: false, soundingSongId: nil,
+                                                soundingIndex: -1, positionMs: 0) == nil)
+        check("a queue that holds the sound and cannot be named is stopped, never offered empty",
+              stopped(NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: nil,
+                                                        soundingIndex: -1, positionMs: 3588,
+                                                        appSoundingSongId: "")))
+
+        print("\n# a refusal that names the sound is an ANSWER — display it, ask nothing more")
+
+        func displayOf(_ answer: NavilitePressRules.Reading)
+            -> (songId: String, index: Int, positionMs: Int, why: String)? {
+            if case .display(let songId, let index, let positionMs, let why) = answer {
+                return (songId, index, positionMs, why)
+            }
+            return nil
+        }
+        func unnamed(_ answer: NavilitePressRules.Reading) -> Bool {
+            if case .unnamed = answer { return true }
+            return false
+        }
+
+        let refused = NavilitePressRules.refusedReading(soundingSongId: "0DHk", soundingIndex: 7,
+                                                        positionMs: 17769, statedSongId: "0DHk",
+                                                        statedIndex: 7)
+        check("(a) a refusal naming the entry and the position yields a display, not a retry",
+              displayOf(refused)?.songId == "0DHk" && displayOf(refused)?.index == 7
+              && displayOf(refused)?.positionMs == 17769,
+              "answered \(String(describing: displayOf(refused)))")
+        check("(a) ...and the answer says the app asks nothing further",
+              displayOf(refused)?.why.contains("asks nothing further") == true)
+        check("(a) a refusal that names nothing renders nothing — it does not invent an entry",
+              unnamed(NavilitePressRules.refusedReading(soundingSongId: nil, soundingIndex: -1,
+                                                        positionMs: 0, statedSongId: "0jGX",
+                                                        statedIndex: 5)))
+        check("(a) an empty entry is not a name either",
+              unnamed(NavilitePressRules.refusedReading(soundingSongId: "", soundingIndex: 7,
+                                                        positionMs: 17769, statedSongId: "0jGX",
+                                                        statedIndex: 5)))
+
+        let stale = NavilitePressRules.refusedReading(soundingSongId: "0DHk", soundingIndex: 7,
+                                                       positionMs: 30511, statedSongId: "0jGX",
+                                                       statedIndex: 5)
+        check("(c) a stale statement is overwritten by the reading — entry, index and position are the reading's",
+              displayOf(stale)?.songId == "0DHk" && displayOf(stale)?.index == 7
+              && displayOf(stale)?.positionMs == 30511)
+        check("(c) ...and the line names the statement it overwrote",
+              displayOf(stale)?.why.contains("0jGX") == true
+              && displayOf(stale)?.why.contains("index 5") == true)
+
+        print("\n# the answer's index is the PUBLISHED index, never AVPlayer's window (unreleased)")
+
+        /*
+         * The owner's log, as a state: the queue is on entry 8 of 269 (`index:7`) and answered it as
+         * `index 0`. `nameQueue`'s cursor is the item's position inside `queuePlayer.items()` — the
+         * attached window, 0..2 — so it can never be the index the app publishes, adopts by, or
+         * compares a statement against. The published order is 269 entries and the sounding entry is
+         * nowhere near the first window.
+         */
+        let publishedOrder: [String] = (0..<269).map { $0 == 7 ? "0DHkU6MZyX8NSQjaQTlhi5" : "entry-\($0)" }
+        let publishedAt = NavilitePressRules.publishedIndex(order: publishedOrder, songId: "0DHkU6MZyX8NSQjaQTlhi5",
+                                                           fallback: 0)
+        check("(d) an entry outside the attached window answers its PUBLISHED index, not the window cursor",
+              publishedAt == 7, "answered \(publishedAt)")
+        check("(d) ...so the refusal names entry 8 of 269 as index 7 — the same entry, the same index",
+              displayOf(NavilitePressRules.refusedReading(soundingSongId: "0DHkU6MZyX8NSQjaQTlhi5",
+                                                          soundingIndex: publishedAt,
+                                                          positionMs: 5974, statedSongId: "0jGX",
+                                                          statedIndex: 5))?.index == 7,
+              "answered \(String(describing: displayOf(NavilitePressRules.refusedReading(soundingSongId: "0DHkU6MZyX8NSQjaQTlhi5", soundingIndex: publishedAt, positionMs: 5974, statedSongId: "0jGX", statedIndex: 5))))")
+        check("(d) an entry the published order cannot name keeps the caller's last-resort index",
+              NavilitePressRules.publishedIndex(order: publishedOrder, songId: "not-in-the-order", fallback: 2) == 2)
+        check("(d) an empty or missing entry is the fallback too — never a 0 by accident",
+              NavilitePressRules.publishedIndex(order: publishedOrder, songId: "", fallback: -1) == -1
+              && NavilitePressRules.publishedIndex(order: publishedOrder, songId: nil, fallback: -1) == -1)
+        check("(d) an empty published order answers the fallback",
+              NavilitePressRules.publishedIndex(order: [], songId: "0DHk", fallback: -1) == -1)
+
+        check("(b) the same reading answered twice does not produce a second request",
+              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 7,
+                                               answeredSongId: "0DHk", answeredIndex: 7) != nil)
+        check("(b) a later offer of the same entry is the same question (the position moved, the entry did not)",
+              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 7,
+                                               answeredSongId: "0DHk", answeredIndex: 7) != nil)
+        check("(b) the queue advancing to another entry IS a new question",
+              NavilitePressRules.answeredOffer(offeredSongId: "next", offeredIndex: 8,
+                                               answeredSongId: "0DHk", answeredIndex: 7) == nil)
+        check("(b) nothing answered yet: every offer is a new question",
+              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 7,
+                                               answeredSongId: "", answeredIndex: -1) == nil)
+        /*
+         * **The answer's identity is the ENTRY, not the index (unreleased).**
+         *
+         * `answeredOffer` compared `(songId, index)` and the owner's log is still four offers of one
+         * entry, three seconds apart, with `queue-handover-answered` nowhere in it. The index is the
+         * number that drifts: `handOverAwayQueue` records the offer's `soundingIndex` over `queue` as
+         * it stands at the offer, and the guard re-derives `soundingIndex` over `queue` again — but the
+         * statement that asks a second time has already replaced `queue` from the web layer's own
+         * published list (`NaviliteRemote.swift` — `self.queue = entries…`, at the top of the
+         * statement, before the guard is reached). Two lookups over two arrays, and the app's order is
+         * provably not index-compatible with this side's: the same log's `queue-handover-jump` puts
+         * `0jGX…` at index 5 where the queue has `0DHk…` at 7. So the pair is only equal when the two
+         * snapshots happen to agree, and the equality the guard demanded was never an invariant. A
+         * request is one entry asked about; a statement that names that entry again is that same
+         * request, whatever index it carries.
+         */
+        check("(b) the same entry stated with a DIFFERENT index is the same request — the index is not the identity",
+              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 7,
+                                               answeredSongId: "0DHk", answeredIndex: 5) != nil)
+        check("(b) ...in either direction, because the statement is what re-bases the index",
+              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 5,
+                                               answeredSongId: "0DHk", answeredIndex: 7) != nil)
+        check("(b) ...including the last-resort -1 an entry the published order cannot name",
+              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: -1,
+                                               answeredSongId: "0DHk", answeredIndex: 7) != nil)
+        check("(b) a DIFFERENT entry at the SAME index is still a new question — the queue advanced",
+              NavilitePressRules.answeredOffer(offeredSongId: "next", offeredIndex: 7,
+                                               answeredSongId: "0DHk", answeredIndex: 7) == nil)
+
         print("\n\(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

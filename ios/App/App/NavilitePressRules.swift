@@ -347,10 +347,34 @@ enum NavilitePressRules {
         return QueueNaming(names: names, cursor: cursor)
     }
 
+    /// **Where an entry sits in the published order — never where it sits in the player's window
+    /// (unreleased).**
+    ///
+    /// `nameQueue`'s `cursor` is the index of `currentItem` **inside `queuePlayer.items()`**, and
+    /// AVPlayer holds only the items it was handed around the current one: that number is 0..2 and
+    /// never a queue index. The published order is what the app publishes, adopts by, and compares a
+    /// statement against, so any index handed to the web layer has to be looked up in it. Both the
+    /// adopt and the offer path already did this lookup; the refusal path copied the cursor instead
+    /// and stated entry 8 of 269 as `index 0` (`handover-refused index:7` → `handover-displayed
+    /// index:0`), which is the pair the app then adopts by.
+    ///
+    /// `fallback` is the last resort, kept only for an entry the order cannot name: the caller's own
+    /// cursor or statement index, which is at least a number the caller already had.
+    static func publishedIndex(order: [String], songId: String?, fallback: Int) -> Int {
+        guard let songId, !songId.isEmpty, let at = order.firstIndex(of: songId) else { return fallback }
+        return at
+    }
+
     /// What a return does with the queue's reading (v2.0.0-beta.19).
     enum Return: Equatable {
         /// The queue's entry is named: offer it, at the position the queue is at.
         case offer(songId: String, index: Int, positionMs: Int)
+        /// **The app's own player is already sounding an entry: adopt it, at its position**
+        /// (unreleased). Nothing is started and nothing is waited for — the screen renders the sound
+        /// that exists. This is the answer the return had no case for: with the app's own player
+        /// sounding, the return built an offer, the offer could be refused or settle as "unreleased",
+        /// and the row sat on `loading` over a song that was audible the whole time.
+        case adopt(songId: String, index: Int, positionMs: Int)
         /// The queue holds the sound and nothing here can name it: **stop the queue**. Never "offer
         /// nothing, and let the app start a second player over it".
         case stop(String)
@@ -360,8 +384,42 @@ enum NavilitePressRules {
     ///
     /// `nil` is the one case with nothing to decide: the queue is not a sound of this side's, so
     /// `releaseHandover` writes the "nothing was offered" line instead.
+    ///
+    /// **And never in a wait** (unreleased): when a player is sounding, the answer carries its entry
+    /// *and a position*, so the row has something to render. `appSoundingSongId` is the entry the
+    /// app's own player is making a sound with, read from the player — when it names one, the return
+    /// has something to answer with; there is no path here that leaves the screen waiting on a start
+    /// while the sound is already there.
+    ///
+    /// **Being "sounding" is not proof of where** (unreleased, F1). This branch used to adopt on the
+    /// entry alone and stop the queue in the same turn: a start that had just begun at 0:00 was
+    /// taken as the sound the return was for, against a queue four minutes in, and the jump was
+    /// unrecoverable. The proof an adoption needs is the proof a take already needs
+    /// (`releaseTake`): **the same entry, a readable position, and no drift beyond `maxDriftMs`**.
+    /// When the app's own player is on the queue's entry at some other position, the queue's
+    /// position is the truth and the return is an **offer** — the app starts that entry at the
+    /// queue's position and the release takes it there (`seekThenTake`), so the queue keeps the
+    /// sound instead of being stopped under a row that would then read 0:00. A player sounding a
+    /// *different* entry is still an adoption: the app took the sound somewhere else, and the queue
+    /// stops rather than playing under it (`releaseTake`'s `.abandon`, in the same words).
     static func returnDecision(queueOwnsSound: Bool, soundingSongId: String?, soundingIndex: Int,
-                               positionMs: Int) -> Return? {
+                               positionMs: Int, appSoundingSongId: String? = nil,
+                               appPositionMs: Int? = nil,
+                               maxDrift: Int = maxDriftMs) -> Return? {
+        if let appSongId = appSoundingSongId, !appSongId.isEmpty {
+            let queueSongId = soundingSongId ?? ""
+            if queueSongId.isEmpty || queueSongId != appSongId {
+                /* The app's own player is sounding an entry the queue is not: one owner, the app's. */
+                return .adopt(songId: appSongId, index: soundingIndex,
+                              positionMs: max(0, appPositionMs ?? 0))
+            }
+            /* Same entry — now the position has to prove it, exactly as a take does. */
+            if let appMs = appPositionMs, appMs >= 0, abs(positionMs - appMs) <= maxDrift {
+                return .adopt(songId: appSongId, index: soundingIndex, positionMs: appMs)
+            }
+            /* Same entry at another position (or no position read): the queue keeps the sound and
+             * the offer below is the seek route. Falling out of this branch is the fix, not a gap. */
+        }
         if let songId = soundingSongId, !songId.isEmpty {
             return .offer(songId: songId, index: soundingIndex, positionMs: positionMs)
         }
@@ -440,5 +498,165 @@ enum NavilitePressRules {
         let left = slots.filter { $0 != target && $0 != awaySlot }
         guard !left.isEmpty else { return .clear }
         return .refused("\(left.joined(separator: ",")) is still sounding after the sweep, so the start that follows it would be a second player at this instant and is refused")
+    }
+
+    /* --------------------------------- the owner's choice takes the sound (unreleased) */
+
+    /// **Who asked for a start.**
+    ///
+    /// The two presses this side answers are not the same request, and treating them as one is what
+    /// left the owner with a song he could not change:
+    ///
+    ///  - `.selection` — the owner tapped a track. The other owner (the away queue, or a plugin asset)
+    ///    is silenced **first**, and then the track he asked for starts. One owner at the end, and it
+    ///    is the one he asked for.
+    ///  - `.automatic` — a boundary, a seam, a resume. Nothing is chosen here, so a source that is
+    ///    still sounding after the sweep is a start that would be a second player, and it is refused.
+    enum Intent: Equatable {
+        case selection
+        case automatic
+    }
+
+    /// What the start may do: issue it (with what had to be silenced first), or refuse it.
+    enum Start: Equatable {
+        case start(silenced: [String])
+        case refuse(String)
+    }
+
+    /// **A deliberate selection silences the other owner and starts; a repeat is refused**
+    /// (unreleased).
+    ///
+    /// `answered` is the repeat/crossed-press sentence (`refusalForRepeat`, `refusalForCrossMove`,
+    /// `refusalForAnsweredPress`): a press this side has already answered is refused **whatever the
+    /// intent**, because a redelivery of a button is not a choice. That is the whole difference
+    /// between the two defects the owner reported — the duplicate press must move nothing, and the
+    /// tap on a track must move everything.
+    ///
+    /// `sounding` is every source making a sound now (the away queue under its own slot name, each
+    /// plugin asset), `silenced` is what this sweep has already asked to stop. A refusal is made only
+    /// from a source the sweep did **not** silence: `pause()` is a request, so a queue it just asked
+    /// to stop can still be reporting a sound in the same turn — and refusing the owner's own tap for
+    /// that is what left the row on `loading` with two players once he forced it.
+    static func startDecision(intent: Intent, answered: String?, target: String?,
+                              sounding: [String], silenced: [String]) -> Start {
+        if let answered { return .refuse(answered) }
+        let others = sounding.filter { $0 != target }
+        let unreached = others.filter { !silenced.contains($0) }
+        switch intent {
+        case .selection:
+            guard unreached.isEmpty else {
+                return .refuse("\(unreached.joined(separator: ",")) is sounding and this sweep could not reach it, so the start the listener asked for would be a second player at this instant")
+            }
+            return .start(silenced: others)
+        case .automatic:
+            guard others.isEmpty else {
+                return .refuse("\(others.joined(separator: ",")) is still sounding after the sweep, so a start that is nobody's choice would be a second player at this instant and is refused")
+            }
+            return .start(silenced: [])
+        }
+    }
+
+    /* ------------------------ a statement that names another entry (unreleased) */
+
+    /// **What a statement the app makes while the queue is sounding means.**
+    ///
+    /// The web layer states its queue after every start, so a statement naming an entry the queue is
+    /// not sounding is one of two things, and they are decided by the app's own player:
+    ///
+    ///  - the **plain return** — nothing of the app's has started yet, so the queue is the authority
+    ///    and the statement is corrected to the entry the queue is really on (a watch that never
+    ///    tracked the queue's advance comes back naming the track it left);
+    ///  - a **selection** — the app's own player is *already sounding* the entry the statement names,
+    ///    so the owner chose it. Obeying the queue here is what refused him: he taps a track, the
+    ///    statement is corrected back to the queue's entry, the queue keeps the sound and he ends up
+    ///    with two players once he forces the app.
+    enum Statement: Equatable {
+        case keepQueue(String)
+        case selection(String)
+    }
+
+    static func statementChoice(statedSongId: String, audibleSongId: String, appSounding: Bool,
+                               queueSongId: String) -> Statement {
+        guard !statedSongId.isEmpty else {
+            return .keepQueue("the app named no entry, so there is nothing of its own to obey and the queue keeps the sound")
+        }
+        guard !queueSongId.isEmpty else {
+            return .keepQueue("the queue's entry cannot be named, so there is no entry to correct the statement to")
+        }
+        guard statedSongId != queueSongId else {
+            return .keepQueue("the app stated the entry the queue is sounding, so there is nothing to decide")
+        }
+        if appSounding, !audibleSongId.isEmpty, audibleSongId == statedSongId {
+            return .selection("the app's own player is already sounding \(statedSongId) while the queue sounds \(queueSongId), so the statement is the owner's choice: the queue is silenced and \(statedSongId) starts")
+        }
+        return .keepQueue("nothing of the app's is sounding \(statedSongId) yet, so the queue is the authority on the way back and the statement is corrected to \(queueSongId)")
+    }
+
+    /* ------------------- a refusal that names the sound is an ANSWER (unreleased) */
+
+    /// **What the app renders when a refusal names the entry the queue is sounding (unreleased).**
+    ///
+    /// The owner's log is four `handover-refused` lines three seconds apart, each one carrying the
+    /// entry the queue is sounding and where it is (`q 17769`, `20810`, `23853`, `26890`) — and a
+    /// spinner on the row until he picked a track himself. A refusal that names the entry is not a
+    /// "no": it is the answer to *what is sounding*. So the app displays it, keeps its own player
+    /// silent, and asks nothing more. The three-second poll **is** the spinner.
+    enum Reading: Equatable {
+        /// The row is written from this reading: the entry, its index in the published order, and
+        /// the position the queue is at. Nothing is started and nothing is waited for.
+        case display(songId: String, index: Int, positionMs: Int, why: String)
+        /// The refusal names nothing this side can render: the queue keeps the sound, and the app
+        /// is told no more than that.
+        case unnamed(String)
+    }
+
+    /// **The label is written from the reading, never from the app's own statement (unreleased).**
+    ///
+    /// `queue-handover-jump` corrected the same pair three times (`statedIdx 5 / 0jGX` against
+    /// `queueIdx 7 / 0DHk`) and the app stated the stale entry again. That is the shape of the
+    /// defect: the statement is generated *before* the question is asked, so it cannot be the
+    /// answer. This answers the reading's own facts, and says which statement it overwrote.
+    static func refusedReading(soundingSongId: String?, soundingIndex: Int, positionMs: Int,
+                               statedSongId: String, statedIndex: Int) -> Reading {
+        guard let songId = soundingSongId, !songId.isEmpty else {
+            return .unnamed("the refusal names no entry this side could read, so there is nothing to render and the queue is the only sound")
+        }
+        let at = positionMs > 0 ? positionMs : 0
+        if !statedSongId.isEmpty, statedSongId != songId {
+            return .display(songId: songId, index: soundingIndex, positionMs: at,
+                            why: "the app had stated \(statedSongId) at index \(statedIndex) before it asked, and the answer names \(songId) at index \(soundingIndex) and \(at) ms — the statement is overwritten by the reading, because a statement made before the question cannot be its answer")
+        }
+        return .display(songId: songId, index: soundingIndex, positionMs: at,
+                        why: "the refusal names \(songId) at index \(soundingIndex) and \(at) ms, so the row is written from the reading and the app asks nothing further")
+    }
+
+    /// **One return, one answer — and the answer's identity is the ENTRY (unreleased).**
+    ///
+    /// The owner's log is four offers of one entry, one every three seconds: each refusal carried
+    /// the answer, the web layer stated its queue in reply, and the statement offered the same
+    /// entry again — a refusal that is re-asked is indistinguishable from a spinner.
+    ///
+    /// This used to call the identity "**the entry and its index**", and that is the defect the poll
+    /// survived on: the index is the number that drifts. `handOverAwayQueue` records the offer's
+    /// `soundingIndex` looked up in `queue` as it stands at the offer, and the guard re-derives
+    /// `soundingIndex` with a second lookup in `queue` — but the statement that asks a second time
+    /// has already replaced `queue` with the web layer's own published list (`self.queue = entries…`,
+    /// at the top of the statement, before the guard is reached). Two lookups over two arrays is not
+    /// an invariant, and the app's order is not index-compatible with this side's: the same log's
+    /// `queue-handover-jump` puts `0jGX…` at index 5 where the queue has `0DHk…` at 7. So a statement
+    /// that named exactly the entry the refusal had just answered, at an index the statement itself
+    /// re-based, came out as a *new* question and started another three-second deadline — the loop.
+    ///
+    /// The identity is therefore the entry alone. The position moves on while the queue plays and the
+    /// index is re-based by the statement, so neither is the request. A different entry (the queue
+    /// advanced, or the owner picked a track) is a new question, and the app asking on a new return is
+    /// `handover()`'s own path, which clears the answer before it asks.
+    static func answeredOffer(offeredSongId: String, offeredIndex: Int,
+                              answeredSongId: String, answeredIndex: Int) -> String? {
+        guard !answeredSongId.isEmpty, answeredSongId == offeredSongId else { return nil }
+        guard answeredIndex != offeredIndex else {
+            return "\(offeredSongId) at index \(offeredIndex) was already offered and answered, so this statement does not ask again — one return, one answer, and the app has the entry and the position to render"
+        }
+        return "\(offeredSongId) was already offered at index \(offeredIndex) and answered at index \(answeredIndex), so this statement does not ask again — the entry is the request, and the index is the number the statement re-bases"
     }
 }

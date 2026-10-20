@@ -346,6 +346,37 @@ export class AudioEngine {
    * rather than asking anyone to trust it; read-only from {@link status}.
    */
   private returnPath: 'none' | 'adopt' | 'handover' = 'none';
+  /**
+   * **Who is making the sound — one word, and every transport reading is taken from that owner**
+   * (unreleased, `t_05775526`).
+   *
+   * THE INVARIANT: **a status surface may only assert what the player that owns the sound says.** One
+   * sound, two players on a return — the away queue sounding the track while the app's own player
+   * holds the same entry, loaded and silent — and both answer "is it playing": the queue says yes, the
+   * app's player says no. The row believed the app's player, because `readReturn` and the 100 ms
+   * state-report listener both read it, and the owner came back to the right track at the right time
+   * under a play icon, a frozen seekbar and a dead spectrum.
+   *
+   * So the owner is stated explicitly, and it is *only* ever changed by a fact about a player:
+   *
+   *   - `app` — the app's own player reported itself playing, or a start of it committed (the
+   *     handover's release). Its reports are the row's truth, exactly as before.
+   *   - `queue` — the away queue holds the sound: the reading the native side answered with names
+   *     `path: 'queue'`, or the queue rendered its own reading (`renderReading`). The queue's reading
+   *     is the row's truth and the app player's silence says nothing about it.
+   *   - `none` — nothing is sounding. This is the only state in which a "paused" row is honest
+   *     without the owner having stopped it himself.
+   *
+   * `queue` is deliberately sticky across the owner's own pause: the queue's player is still the one
+   * that owns the sound, it is merely paused, and the next press resumes *it* (`queueTransport`)
+   * rather than starting the app's silent player over the top. **It is not a statement that the queue
+   * is sounding** — a queue the owner paused while the app was away renders `paused` while still
+   * owning the tap, because `readReturn` reads the phone's own `sounding` and not this memory
+   * (unreleased, `t_234b1ab8`).
+   */
+  private soundOwner: 'app' | 'queue' | 'none' = 'none';
+  /** The entry that owner is sounding, so a reading about another entry cannot inherit the row. */
+  private soundOwnerSongId = '';
   /** How many returns have adopted a player that was already sounding the visible entry. */
   private returnAdoptions = 0;
   /**
@@ -686,7 +717,7 @@ export class AudioEngine {
    * the handler is awaited where the answer matters (the return to the foreground reads the player's
    * record and hands it over before anything else is read).
    */
-  onAdvancedNatively: ((songId: string, index: number) => void | Promise<void>) | null = null;
+  onAdvancedNatively: ((songId: string, index: number, positionMs?: number) => void | Promise<void>) | null = null;
 
   constructor(options: EngineOptions = {}) {
     const info = options.platform ?? platformInfo();
@@ -995,6 +1026,23 @@ export class AudioEngine {
 
   private clockNow(): number {
     return typeof performance !== 'undefined' ? performance.now() : Date.now();
+  }
+
+  /** Is the away queue's player the one making the sound? (unreleased, `t_05775526`) */
+  private queueOwnsSound(): boolean {
+    return this.backend === 'native' && this.soundOwner === 'queue';
+  }
+
+  /**
+   * State the sound's owner, and say so on the reason line — because the next capture has to be able
+   * to read which player the row believed without guessing. Called only from a fact about a player,
+   * never from a state this side would like to be true.
+   */
+  private claimSound(owner: 'app' | 'queue' | 'none', songId = '', why = ''): void {
+    if (this.soundOwner === owner && this.soundOwnerSongId === (owner === 'none' ? '' : songId)) return;
+    this.soundOwner = owner;
+    this.soundOwnerSongId = owner === 'none' ? '' : songId;
+    if (why) this.modeReason = why;
   }
 
   /**
@@ -1581,7 +1629,16 @@ export class AudioEngine {
             }
             this.nativeDurationMs = factDurationMs;
           }
-          if (Number.isFinite(facts?.currentTime)) this.setNativePosition(Math.max(0, (facts?.currentTime as number) * 1000));
+          /*
+           * **A report from the player that is not the sound does not move the clock either
+           * (unreleased, `t_05775526`).** This wrote the app's own position whatever was sounding, so
+           * the row over the away queue's four-minute sound snapped to the silent player's `0` on the
+           * first report after the return — the seekbar frozen at the top of the track beside a track
+           * that was four minutes in. The position belongs to the owner, as the state does.
+           */
+          if (Number.isFinite(facts?.currentTime) && !this.queueOwnsSound()) {
+            this.setNativePosition(Math.max(0, (facts?.currentTime as number) * 1000));
+          }
           /*
            * **The end of a track is decided from the facts, not from one spelling of one state
            * (v1.9.5).**
@@ -1624,8 +1681,22 @@ export class AudioEngine {
             this.dispatch({ type: 'engine-state', playing: true });
             // The audibly-playing item is the player's word that sound exists (v1.9.2).
             this.concludeStart('player');
+            /* A player that is playing is making a sound: it owns the row (unreleased). */
+            this.claimSound('app', this.track?.id ?? '');
             return;
           }
+          /*
+           * **The app's own player going quiet is not news about a sound it is not making
+           * (unreleased, `t_05775526`).**
+           *
+           * This is the steady-state writer of the owner's report: the away queue holds the sound,
+           * the app's player holds the same entry loaded and paused, and its state report arrived
+           * every few hundred milliseconds as an `interruption` — so even a return that had rendered
+           * the queue's reading (playing, at the right second) was flipped back to a play icon
+           * within the second, and the clock and the spectrum went with it. The queue's own reading
+           * (`renderReading`) is the row's truth for as long as it owns the sound.
+           */
+          if (this.queueOwnsSound()) return;
           // Not playing and we did not ask it to stop: that is an interruption, not a pause.
           this.dispatch({ type: 'interruption' });
           if (state === 'stopped') this.nativePositionMs = Math.min(this.nativePositionMs, this.durationMs());
@@ -1667,9 +1738,9 @@ export class AudioEngine {
          * touches the machine — the track that was playing is over and the one that replaced it is
          * already audible, and `adoptNativeAdvance` is the single account of that.
          */
-        onAdvanced: (songId, index) => {
+        onAdvanced: (songId, index, positionMs) => {
           if (this.backend !== 'native' || !songId) return;
-          void this.onAdvancedNatively?.(songId, index);
+          void this.onAdvancedNatively?.(songId, index, positionMs);
         },
       });
       /*
@@ -2000,8 +2071,18 @@ export class AudioEngine {
    * asset on the player was fetched under, which is what keeps the spectrum's own URL check and the
    * next adoption consistent.
    */
-  adoptNativeAdvance(track: TrackRequest): void {
+  adoptNativeAdvance(track: TrackRequest, positionMs?: number): void {
     if (this.backend !== 'native') return;
+    /*
+     * **A position that rode with the adoption is the reading, and it is reported (unreleased).**
+     * An ordinary away boundary has no number to give — the native play is `time: 0`, so the clock
+     * is re-based at zero and marked *unreported* until the player's own report arrives. A refusal
+     * answered with an entry **and a position** is the other case: the sound exists at that
+     * position, so displaying zero would be a measurement this side does not have.
+     */
+    const answered = typeof positionMs === 'number' && Number.isFinite(positionMs) && positionMs >= 0
+      ? Math.round(positionMs)
+      : null;
     this.generation += 1;
     this.track = track;
     this.error = null;
@@ -2028,14 +2109,54 @@ export class AudioEngine {
     this.lastNativeChecksum = -1;
     this.identicalNativeFrames = 0;
     this.orphanReattachedFor = null;
-    this.positionReported = false;
-    this.setNativePosition(0, false);
-    this.modeReason =
-      'the native player took the track boundary itself while the app was not listening — the audio never stopped, and this is the app catching up with it';
+    this.positionReported = answered !== null;
+    this.setNativePosition(answered ?? 0, answered !== null);
+    this.modeReason = answered !== null
+      ? `the away queue is sounding ${track.id} at ${Math.round(answered / 1000)} s and the app has been told so — the row renders that reading, the app's own player stays silent, and nothing is started, paused or seeked`
+      : 'the native player took the track boundary itself while the app was not listening — the audio never stopped, and this is the app catching up with it';
     this.dispatch({ type: 'engine-state', playing: true });
     this.concludeStart('player');
     this.attachSpectrum(track);
     this.emit();
+  }
+
+  /**
+   * **Render a reading the native side has answered with (unreleased).**
+   *
+   * The row sat on `loading` because the return's own start was issued and never committed, while
+   * the sound it was waiting for was already there — the away queue's. The refusal that names the
+   * entry, and where it is, is the answer: this writes that position, settles the machine on
+   * `playing`, and starts nothing. The app's own player stays silent, and the reading the queue
+   * offered is still held (`this.handover`), so one tap takes that entry at that position.
+   */
+  renderReading(positionMs: number): void {
+    if (this.backend !== 'native') return;
+    const at = Number.isFinite(positionMs) ? Math.max(0, Math.round(positionMs)) : 0;
+    this.setNativePosition(at, true);
+    this.loadInFlight = null;
+    this.concludeStart('player');
+    /*
+     * **And the queue is named as the sound's owner (unreleased, `t_05775526`).** This reading *is*
+     * the queue saying it holds the sound: from here the row's playing state, clock and seekbar are
+     * that reading's, and the app's own player going quiet cannot take them away (see
+     * {@link queueOwnsSound} and the three readers gated on it).
+     */
+    this.claimSound('queue', this.track?.id ?? '');
+    this.dispatch({ type: 'engine-state', playing: true });
+    this.modeReason = `the return was answered with ${this.track?.id ?? 'the visible entry'} at ${Math.round(at / 1000)} s — the queue holds that sound, so the row renders the reading and the app's own player stays silent; nothing is loaded, started, paused or seeked`;
+    /*
+     * **The bars say nothing rather than lying flat (unreleased, `t_05775526`).** The spectrum tap is
+     * on the app's own player, which is not the sound here; a tap that renders "playing" over a silent
+     * player is the dead spectrum in the owner's report. The visualiser therefore goes to its
+     * album-art theme, and the reason line says why instead of leaving a flat row unexplained.
+     */
+    this.spectrumLive = false;
+    this.setSpectrumReason(
+      'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
+    );
+    this.startClockTick();
+    this.emit();
+    this.onProgress?.(this.nativePositionMs, this.durationMs());
   }
 
   /**
@@ -2091,6 +2212,12 @@ export class AudioEngine {
      * stale statement — `nativePositionMs` here can be a clock from before the load.
      */
     await this.native?.releaseHandover?.({ songId });
+    /*
+     * **The sound has changed hands (unreleased, `t_05775526`).** The release is the app saying its
+     * own start committed, so from here the app's own player is the sound and its reports are the
+     * row's truth again — the queue's reading is spent.
+     */
+    this.claimSound('app', songId);
   }
 
   async toggle(): Promise<void> {
@@ -2116,6 +2243,22 @@ export class AudioEngine {
     // failure being reported for the track he has just stopped.
     this.concludeStart('superseded');
     if (this.backend === 'native') {
+      /*
+       * **The press stops the sound the listener can hear (unreleased, `t_05775526`).** When the away
+       * queue owns the sound, the app's own player is silent, and pausing it would be a write nobody
+       * can hear — the music would play on under a pair of bars that had just stopped. So the pause
+       * goes to the queue's player, through the one call that reaches it (`queueTransport`).
+       */
+      if (this.queueOwnsSound()) {
+        this.dispatch({ type: 'transport', action: 'pause' });
+        this.muteReports(TRANSPORT_MUTE_MS);
+        this.setNativePosition(this.nativePositionMs, false);
+        await this.native?.queueTransport?.('pause');
+        this.modeReason = `the press paused the away queue, which is the player making the sound — the app's own player was not written to, and one more press resumes that same queue at ${Math.round(this.nativePositionMs / 1000)} s`;
+        this.emit();
+        this.onProgress?.(this.nativePositionMs, this.durationMs());
+        return;
+      }
       this.dispatch({ type: 'transport', action: 'pause' });
       // A deadline, not a bracket: the window closes whether or not the plugin ever answers.
       this.muteReports(TRANSPORT_MUTE_MS);
@@ -2146,6 +2289,22 @@ export class AudioEngine {
       if (this.state === 'playing') return;
       const track = this.track;
       if (!track) return;
+      /*
+       * **A resume of a paused queue resumes the queue (unreleased, `t_05775526`).** Nothing else can
+       * make that sound again: `resume()` on the app's own player would start a second player over a
+       * paused first one, which is the silent-take defect in its other direction.
+       */
+      if (this.queueOwnsSound()) {
+        this.generation += 1;
+        this.dispatch({ type: 'transport', action: 'play' });
+        this.muteReports(TRANSPORT_MUTE_MS);
+        await this.native?.queueTransport?.('resume');
+        this.modeReason = `the press resumed the away queue, which is the player making the sound — at ${Math.round(this.nativePositionMs / 1000)} s, with nothing written to the app's own player`;
+        this.startClockTick();
+        this.emit();
+        this.onProgress?.(this.nativePositionMs, this.durationMs());
+        return;
+      }
       this.generation += 1;
       this.dispatch({ type: 'transport', action: 'play' });
       this.muteReports(TRANSPORT_MUTE_MS);
@@ -2205,6 +2364,23 @@ export class AudioEngine {
    */
   async seek(positionMs: number): Promise<void> {
     if (this.backend === 'native') {
+      /*
+       * **The bar moves the sound, whichever player is making it (unreleased, `t_05775526`).** A seek
+       * written to the app's own silent player left the audible queue exactly where it was, so the
+       * owner's drag did nothing he could hear and the bar snapped back on the next reading. The
+       * queue's own player is the one that is asked when it owns the sound.
+       */
+      if (this.queueOwnsSound()) {
+        const at = Math.max(0, Math.round(positionMs));
+        this.generation += 1;
+        this.setNativePosition(at, false);
+        await this.native?.queueTransport?.('seek', at);
+        this.modeReason = `the bar moved the away queue, which is the player making the sound, to ${Math.round(at / 1000)} s — nothing was written to the app's own player`;
+        this.muteReports(TRANSPORT_MUTE_MS);
+        this.emit();
+        this.onProgress?.(this.nativePositionMs, this.durationMs());
+        return;
+      }
       /*
        * **One seek in flight, and the newest target wins (v1.9.2).**
        *
@@ -2381,6 +2557,9 @@ export class AudioEngine {
      * else below reads the player that is actually playing. This is the return half of the native
      * boundary, and the reason a track that advanced while the app was away is never lost.
      */
+    /* **This return's own start count (unreleased).** Everything below is one return, and a start
+     * issued from here on is that return's start — the fact the `return` record carries. */
+    const startsBefore = this.startsIssued;
     const moved = await this.native?.reconcile?.();
     if (moved?.changed && moved.songId) {
       this.modeReason = `the native player moved to another track while the app was away (${moved.songId}) — the app is adopting the track that is already playing`;
@@ -2419,11 +2598,31 @@ export class AudioEngine {
      * card watchdog went on rewriting the Now Playing card over a screen it does not own.
      */
     const held = moved?.reading ?? null;
+    /*
+     * **Which player holds the sound at this instant (unreleased, `t_05775526`).**
+     *
+     * `reconcile` has already asked the phone which player is sounding, on which entry, and by which
+     * route. `path: 'queue'` on the entry that is on screen is the owner's scenario: the away queue is
+     * making the sound and the app's own player holds the same entry, loaded and silent. It is a
+     * **flag for this return only** — the take below is still attempted, because a return that ends
+     * with the app's own player sounding the track at the queue's position is the outcome the owner
+     * remembers as instant, with the spectrum alive. What the flag decides is the *tail*: if that take
+     * does not commit, the queue is still the sound, and the row must be the queue's (playing,
+     * ticking, controllable) instead of the silent player's (a play icon over audible music).
+     */
+    const queueHoldsSound = held?.path === 'queue' && !!held.songId && held.songId === this.track?.id;
+    /*
+     * **And whether it is still sounding at all (unreleased, `t_05775526`).** A queue the owner paused
+     * himself is the same player and the same reading, but nothing is coming out of it — so the row is
+     * `paused` and no reading is rendered over it. Only a queue that is *sounding* owns the row.
+     */
+    const queueSounding = queueHoldsSound && held?.sounding !== false;
     if (this.returnIsAdoption(held)) {
+      this.claimSound('app', held?.songId ?? '');
       this.returnPath = 'adopt';
       this.returnAdoptions += 1;
       this.modeReason = `the return adopted ${this.track?.id ?? 'the visible entry'} — the player is already sounding it at ${Math.round((held?.positionMs ?? 0) / 1000)} s (${held?.path ?? 'plugin'}), so nothing was loaded, started, paused or seeked`;
-      await this.readReturn('adopt');
+      await this.readReturn('adopt', false, held);
       /*
        * The boundary goes back to the web layer here exactly as it does on the handover below — the
        * same statement, made in both directions, so no flag can stick (v1.9.8). Safe on this branch:
@@ -2432,6 +2631,7 @@ export class AudioEngine {
        * attaches items, and `preloadAhead` only fetches bytes. No `play`, `pause` or `seek`.
        */
       await this.syncQueue();
+      await this.recordReturn('adopt', held, startsBefore);
       return;
     }
     this.returnPath = 'handover';
@@ -2446,9 +2646,73 @@ export class AudioEngine {
      * restart this release takes off the screen.
      */
     await this.adoptHandover();
+    /*
+     * **A take that did not commit leaves the queue the sound — so the queue owns the row
+     * (unreleased, `t_05775526`).**
+     *
+     * This is the branch the owner is looking at. The offer is refused (`handover-refused` names the
+     * entry the queue is sounding), the app's own start never reaches the speakers, and the app's
+     * player stays loaded and silent at the queue's position: right track, right second, and a play
+     * icon. `releaseHandover` is the only thing that moves ownership to the app's player, and it only
+     * runs when that start commits — so if it did not, the queue still holds the sound and it is the
+     * row's transport, its clock and its presses (`queueTransport`) that must follow it. The settle to
+     * `paused` below is then a lie about a track that is audibly playing.
+     */
+    if (queueSounding && this.soundOwner !== 'app' && held?.songId) {
+      this.claimSound(
+        'queue',
+        held.songId,
+        `the return could not take the sound: the away queue is still sounding ${held.songId} at ${Math.round((held.positionMs ?? 0) / 1000)} s, so the queue owns the row — playing, ticking from its reading, with the presses routed to it`,
+      );
+    }
     // And with the web layer running again, the boundary goes back to it (v1.9.8).
     await this.syncQueue();
-    await this.readReturn('handover');
+    await this.readReturn('handover', queueSounding, held);
+    await this.recordReturn('handover', held, startsBefore);
+  }
+
+  /**
+   * **One `return` record per foreground return, written by the side that decided (unreleased).**
+   *
+   * The branch is chosen here and the phone's log is written by `NaviliteRemote.record(_:_:)`, so the
+   * sentence naming the branch (`modeReason`) never reached the file the owner copies out: a capture
+   * could say what the phone did and not what the app decided, and could not be dated from its own
+   * content either. This is the one call the web layer makes for it — once, at the end of the branch,
+   * never off a status or report stream — and it asks for the line rather than writing it: the Swift
+   * `record` stays the only writer, and it adds `kind`, `at`, `awake`, `index` and `generation` there.
+   *
+   * It writes nothing and moves nothing: a bridge with no `recordReturn` (an older plugin, a build
+   * without the iOS side) returns as it always did, and a record that cannot be written is not a
+   * failed return.
+   *
+   * @param path which branch this return took — the branch is the fact the file was missing.
+   * @param held the player's own reading the branch was decided from, `null` when it gave none.
+   * @param startsBefore `startsIssued` at the start of this return, so "a start was issued" is this
+   *   return's own count rather than the session's.
+   */
+  private async recordReturn(
+    path: 'adopt' | 'handover',
+    held: NativeReturnReading | null,
+    startsBefore: number,
+  ): Promise<void> {
+    const durationMs = this.nativeDurationMs > 0 ? this.nativeDurationMs : (this.track?.durationMs ?? 0);
+    await this.native?.recordReturn?.({
+      path,
+      songId: held?.songId || this.track?.id || '',
+      route: held?.path ?? 'none',
+      /*
+       * **`-1` is the file's own word for "no reading" (unreleased, F4).** `NativeReturnRecord`
+       * documents `positionMs: -1` for "there was no reading" and `durationMs: -1` for "unknown",
+       * and this call used to answer a number and a `0` instead: a reader filtering the log on `-1`
+       * found nothing, and the only thing separating a read from a handover in the file was
+       * `started:false`. The convention the record states is the one it is written with.
+       */
+      positionMs: held ? Math.round(held.positionMs) : -1,
+      durationMs: durationMs > 0 ? Math.round(durationMs) : -1,
+      started: this.startsIssued > startsBefore,
+      state: this.state,
+      why: this.modeReason,
+    });
   }
 
   /**
@@ -2487,26 +2751,94 @@ export class AudioEngine {
    * also one tap.
    *
    * @param path which of the two returns this is — `adopt` is asserts reads-only at the end of it.
+   * @param queueSounding whether the away queue is **making a sound** at this instant, from the
+   *   phone's own `sounding` (`t_234b1ab8`) — not "the queue owned the row earlier".
+   * @param held the reading the branch was decided from, so the row can be settled on what the
+   *   phone said was held and silent rather than on a remembered owner (`t_234b1ab8`).
    */
-  private async readReturn(path: 'adopt' | 'handover'): Promise<void> {
+  private async readReturn(
+    path: 'adopt' | 'handover',
+    queueSounding = false,
+    held: NativeReturnReading | null = null,
+  ): Promise<void> {
     const startsBefore = this.startsIssued;
     const stateBefore = this.state;
     await this.native?.activateSession();
     const truth = await this.native?.sync();
-    if (truth) {
+    /*
+     * **THE GATE (unreleased, `t_05775526`).** `sync()` reads the app's own player. That reading is
+     * the row's truth only when that player is the one making the sound — and on the owner's return
+     * it is not: the away queue holds the sound, the app's player holds the same entry loaded and
+     * silent, and its `playing: false` was dispatched over the row as an interruption/pause while the
+     * music went on. A player that is not the sound has no opinion about the row.
+     *
+     * **And the ownership this asks about is one the queue has *now* (unreleased, `t_234b1ab8`).**
+     * `queueOwnsSound()` is a *memory* — `soundOwner === 'queue'`, which a pause taken from the island
+     * or the lock screen never clears, because that press never reaches this side — so
+     * `queueOwnsSound() || queueSounding` read a queue the owner had just paused as a queue that was
+     * sounding: the phone's own `sounding: false` arrived and was thrown away by the no-op branch
+     * below, the row stayed `playing` with a ticking clock over silence, and every press was routed
+     * through `queueTransport` to a paused player. The memory decides the row only while the phone has
+     * not said the queue is silent — a build that sends no `sounding` key still answers `false` at
+     * `returnReadingOf`, so the one shape that keeps the memory is a reading that does not exist.
+     */
+    const queueOwns = queueSounding || (this.queueOwnsSound() && held?.sounding !== false);
+    /*
+     * **The queue holding the entry and making no sound is the owner's own pause (unreleased,
+     * `t_234b1ab8`).** `path: 'queue'` names the route that holds the entry; `sounding: false` is the
+     * phone's own player saying nothing is coming out of it. Together they are the one state the row
+     * must not answer with `playing` (its reading was rendered by an earlier return and nothing here
+     * is a sound any more) and must not answer with `interrupted` either: the queue still holds *his*
+     * entry at *his* position, so the honest row is `paused` there, with the tap still routed to that
+     * queue (`soundOwner` stays `queue`) and no transport write to either player.
+     */
+    const queueHeldSilent =
+      !!held && held.path === 'queue' && !!held.songId && held.songId === this.track?.id && held.sounding === false;
+    if (truth && !queueOwns) {
       this.setNativePosition(truth.positionMs);
       if (truth.durationMs > 0) this.nativeDurationMs = truth.durationMs;
       if (truth.playing) {
         this.dispatch({ type: 'engine-state', playing: true });
         // The player's own answer for the audible item: sound exists (v1.9.2).
         this.concludeStart('player');
+        this.claimSound('app', this.track?.id ?? '');
+      } else if (queueHeldSilent) {
+        /*
+         * The row is paused at the queue's position, not at the silent app player's: the queue is the
+         * one holding that entry, and its reading is the only position that is this entry's.
+         */
+        this.dispatch({ type: 'transport', action: 'pause' });
+        this.setNativePosition(held.positionMs);
+        this.claimSound('queue', held.songId);
+        this.modeReason = `the owner paused the away queue ${Math.round(held.positionMs / 1000)} s into ${held.songId} — the queue still holds that entry and is making no sound, so the row is paused there rather than playing over silence: one tap resumes that queue, and nothing was written to either player`;
+        this.emit();
+        this.onProgress?.(this.nativePositionMs, this.durationMs());
       } else if (this.state === 'playing') {
-        this.dispatch({ type: 'interruption' });
-        this.modeReason = this.wasPlayingBeforeHide
-          ? 'the track was playing when the app left the screen and the player is not playing now — one tap on play starts it again from here, and nothing was written to the player to get there'
-          : 'the player is not playing';
+        if (held && !!held.songId && held.songId === this.track?.id) {
+          /*
+           * **A player that still holds the entry and is not playing it is `paused`, not
+           * `interrupted` (unreleased, `t_234b1ab8`).** `interrupted` is the machine's word for "the
+           * sound stopped and nobody asked"; when the app was away the phone cannot tell his own
+           * pause from a stop nobody asked for, and the reading does not carry the difference — but it
+           * does carry that the player is still *on* this entry at a position, which is what a pause
+           * is. Both are one tap from playing; only one of them is true here, and the row says
+           * `paused` with the reason line naming what it could not know.
+           */
+          this.dispatch({ type: 'transport', action: 'pause' });
+          this.modeReason = `the return found ${held.songId} still held by its player at ${Math.round(this.nativePositionMs / 1000)} s and not playing — his own pause taken while the app was away, adopted as paused (the wire does not say whether he asked or the platform stopped it; either way one tap starts it again from here), and nothing was written to the player to get there`;
+        } else {
+          this.dispatch({ type: 'interruption' });
+          this.modeReason = this.wasPlayingBeforeHide
+            ? 'the track was playing when the app left the screen and the player is not playing now — one tap on play starts it again from here, and nothing was written to the player to get there'
+            : 'the player is not playing';
+        }
+        // Nothing is sounding (the platform stopped it or the owner did): the row may say so.
+        this.claimSound('none');
       } else this.dispatch({ type: 'engine-state', playing: false });
-    } else if (this.state === 'playing') {
+    } else if (truth) {
+      /* The queue owns the sound: the app's silence is not news about it, and its position is not
+       * this entry's position. Nothing is read from it and nothing is dispatched. */
+    } else if (this.state === 'playing' && !queueOwns) {
       // The player would not answer. Never leave a "playing" on screen that no tap can act on.
       this.dispatch({ type: 'interruption' });
     }
@@ -2520,9 +2852,33 @@ export class AudioEngine {
      * at all). The row is settled to `paused`: a decision, one tap from playing, and this is a
      * dispatch to the state machine — nothing is written to the player.
      */
-    if (this.state === 'loading') {
+    if (queueSounding && this.state !== 'playing') {
+      /*
+       * **A return that did not take the sound is not a return that found nothing sounding
+       * (unreleased, `t_05775526`).** The settle below is a decision that nothing is playing; over a
+       * queue that is audibly playing it is the lie in the owner's report — and it is reached from
+       * every way an app's own start can end badly (`loading` that never committed, and the `error`
+       * a start that made no sound leaves behind). The queue's reading is the answer, so the row
+       * renders it: `renderReading` settles the machine on `playing`, seeds the clock from the
+       * queue's own position, claims the queue as the sound's owner and starts nothing.
+       */
+      this.renderReading(
+        this.handover && this.handover.songId === this.track?.id ? this.handover.positionMs : this.nativePositionMs,
+      );
+    } else if (this.state === 'loading') {
       this.dispatch({ type: 'transport', action: 'pause' });
-      this.modeReason = `the return found nothing sounding ${this.track?.id ?? 'the visible entry'} — the row settles to paused, one tap away from playing, rather than sitting in loading; nothing was written to the player`;
+      /*
+       * **And the line says what is still sounding, not just that nothing is (unreleased).** A
+       * return that could not take the sound leaves a reading behind (`this.handover`) naming the
+       * entry the away queue is still playing at a position: the row must not be left implying the
+       * music stopped, and it must not be left waiting either. It is a decision — paused, one tap
+       * from taking that entry at that position — and the number is on the line so the next press
+       * is not a guess.
+       */
+      const offered = this.handover;
+      this.modeReason = offered
+        ? `the return could not take the sound: the away queue is still sounding ${offered.songId} at ${Math.round(offered.positionMs / 1000)} s, so the row settles to paused — one tap takes that entry at that position — rather than sitting in loading, and nothing was written to the player`
+        : `the return found nothing sounding ${this.track?.id ?? 'the visible entry'} — the row settles to paused, one tap away from playing, rather than sitting in loading; nothing was written to the player`;
     }
     if (this.state === 'playing') {
       /*
@@ -2925,7 +3281,20 @@ export class AudioEngine {
     }
     const track = this.track;
     if (!track) return;
-    // v1.9.26 — the same question the chip's word asks (`hasSpectrumTap`), asked once, in one place.
+    /*
+     * **The bars follow the sound or say nothing (unreleased, `t_05775526`).** While the away queue is
+     * the sound, the tap is on a silent player: polling it would render "playing" over no samples —
+     * the dead spectrum in the owner's report. The album-art theme with the reason on the line is the
+     * honest answer until the app's own player holds the sound again.
+     */
+    if (this.queueOwnsSound()) {
+      this.spectrumLive = false;
+      this.spectrumArming = false;
+      this.setSpectrumReason(
+        'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
+      );
+      return;
+    }
     if (!this.hasSpectrumTap()) {
       /*
        * No tap in this build (Android today, and the browser). v1.7 played a second, silent copy
@@ -3450,6 +3819,8 @@ export class AudioEngine {
    */
   private verifySpectrum(): void {
     if (this.backend !== 'native' || this.state !== 'playing') return;
+    // A tap on a player that is not the sound measures nothing (unreleased, `t_05775526`).
+    if (this.queueOwnsSound()) return;
     const bridge = this.native;
     const track = this.track;
     if (!bridge?.startSpectrum || !track) return;
@@ -3508,6 +3879,19 @@ export class AudioEngine {
   private attachSpectrum(track: TrackRequest): void {
     const bridge = this.native;
     if (this.backend !== 'native' || !bridge?.startSpectrum) return;
+    /*
+     * **The tap follows the sound or says nothing (unreleased, `t_05775526`).** The tap is on the
+     * app's own player. When the away queue owns the sound that player is silent, so a tap there
+     * renders "playing" over no samples — the owner's dead spectrum. The honest choice is the
+     * album-art theme with the reason on the line, not a flat row under a playing icon.
+     */
+    if (this.queueOwnsSound()) {
+      this.spectrumLive = false;
+      this.setSpectrumReason(
+        'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
+      );
+      return;
+    }
     const serial = this.claimSpectrumInstall(track);
     void bridge
       .startSpectrum(track.url, this.nativePositionMs)

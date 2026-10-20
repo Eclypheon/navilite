@@ -209,11 +209,26 @@ interface NaviliteRemotePlugin {
   handover?(): Promise<{ songId?: string; index?: number; positionMs?: number }>;
   releaseHandover?(next?: { songId?: string; positionMs?: number }): Promise<{ released?: boolean }>;
   /**
+   * `NaviliteRemote.queueTransport` — the away queue's own transport (unreleased, `t_05775526`):
+   * `op` is `pause` | `resume` | `seek`, and `positionMs` is where a seek lands. Answers `ok` when the
+   * queue's player took the command, and `why` when this side has no queue to command.
+   */
+  queueTransport?(next: { op: string; positionMs?: number }): Promise<{ ok?: boolean; why?: string }>;
+  /**
+   * **One line into the persisted log, for the return (unreleased).**
+   *
+   * The adopt/handover branch is decided here in the web layer and the file is written by Swift, so
+   * the sentence naming the branch never reached the phone's own log: a capture said what the phone
+   * did and could not say what the app decided. `record(_:_:)` in `NaviliteRemote.swift` stays the
+   * only writer — this asks it for exactly one `return` record, at the end of one foreground return.
+   */
+  recordReturn?(facts: NativeReturnRecord): Promise<{ recorded?: boolean }>;
+  /**
    * The persisted boundary log (v2.0-beta.16): every look-ahead and every boundary, one JSON object
    * per line, so the phone's own numbers can leave the phone instead of being read off a row.
    */
   boundaries(): Promise<{ path?: string; lines?: string[]; count?: number; tail?: string[] }>;
-  addListener(eventName: 'next' | 'previous' | 'advanced' | 'advanceFailed', listenerFunc: (event: { songId?: string; assetId?: string; index?: number; reason?: string }) => void): Promise<PluginListenerHandle>;
+  addListener(eventName: 'next' | 'previous' | 'advanced' | 'advanceFailed', listenerFunc: (event: { songId?: string; assetId?: string; index?: number; reason?: string; positionMs?: number; reading?: boolean }) => void): Promise<PluginListenerHandle>;
 }
 
 /**
@@ -502,6 +517,11 @@ export interface NativeBridge {
    * (so exactly one player is sounding from this moment) and answers with the entry, its index and its
    * position. The app's own player is then started at that position, and `releaseHandover` is what lets
    * the paused items go — after the commit, never before.
+   *
+   * **An empty `songId` is "the sound did not change hands" (unreleased, `t_e56c0413`).** The phone
+   * answers this call on every return, and `taken` says whether it performed the transfer; an answer
+   * that did not is answered here as no reading at all (`handoverAnswerOf`), because the position it
+   * carries is this side's own entry at 0:00 and `adoptHandover` starts whatever track a reading names.
    */
   handover?(): Promise<NativeHandover>;
   /**
@@ -509,6 +529,25 @@ export interface NativeBridge {
    * reading about items that are no longer the sound. Called only after the start has committed.
    */
   releaseHandover?(next?: { songId?: string; positionMs?: number }): Promise<boolean>;
+  /**
+   * **A transport press, sent to the away queue's own player (unreleased, `t_05775526`).**
+   *
+   * The queue is the sound on a return the app could not take back, and the app's own player is silent
+   * there: `pause()`/`resume()`/`seek()` on this bridge reach only that silent player, which is a write
+   * nobody can hear. This is the one call that reaches the player actually making the sound, so a
+   * press on the row stops, restarts or moves what the owner is listening to. Optional: a build
+   * without it answers nothing, and the engine keeps its old route.
+   */
+  queueTransport?(op: 'pause' | 'resume' | 'seek', positionMs?: number): Promise<boolean>;
+  /**
+   * **Write the return's own line into the phone's log (unreleased).**
+   *
+   * Called once, at the end of one foreground return, by the branch that decided it — never off a
+   * status or report stream, so a return that emits two records is a defect this contract makes
+   * visible. Optional: a bridge without it (an older plugin, the fake bridge) still returns, it just
+   * cannot date or name the return in the file.
+   */
+  recordReturn?(facts: NativeReturnRecord): Promise<boolean>;
   /**
    * Ask the native side which entry it is playing now, and adopt its answer (v1.9.8, by index since
    * v1.9.9).
@@ -671,8 +710,113 @@ export interface NativeReturnReading {
   positionMs: number;
   /** Which route owns the sound. */
   path: 'queue' | 'fetch' | 'plugin';
-  /** Whether the away queue is the owner. `path === 'queue'` is the same fact, said as a boolean. */
+  /**
+   * Whether the away queue is **making a sound** right now — the phone's own `queueIsSounding`, read
+   * off its player (`NaviliteRemote.queueIsSounding`). Not `path === 'queue'`: a queue the owner
+   * paused himself is still the route holding the entry, and it is silent (unreleased,
+   * `t_e56c0413`). This field used to be fabricated here as `path === 'queue'`, which made the
+   * paused-queue guard in `engine.ts` unreachable.
+   */
   sounding: boolean;
+}
+
+/**
+ * The plugin's handover reading, normalised (v2.0-beta.18): `{}` is "nothing to adopt", and a
+ * position that is not a number is a reading with no position rather than `NaN` in the clock.
+ *
+ * This is the shape of `state.resume` as well, which is why it does **not** gate on `taken` — see
+ * {@link handoverAnswerOf}, which does.
+ */
+export const handoverOf = (raw: unknown): NativeHandover | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as { songId?: unknown; index?: unknown; positionMs?: unknown };
+  const songId = typeof record.songId === 'string' ? record.songId : '';
+  if (!songId) return null;
+  const index = Number.isFinite(Number(record.index)) ? Number(record.index) : -1;
+  const asked = Number(record.positionMs);
+  const positionMs = Number.isFinite(asked) && asked > 0 ? Math.round(asked) : 0;
+  return { songId, index, positionMs };
+};
+
+/**
+ * **An answer to `handover()` is a reading only when the phone says it performed the transfer
+ * (unreleased, `t_e56c0413`).**
+ *
+ * `handover()` answers on every return, and `taken` says whether *this call* handed the sound over.
+ * When it did not — the adopt branch, where the phone stops the queue because the app's own player is
+ * already sounding the entry; a queue the owner paused himself; a queue that was not the thing
+ * sounding — the answer still carries a `returnReading()`: this side's own `audible` entry, at
+ * `positionMs: 0`, on `path: 'plugin'`. That is not an offer. Read as one, `adoptHandover` matched it
+ * against the visible track and called `play(track, 0, force: true)`, and `force` bypasses `play`'s
+ * idempotence rule — so the track reloaded, `select` was dispatched, the row went back to `loading`,
+ * and the position the return had just rendered (`renderReading`) was overwritten with 0:00.
+ *
+ * The gate is here, at the wire boundary, instead of in Swift's `handover()`: the contract is that a
+ * reading means "the sound is now yours", and every producer of this answer is held to it here — the
+ * engine's `adoptHandover` cannot be made to start a player by a field it never read. Answering `{}`
+ * from Swift was the alternative and was rejected as the *only* fix: it duplicates a rule the bridge
+ * already owns, and any other native side (or a future branch) answering a full reading with
+ * `taken: false` would restart the track again.
+ */
+export const handoverAnswerOf = (raw: unknown): NativeHandover | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  if ((raw as { taken?: unknown }).taken !== true) return null;
+  return handoverOf(raw);
+};
+
+/*
+ * The player's own reading of what is sounding (unreleased). Unlike `handoverOf` this keeps an
+ * **empty** `songId`: "nothing this side can name is sounding" is an answer the return has to be
+ * able to read (it is the one that sends the return to the handover branch), and dropping it here
+ * would turn it into "the plugin did not answer", which is a different fact.
+ */
+export const returnReadingOf = (raw: unknown): NativeReturnReading | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as { songId?: unknown; index?: unknown; positionMs?: unknown; path?: unknown; sounding?: unknown };
+  const path = record.path === 'queue' || record.path === 'fetch' ? record.path : 'plugin';
+  const asked = Number(record.positionMs);
+  return {
+    songId: typeof record.songId === 'string' ? record.songId : '',
+    index: Number.isFinite(Number(record.index)) ? Number(record.index) : -1,
+    positionMs: Number.isFinite(asked) && asked > 0 ? Math.round(asked) : 0,
+    path,
+    /*
+     * **The phone's own answer, not a re-derivation (unreleased, `t_e56c0413`).** This read
+     * `path === 'queue'`, so a paused queue — the same route, holding the same entry, making no sound
+     * — was described as sounding on every return, and the guard that ends the row `paused` over it
+     * could never be taken. `undefined` on the wire (a build that predates the key) is a queue that
+     * has not said it is sounding, so it does not own the row.
+     */
+    sounding: record.sounding === true,
+  };
+};
+
+/**
+ * **One foreground return, as the log must be able to say it (unreleased).**
+ *
+ * Written by the side that *decided*, once per return: which branch the return took (`path`), the
+ * reading the branch was decided from (`songId`, the route that owned the sound, position and
+ * duration), whether a start was issued this return, and the state the machine settled on. `awake`
+ * is added by the native side's `record(_:_:)`, which knows it; `index` and `generation` ride along
+ * with it for the same reason.
+ */
+export interface NativeReturnRecord {
+  /** Which branch the return took. Never `none` — this record only exists once a branch ran. */
+  path: 'adopt' | 'handover';
+  /** The entry the reading named (or the visible one when the player named nothing). */
+  songId: string;
+  /** The route that owned the sound when the return decided: `queue` / `fetch` / `plugin` / `none`. */
+  route: string;
+  /** The reading's live position, ms — `-1` when there was no reading. */
+  positionMs: number;
+  /** The track's duration, ms, as the return ended — `-1` when unknown. */
+  durationMs: number;
+  /** Whether a start was issued through `play` during this return. `true` is the handover's business. */
+  started: boolean;
+  /** The state the return settled on — `playing`, `paused`, `interrupted`, `loading`. */
+  state: string;
+  /** The engine's own sentence naming the branch (`modeReason`), so the file carries it too. */
+  why?: string;
 }
 
 export interface NativePlaybackFacts {
@@ -708,8 +852,13 @@ export interface NativeBridgeEvents {
    * It is an *adoption*: the audio is already playing, so the listener to this must move onto that
    * track rather than start it. Optional so a bridge without it (an older build, the fake bridges in
    * the tests) is a bridge that simply never reports one.
+   *
+   * **And a position rides with it when the native side is ANSWERING a refusal (unreleased).** A
+   * `handover-refused` that names the entry the queue is sounding is an answer, and the answer
+   * carries where that entry is now (`positionMs`) plus `reading: true`: the app renders that
+   * reading instead of leaving the row on `loading` and asking again every three seconds.
    */
-  onAdvanced?(songId: string, index: number): void;
+  onAdvanced?(songId: string, index: number, positionMs?: number): void;
 }
 
 const BACKGROUND_AUDIO_SERVICE = 'BackgroundAudio';
@@ -1481,39 +1630,12 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
      * slot, which is not a gap — it is the instruction to fetch that entry itself at the boundary,
      * and that is why the queue cannot run out.
      */
-    /**
-     * The plugin's handover reading, normalised (v2.0-beta.18): `{}` is "nothing to adopt", and a
-     * position that is not a number is a reading with no position rather than `NaN` in the clock.
-     */
-    const handoverOf = (raw: unknown): NativeHandover | null => {
-      if (!raw || typeof raw !== 'object') return null;
-      const record = raw as { songId?: unknown; index?: unknown; positionMs?: unknown };
-      const songId = typeof record.songId === 'string' ? record.songId : '';
-      if (!songId) return null;
-      const index = Number.isFinite(Number(record.index)) ? Number(record.index) : -1;
-      const asked = Number(record.positionMs);
-      const positionMs = Number.isFinite(asked) && asked > 0 ? Math.round(asked) : 0;
-      return { songId, index, positionMs };
-    };
     /*
-     * The player's own reading of what is sounding (unreleased). Unlike `handoverOf` this keeps an
-     * **empty** `songId`: "nothing this side can name is sounding" is an answer the return has to be
-     * able to read (it is the one that sends the return to the handover branch), and dropping it here
-     * would turn it into "the plugin did not answer", which is a different fact.
+     * `handoverOf` / `handoverAnswerOf` / `returnReadingOf` are module-level (unreleased,
+     * `t_e56c0413`): the two wire shapes a return is decided from are parsed by exported functions so
+     * a test can drive the same parse the bridge performs, instead of inventing a `NativeReturnReading`
+     * the phone could never have produced. Nothing in them reads this closure.
      */
-    const returnReadingOf = (raw: unknown): NativeReturnReading | null => {
-      if (!raw || typeof raw !== 'object') return null;
-      const record = raw as { songId?: unknown; index?: unknown; positionMs?: unknown; path?: unknown };
-      const path = record.path === 'queue' || record.path === 'fetch' ? record.path : 'plugin';
-      const asked = Number(record.positionMs);
-      return {
-        songId: typeof record.songId === 'string' ? record.songId : '',
-        index: Number.isFinite(Number(record.index)) ? Number(record.index) : -1,
-        positionMs: Number.isFinite(asked) && asked > 0 ? Math.round(asked) : 0,
-        path,
-        sounding: path === 'queue',
-      };
-    };
 
     const stateQueue = async (): Promise<boolean> => {
       if (!remote?.setQueue) {
@@ -1886,7 +2008,13 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       async handover() {
         if (!remote?.handover) return { songId: '', index: -1, positionMs: 0 };
         const answer = await bounded(remote.handover(), null, 'handover');
-        return handoverOf(answer) ?? { songId: '', index: -1, positionMs: 0 };
+        /*
+         * `handoverAnswerOf`, not `handoverOf` (unreleased, `t_e56c0413`): an answer with
+         * `taken !== true` did not hand the sound over, whatever reading it carries — the adopt
+         * branch's `returnReading()` is this side's own entry at 0:00, and `adoptHandover` starts
+         * the track on any reading it is given.
+         */
+        return handoverAnswerOf(answer) ?? { songId: '', index: -1, positionMs: 0 };
       },
       async releaseHandover(next) {
         if (!remote?.releaseHandover) return false;
@@ -1896,6 +2024,30 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           'releaseHandover',
         );
         return answer?.released === true;
+      },
+      async recordReturn(facts) {
+        if (!remote?.recordReturn) return false;
+        const answer = await bounded(remote.recordReturn(facts), null, 'recordReturn');
+        return answer?.recorded === true;
+      },
+      /**
+       * **The away queue's own transport (unreleased, `t_05775526`).** One round trip, bounded like
+       * every other call on this bridge: the row has already moved (the press is optimistic), so a
+       * plugin that never answers must not hold a press open. `positionMs` travels in milliseconds —
+       * the engine's unit — and the plugin converts.
+       */
+      async queueTransport(op, positionMs) {
+        if (!remote?.queueTransport) return false;
+        const answer = await bounded(
+          remote.queueTransport({ op, positionMs: Number.isFinite(positionMs) ? Math.round(positionMs as number) : -1 }),
+          null,
+          'queueTransport',
+        );
+        if (!answer?.ok) {
+          boundaryReason = `the away queue's own player did not take the ${op}: ${answer?.why ?? 'the plugin did not answer'}`;
+          return false;
+        }
+        return true;
       },
       async reconcile() {
         if (!remote?.now) return null;
@@ -2189,6 +2341,15 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
                 const songId = typeof event?.songId === 'string' ? event.songId : '';
                 const slot = typeof event?.assetId === 'string' ? event.assetId : '';
                 const moved = Number.isFinite(event?.index) ? Number(event?.index) : -1;
+                /*
+                 * **A refusal that names the sound is an answer (unreleased).** `positionMs` is
+                 * present only when the native side is answering a `handover-refused` — the entry
+                 * the queue is sounding, where it is now — and it is what the row renders instead
+                 * of staying on `loading` while the queue plays and the app asks again every three
+                 * seconds. An ordinary away boundary carries no position and is the adoption it
+                 * always was.
+                 */
+                const answered = Number.isFinite(event?.positionMs) ? Number(event?.positionMs) : undefined;
                 nativeAdvances += 1;
                 /*
                  * The slot the native side says it played is the audible one from that instant, and
@@ -2212,10 +2373,34 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
                  * And the index the native side moved to becomes the index the app has published,
                  * so the reconciliation on the way back does not read this same advance a second
                  * time and move the queue again.
+                 *
+                 * **A reading's index is published BEFORE it is written (unreleased).** When
+                 * `positionMs` is present the event is the answer to a `handover-refused` — the
+                 * entry the QUEUE is sounding and where the queue is — and the adopt exit uses the
+                 * same shape for the entry the app's own player took. Neither number is a boundary
+                 * this player walked, so neither is trusted as an index: the entry is looked up in
+                 * the statement's own `list`, which *is* the published order. The native side now
+                 * sends the published index for both (`NavilitePressRules.publishedIndex`); this
+                 * gate means an older native build still sending AVPlayer's window index (0..2)
+                 * cannot put 0 in the statement beside entry 8 of 269.
                  */
-                if (moved >= 0) statement = { ...statement, index: moved };
+                const reading = event?.reading === true || answered !== undefined;
+                if (reading) {
+                  /*
+                   * The index still moves, but only to one this app has already published: the
+                   * statement's own `list` is the published order, so the entry is found in it and
+                   * the event's number is never trusted. A stale native build sending AVPlayer's
+                   * window index (0..2) therefore cannot write 0 beside entry 8 of 269 — and the
+                   * adopt exit, which names the entry the app's own player took, still moves the
+                   * statement onto that entry.
+                   */
+                  const at = songId ? statement.list.findIndex((entry) => entry.songId === songId) : -1;
+                  if (at >= 0) statement = { ...statement, index: at };
+                } else if (moved >= 0) {
+                  statement = { ...statement, index: moved };
+                }
                 boundaryReason = `the native player took the boundary itself and is playing ${songId || 'the next entry'}`;
-                events.onAdvanced?.(songId, moved);
+                events.onAdvanced?.(songId, moved, answered);
               }),
               /*
                * And where it could not. The app is told the track ended after all — which is what it
