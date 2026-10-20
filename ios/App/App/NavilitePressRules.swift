@@ -409,8 +409,20 @@ enum NavilitePressRules {
         if let appSongId = appSoundingSongId, !appSongId.isEmpty {
             let queueSongId = soundingSongId ?? ""
             if queueSongId.isEmpty || queueSongId != appSongId {
-                /* The app's own player is sounding an entry the queue is not: one owner, the app's. */
-                return .adopt(songId: appSongId, index: soundingIndex,
+                /*
+                 * **The adoption of ANOTHER entry carries no index of the queue's (unreleased).**
+                 *
+                 * `soundingIndex` is the *queue's* entry index, and on this branch the app's player
+                 * is sounding a different entry than that index names — so passing it published a
+                 * number that points at another track, and `NaviliteRemote` uses it as
+                 * `publishedIndex`'s fallback, so this side's own `index` was that foreign number
+                 * until `adoptNativeAdvance` corrected it. Nothing was mis-started (the web layer
+                 * guards on `songId`), but the `return-adopted` line carried a wrong index and the
+                 * cursor sat on a stranger's entry in between. `-1` is the existing last-resort
+                 * answer for "no index of this side's names it", so the number is withheld rather
+                 * than borrowed.
+                 */
+                return .adopt(songId: appSongId, index: -1,
                               positionMs: max(0, appPositionMs ?? 0))
             }
             /* Same entry — now the position has to prove it, exactly as a take does. */
@@ -658,5 +670,24 @@ enum NavilitePressRules {
             return "\(offeredSongId) at index \(offeredIndex) was already offered and answered, so this statement does not ask again — one return, one answer, and the app has the entry and the position to render"
         }
         return "\(offeredSongId) was already offered at index \(offeredIndex) and answered at index \(answeredIndex), so this statement does not ask again — the entry is the request, and the index is the number the statement re-bases"
+    }
+
+    /// **An answer is about one ask, not one song for the session (unreleased).**
+    ///
+    /// This is the other half of `answeredOffer`: that one says a statement for the entry just
+    /// answered does not ask again, and this one says which answer still stands when a *different*
+    /// entry is asked about. The remote kept `answeredOffer` from the refusal until an abandon or a
+    /// fresh `handover()`, so an entry refused once stayed answered for the rest of the session — and
+    /// when the queue came back to it (repeat-all wrapping, or the same song twice in the queue) its
+    /// statement was swallowed as `queue-handover-answered` with no offer and no deadline, while the
+    /// queue was audibly playing it and the row held the reading of the entry in between. Any ask
+    /// about another entry expires the answer; the answer that stands is the one about the entry
+    /// being asked about now.
+    static func answerAfter(offering offeredSongId: String, answeredSongId: String?,
+                            answeredIndex: Int) -> (songId: String, index: Int)? {
+        guard let answeredSongId, !answeredSongId.isEmpty, answeredSongId == offeredSongId else {
+            return nil
+        }
+        return (answeredSongId, answeredIndex)
     }
 }

@@ -585,6 +585,22 @@ struct PressRulesTests {
                                                          appSoundingSongId: "c", appPositionMs: 5_000)
         check("(F1) a player sounding a DIFFERENT entry is still an adoption — one owner, the app's",
               adoptAnswer(elsewhere)?.songId == "c" && adoptAnswer(elsewhere)?.positionMs == 5_000)
+        /*
+         * **The adoption of another entry carries no index of the queue's (unreleased).**
+         *
+         * `soundingIndex` is the queue's entry index and belongs to a different entry here, so
+         * handing it back published a number that named another track: `NaviliteRemote` takes it as
+         * `publishedIndex`'s fallback, so this side's own `index` pointed at a stranger's entry until
+         * `adoptNativeAdvance` corrected it, and the `return-adopted` line carried that number. The
+         * index is withheld (`-1` — the same last-resort the published lookup answers), not borrowed.
+         * Nothing is mis-started either way: the web layer guards on the `songId`.
+         */
+        check("(2) an adoption of ANOTHER entry publishes no index of the queue's — -1, not entry 1",
+              adoptAnswer(elsewhere)?.index == -1, "answered index \(String(describing: adoptAnswer(elsewhere)?.index))")
+        check("(2) ...so the foreign index cannot become the app's own cursor for that entry",
+              adoptAnswer(elsewhere)?.index != 1)
+        check("(2) the adoption of the QUEUE's own entry still carries the index it was asked for",
+              adoptAnswer(appSounding)?.index == 1, "answered index \(String(describing: adoptAnswer(appSounding)?.index))")
         check("nothing sounding and nothing of the app's: no reading to give, nothing to wait for",
               NavilitePressRules.returnDecision(queueOwnsSound: false, soundingSongId: nil,
                                                 soundingIndex: -1, positionMs: 0) == nil)
@@ -703,6 +719,48 @@ struct PressRulesTests {
         check("(b) a DIFFERENT entry at the SAME index is still a new question — the queue advanced",
               NavilitePressRules.answeredOffer(offeredSongId: "next", offeredIndex: 7,
                                                answeredSongId: "0DHk", answeredIndex: 7) == nil)
+
+        print("\n# an answer is about one ask — a recurring entry is asked again (unreleased)")
+
+        /*
+         * **The walk from the review: X refused, the queue advances to Y, the queue comes back to X.**
+         *
+         * `answeredOffer` was cleared on abandon and on a fresh `handover()`, never on a *different*
+         * entry being offered. So the answer about X outlived its ask: Y was offered with the answer
+         * about X still standing, and when repeat-all (or the same song twice in the queue) brought X
+         * back, X's statement was swallowed as `queue-handover-answered` — no offer, so no deadline —
+         * while the queue was audibly playing X and the row held Y's reading. Driven here as the
+         * state the remote keeps: the answer after each ask is `answerAfter`, and the question a
+         * statement asks is `answeredOffer`.
+         */
+        var standing: (songId: String, index: Int)? = ("X", 7)          // X was refused
+        let afterX = NavilitePressRules.answeredOffer(offeredSongId: "X", offeredIndex: 3,
+                                                      answeredSongId: standing?.songId ?? "",
+                                                      answeredIndex: standing?.index ?? -1)
+        check("(1) the statement in reply to X's refusal is the same request — it does not re-ask",
+              afterX != nil)
+        standing = NavilitePressRules.answerAfter(offering: "Y",
+                                                  answeredSongId: standing?.songId,
+                                                  answeredIndex: standing?.index ?? -1)
+        check("(1) offering a DIFFERENT entry expires the answer — X was not what was asked", standing == nil,
+              "the answer that stood was \(String(describing: standing?.songId))")
+        let backToX = NavilitePressRules.answeredOffer(offeredSongId: "X", offeredIndex: 3,
+                                                       answeredSongId: standing?.songId ?? "",
+                                                       answeredIndex: standing?.index ?? -1)
+        check("(1) ...so the queue coming back to X is a NEW question, not `queue-handover-answered`",
+              backToX == nil)
+        check("(1) ...which is the offer path: an offer for X is made and `armOfferDeadline` runs with it",
+              backToX == nil && NavilitePressRules.answerAfter(offering: "X",
+                                                               answeredSongId: standing?.songId,
+                                                               answeredIndex: standing?.index ?? -1) == nil)
+        check("(1) the answer that IS about the entry asked about still stands — the index is re-based, the ask is not",
+              NavilitePressRules.answerAfter(offering: "X", answeredSongId: "X", answeredIndex: 5)?.songId == "X"
+              && NavilitePressRules.answerAfter(offering: "X", answeredSongId: "X", answeredIndex: 5)?.index == 5)
+        check("(1) an answer that names no entry stands for nothing — never a blanket swallow",
+              NavilitePressRules.answerAfter(offering: "X", answeredSongId: nil, answeredIndex: -1) == nil
+              && NavilitePressRules.answerAfter(offering: "X", answeredSongId: "", answeredIndex: 7) == nil)
+        check("(1) ...and it expires for the second occurrence of one song in the same queue too",
+              NavilitePressRules.answerAfter(offering: "Y", answeredSongId: "X", answeredIndex: 7) == nil)
 
         print("\n\(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)

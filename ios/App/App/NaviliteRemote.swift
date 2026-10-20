@@ -2584,7 +2584,19 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
              * `queue`, which the statement being handled here has just replaced with the web layer's
              * own published list, so the index it carries is a number this side has no reason to
              * expect to match. A queue that advances is a different entry, and that still asks.
+             *
+             * **An answer is about one ask, not one song for the session (unreleased).** This answer
+             * used to stand until an abandon or a fresh `handover()`, and an ask about another entry
+             * did not retire it. So: X refused, the queue advanced to Y and offered it, the queue came
+             * back to X (repeat-all wrapping, or one song twice in the queue) — and X's statement was
+             * swallowed here as `queue-handover-answered`, with no offer and no deadline, while the
+             * queue was audibly playing X and the row held the reading of Y. Offering a different
+             * entry expires the answer (`NavilitePressRules.answerAfter`), so only the entry being
+             * asked about now can be "already answered".
              */
+            answeredOffer = NavilitePressRules.answerAfter(offering: songId,
+                                                           answeredSongId: answeredOffer?.songId,
+                                                           answeredIndex: answeredOffer?.index ?? -1)
             if let answered = answeredOffer,
                let already = NavilitePressRules.answeredOffer(offeredSongId: songId, offeredIndex: soundingIndex,
                                                               answeredSongId: answered.songId,
