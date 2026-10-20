@@ -879,12 +879,26 @@ export class AudioEngine {
      * never be entered. A silent item is a different fact: its counter moves, and its zeros are its
      * own frame, drawn as the silence it is.
      */
+    /**
+     * **The drawing rule is the producer's own pace (unreleased, design §3).** `frames` says *that*
+     * this item's tap produced something; `lastAnalysisAt` and `framePeriodMs` say *when* and *how
+     * often*. A frame is held for one window of its own declared period — that is a tap between its
+     * own frames, and a tap slower than this poll is still live — and past it the tap has stopped
+     * producing for this item, so the last frame it left is no longer drawn. Without this, a tap that
+     * stopped stood on screen for ever with `spectrum: true` behind the bars: the whole-track state
+     * the owner reported. No constant and no poll count is compared here: both numbers are the
+     * plugin's, about the item its tap is on.
+     */
+    const pace = frame.framePeriodMs;
+    const ageMs = frame.lastAnalysisAt > 0 ? Date.now() - frame.lastAnalysisAt : 0;
+    const outOfPace = pace > 0 && frame.lastAnalysisAt > 0 && ageMs > pace;
     const dated =
       snap.state === 'playing' &&
       frame.attached &&
       frame.frames > 0 &&
       frame.itemKey !== '' &&
-      frame.itemKey === snap.entry.key;
+      frame.itemKey === snap.entry.key &&
+      !outOfPace;
     if (dated) {
       const bands = frame.bands;
       if (!this.nativeBands || this.nativeBands.length !== bands.length) this.nativeBands = new Uint8Array(bands.length);
@@ -903,9 +917,11 @@ export class AudioEngine {
     this.spectrumArming = this.state === 'playing' && this.hasSpectrumTap();
     if (this.spectrumLive) {
       this.spectrumLive = false;
-      this.modeReason = snap.spectrum.attached
-        ? 'the frame the tap is holding belongs to another item — the bars wait for this item’s own'
-        : 'nothing is attached to the item that is playing — the bars follow the audio';
+      this.modeReason = outOfPace
+        ? `the frame this item’s tap last produced is ${Math.round(ageMs)} ms old, longer ago than its own frame period (${Math.round(pace)} ms) — the tap has stopped producing for this item, and the bars wait for its next frame`
+        : snap.spectrum.attached
+          ? 'the frame the tap is holding belongs to another item — the bars wait for this item’s own'
+          : 'nothing is attached to the item that is playing — the bars follow the audio';
       this.emit();
     }
   }

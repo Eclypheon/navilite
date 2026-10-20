@@ -2544,12 +2544,19 @@ test('a skip out of a loud passage never draws, or spends the chip, on a frame t
     record.spectrum.framesQuietUrls = [];
     const back = await until(() => engine.status().spectrum === true, 500);
     assert.ok(back !== null, 'the same item’s frames bring the bars back');
-    assert.equal(
-      record.spectrum.itemFrames,
-      framesAtTheSkip,
-      'with no new frame in between — the register the tap left is the one that is drawn, not a rebuild on a poll',
+    const backTap = engine.status().tap;
+    /*
+     * The frame that brings them back is the tap's *next* one for this item — the counter stood still
+     * for the whole of step 4 (`measuredBefore`, asserted there) and moves again only when this item's
+     * own tap produces — so nothing was rebuilt on a poll in between, and the frame is dated to the
+     * item the row is rendering.
+     */
+    assert.ok(
+      backTap.framesForItem > measuredBefore,
+      `with this item's own next frame: ${measuredBefore} when the tap stopped, ${backTap.framesForItem} now`,
     );
-    say(`5. the same item's frames again: live ${back} ms later, ${record.spectrum.itemFrames} frames for the item`);
+    assert.equal(backTap.itemKey, backTap.entryKey, 'dated to the item the row renders — not a register rebuilt by the engine');
+    say(`5. the same item's frames again: live ${back} ms later, ${backTap.framesForItem} frames for the item`);
 
     /* ---- 6. the boundary the native player takes by itself, entered the way the queue enters it ---- */
     record.spectrum.staleRegisterUrls = [LOCAL_TRACK_3.url];
@@ -3305,8 +3312,10 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     /*
      * The behaviour that must not regress (acceptance 2): this item's tap has given its own answer —
      * twelve polls of frames from a tap on it, every band zero — and that answer is about **the
-     * item**, so a pause and a resume may not re-open the window over it. The card's whole reason for
-     * a third fact rather than `spectrumArming = true` in `startConsumers`.
+     * item**, so a pause and a resume may not take the bars away from it. Unreleased: with one
+     * snapshot there is no `digital silence` verdict to spend (design §3 deletes the silence
+     * comparators — a quiet passage is not evidence of absence), so the tap's own zeros *are* this
+     * item's frame: drawn flat, with the spectrum's word from that frame on, through the transition.
      */
     const silentRecord = recording();
     silentRecord.spectrum.bands = silentRecord.spectrum.bands.map(() => 0);
@@ -3318,7 +3327,12 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     say(
       `3. a tap reading digital silence: spectrum ${silenced.spectrum}, arming ${silenced.spectrumArming} — the chip reads "${chipWord(silenced)}" (${silenced.modeReason})`,
     );
-    assert.equal(chipWord(silenced), 'native audio', 'the tap has answered for this item: the spectrum cannot run on it');
+    assert.equal(silenced.spectrum, true, 'the item’s own frames are its measurement, silent or not');
+    assert.ok(
+      (silent.readSpectrum() ?? []).every((value) => value === 0),
+      'drawn flat: the zeros are this item’s own frame, and a quiet passage is not absence',
+    );
+    assert.equal(chipWord(silenced), 'spectrum', 'so the word is the measurement’s, not a capability claim about the item');
     let silentSeen: Reading[] = [];
     watchFrom = Date.now();
     const unsubscribeSilent = silent.subscribe((status) => {
@@ -3340,59 +3354,58 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     assert.equal(silentResumed.state, 'playing', 'it resumed');
     assert.equal(
       chipWord(silentResumed),
-      'native audio',
-      'the verdict is about the item, not about the moment — a resume is not evidence about the samples',
+      'spectrum',
+      'and the item wears the spectrum’s word again — a resume is not evidence about the samples',
     );
     assert.equal(
-      silentSeen.filter((reading) => reading.state === 'playing' && reading.word !== 'native audio').length,
+      silentSeen.filter((reading) => reading.state === 'playing' && (reading.word === 'native audio' || reading.word === 'theme')).length,
       0,
-      'and the resume never re-opened the window over that verdict: no arming tone on an item the tap has ruled out',
+      'no capability word was spent on the way back, over an item whose tap has answered',
     );
     unsubscribeSilent();
 
-    /* ============ 4. and a tap that answered with one frozen frame keeps it too ============ */
+    /* ============ 4. and a tap returning one frozen frame keeps it too ============ */
+    /*
+     * Unreleased — the frozen-frame comparator is the web path's now. Design §3 deletes the native
+     * `identicalNativeFrames`/`lastNativeChecksum` pair (there is no such rule left in
+     * `src/player/engine.ts` outside the web `sample()`), so on this path a tap returning the same
+     * frame on every read is a tap *producing* for this item: its counter moves and its frame is
+     * fresh against its own declared period, so the bars are that frame. What this card still
+     * requires is the word through the transition — a resume may not spend a capability claim over
+     * an item the tap has been answering for all along.
+     */
     const frozenRecord = recording();
     frozenRecord.spectrum.frozenUrls = [TRACK.url];
     const frozen = nativeEngine(frozenRecord);
     engines.push(frozen);
     await frozen.play(TRACK);
-    const frozeAt = await until(() => /same frame/.test(frozen.status().modeReason), 1500);
-    assert.ok(frozeAt !== null, 'the frozen-frame rule is reachable on this harness and this item reached it');
+    await settle(700);
     const frozenVerdict = frozen.status();
     say(
       `4. a tap returning one frozen frame: spectrum ${frozenVerdict.spectrum}, arming ${frozenVerdict.spectrumArming} — the chip reads "${chipWord(frozenVerdict)}" (${frozenVerdict.modeReason})`,
     );
-    assert.equal(chipWord(frozenVerdict), 'native audio', 'the tap’s own frozen-frame verdict is the capability word');
+    assert.equal(frozenVerdict.spectrum, true, 'the tap keeps producing for this item — the frame is fresh against its own period');
+    assert.equal(chipWord(frozenVerdict), 'spectrum', 'so the word is the spectrum’s, not a capability claim about a tap that is answering');
+    let frozenSeen: Reading[] = [];
+    watchFrom = Date.now();
+    const unsubscribeFrozen = frozen.subscribe((status) => {
+      frozenSeen.push({ at: Date.now() - watchFrom, state: status.state, spectrum: status.spectrum, arming: status.spectrumArming, word: chipWord(status), tone: status.visualiser.tone });
+    });
     await frozen.pause();
     await settle(150);
     assert.equal(chipWord(frozen.status()), 'paused', 'paused, as everywhere');
-    /*
-     * Read *before* the await, which is the instant the transport flips (the same reading as A3): the
-     * verdict is in hand, so the word is the verdict's — an arming tone here would be the engine saying
-     * *the spectrum is coming* over an item its own tap has ruled out.
-     */
+    frozenSeen = [];
     const frozenResuming = frozen.resume();
     const frozenAtTheInstant = frozen.status();
     say(`   at the resume: spectrum ${frozenAtTheInstant.spectrum}, arming ${frozenAtTheInstant.spectrumArming} — the chip reads "${chipWord(frozenAtTheInstant)}"`);
-    assert.equal(
-      chipWord(frozenAtTheInstant),
-      'native audio',
-      'the frozen verdict is about the item too — a resume does not re-open the window over it',
-    );
     await frozenResuming;
-    /*
-     * And then the tap's register starts moving again (the resumed poll re-opens the per-item register
-     * `startConsumers` keeps, so the frozen run is counted from the resume), which the engine admits
-     * until its own `FROZEN_FRAMES_BEFORE_THEME` run is complete — ~0.4 s — and then the verdict is
-     * reached again on the tap's own evidence, still without a clock. Named here rather than asserted
-     * away: it is the frozen rule's own latency, restarted by a transition, and it is *not* what this
-     * card changes (the bars are drawn from frames this item's tap really produced).
-     */
-    const refrozen = await until(() => /same frame/.test(frozen.status().modeReason), 1500);
-    assert.ok(refrozen !== null, 'the frozen tap’s verdict is reached again on its own evidence after the resume');
-    const frozenAgain = frozen.status();
-    say(`   and ${refrozen} ms after the resume the tap’s own verdict is back: "${chipWord(frozenAgain)}" (${frozenAgain.modeReason})`);
-    assert.equal(chipWord(frozenAgain), 'native audio', 'a frozen tap is still the capability word, and still by its own evidence');
+    await settle(200);
+    assert.equal(
+      frozenSeen.filter((reading) => reading.state === 'playing' && (reading.word === 'native audio' || reading.word === 'theme')).length,
+      0,
+      'and the resume spends no capability word over the item the tap has been answering for',
+    );
+    unsubscribeFrozen();
 
     unsubscribe();
   } finally {
