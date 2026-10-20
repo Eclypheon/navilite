@@ -301,7 +301,7 @@ export async function boot(root: HTMLElement): Promise<void> {
       return data ? Array.from(data) : null;
     },
     /** The last native tap frame, straight from the plugin: bands plus the tap's own counters. */
-    nativeSpectrum: () => engine.readNativeFrame(),
+    nativeSpectrum: () => engine.currentSnapshot(),
 
     /** The track the player is on, and the track the lyrics panel loaded for. */
     tracks: () => ({

@@ -4,11 +4,11 @@
  * What the pool is: the claim map the engine keeps beside the bridge's own prepared slots —
  * `songId -> the exact URL it was warmed under` (v1.9.5, one prepared slot since v1.9.1). The player
  * holds those tracks buffered and silent, each under its own asset id, so when one of them is played
- * from the start there is nothing to load: the warmed asset is adopted and the first audio arrives
+ * from the start there is nothing to load: the warmed asset is played and the first audio arrives
  * in a seek's time instead of after a cold fetch. The URL is kept beside the id because the stream
  * URL is the bitrate the link had been measured at when the track was warmed, and the play request
- * must carry **exactly that string** for the adoption to be of the same bytes (`startNative` refuses
- * to adopt unless the two agree).
+ * must carry **exactly that string** for the match to be of the same bytes (`startNative` refuses
+ * to use it unless the two agree).
  *
  * What the pool is not: a transport. It holds no `AudioEngine`, no bridge and no clock — every
  * method is a fact about `(songId, url)` — which is what makes the rules here readable on their own.
@@ -95,7 +95,7 @@ export class WarmPool {
    * Drop the claims for tracks the queue is no longer around (v1.9.5).
    *
    * Called when a selection moves the queue: a claim for a track nobody is going to hear is a claim
-   * that would make a later start try to adopt an asset the player no longer holds. The bridge's own
+   * that would make a later start use an asset the player no longer holds. The bridge's own
    * slots are not touched — they are reused by the next warm, and the pool is fixed, so dropping a
    * claim costs nothing and removes a whole class of stale state.
    */

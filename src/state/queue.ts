@@ -989,7 +989,7 @@ export class PlaybackQueue {
     const song = this.items[this.order[at]!]!.song;
     const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
     this.onChanged?.();
-    await this.engine.adoptNativeAdvance?.(this.trackRequest(song, this.engine.warmedUrl?.(song.id) ?? null, artworkUrl), positionMs);
+    await this.engine.nativeMovedTo(this.trackRequest(song, this.engine.warmedUrl?.(song.id) ?? null, artworkUrl), positionMs);
     this.reportNowPlaying(song);
     this.setupMediaSession(song, artworkUrl);
     this.scheduleSaveQueue();

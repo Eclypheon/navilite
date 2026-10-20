@@ -32,7 +32,7 @@ export type PlayerEvent =
   /** The user, or the lock screen, asked for a transport. The machine decides what that means. */
   | { type: 'transport'; action: 'play' | 'pause' | 'toggle' }
   /**
-   * The session was taken away — a call, Siri, another app.
+   * The session was interrupted — a call, Siri, another app.
    *
    * There is one phase and it is the arrival. v1.7.3 also carried a `phase: 'ended'` for "given
    * back", and nothing ever sent it: recovery has always arrived as the player's own `engine-state`
@@ -246,7 +246,7 @@ export interface EngineStatus {
    * at the start of every track, on a build whose graph was built and working.
    *
    * **v1.9.27 (card `t_c8cc01c6`) — and on the native path the flag is not the whole of it.**
-   * `spectrumArming` is written only by a start, an adoption and a poll that has found a problem, so
+   * `spectrumArming` is written only by a start and by the snapshot poll, so
    * the ways into `playing` that are none of those — **a resume**, a return from the background —
    * reached the capability word with this flag still false, on an item whose tap was measuring a
    * moment ago. `tapArming` reads the native path's own per-item verdict register, the mirror of
@@ -281,8 +281,6 @@ export interface EngineStatus {
    * diagnosis were made without either one reaching the screen.
    */
   pluginState: string | null;
-  /** What the boundary's adoption did: 'adopted', 'nothing prepared', 'play refused (…)', 'timed out' (v1.9.5). */
-  adoptOutcome: string;
   /** Events the bridge discarded itself, by reason (v1.9.5) — filtered as inaudible, or inside a slot write. */
   droppedEvents: { inaudible: number; slotGrace: number };
   /**
@@ -347,34 +345,13 @@ export interface EngineStatus {
       playMs: number;
       /** `startedAt` → `audibleAt` — **the foreground gap**, ms; `-1` while pending. */
       audibleMs: number;
-      /** Now − the moment the reading was taken, ms, so a stale one is identifiable; `-1` when nothing is timed. */
+      /** Now − the moment the reading was made, ms, so a stale one is identifiable; `-1` when nothing is timed. */
       ageMs: number;
       /** True while the boundary has been begun and no sound has been reported for it yet. */
       pending: boolean;
     } | null;
   };
-  /**
-   * **Which branch the last return to the foreground took, and the number that proves it read rather
-   * than wrote (unreleased).**
-   *
-   * `path: 'adopt'` is a return whose first question — asked of the player — was answered "I am
-   * already sounding the entry the queue is on", so the return read the position, the duration and the
-   * playing state and wrote nothing. `path: 'handover'` is the other half: the player was not holding
-   * that entry, so the away queue's reading was taken and the app's own player started at it.
-   * `'none'` is an engine that has not returned yet.
-   *
-   * `starts` is every start `play` has issued in the session. A return that adopts must not move it,
-   * and `loading` is the state only `play` dispatches — so the two facts are the same claim, readable
-   * from the row without a screen recording.
-   */
-  returnPath: {
-    path: 'none' | 'adopt' | 'handover';
-    /** Returns that adopted a player already sounding the visible entry. */
-    adoptions: number;
-    /** Starts issued through `play` since this engine was built. */
-    starts: number;
-  };
-  /**
+    /**
    * The tap's own numbers, for the reason line (v1.9.25).
    *
    * This defect has been diagnosed from source three times and reproduced on the owner's phone every
@@ -388,31 +365,18 @@ export interface EngineStatus {
    * tap is on this one and measures nothing"* has ever been visible.
    */
   tap: {
-    /** Frames this item's tap has produced, as the engine could attribute them — see `noteTapFrames`. */
+    /** The item the spectrum frame is dated to — the phone's own per-item key. */
+    itemKey: string | null;
+    /** The entry the row is rendering. The two agree exactly when the bars belong to the row. */
+    entryKey: string | null;
+    /** Frames **this item's** tap has produced. */
     framesForItem: number;
-    /** The plugin's process-lifetime frame counter, as of the last frame read (null before any). */
-    pluginFrames: number | null;
-    /** The plugin's counter **for the item its tap is on** — what `framesForItem` reads when present. */
-    pluginItemFrames: number | null;
-    /** Taps *installed* and taps *verified*, as the plugin counts them (null if it does not say). */
-    installs: number | null;
-    verifies: number | null;
-    /** The slot the plugin says the tap is on, and the slot this bridge is playing. */
-    tapped: string | null;
-    audible: string | null;
-    /**
-     * The pace the drawing rule is judged on, as the plugin declares it for this item (v1.9.26):
-     * `maxFrames` from `prepare` over the sample rate, floored by the tap's own FFT hop — and how old
-     * the frame it is holding is, on the plugin's clock.
-     *
-     * This is the pair the SEND BACK of `2e1eb9d` was about: the rule blanked the bars whenever the
-     * counter had not moved since the previous read, which is true on two reads in three of a healthy
-     * tap if AVFoundation hands it 4096-frame buffers. Printed here because the *real* number is a
-     * fact about his phone and no build has ever shown it — and null on a bridge that does not publish
-     * the pace, which is the state the v1.9.25 rule still governs.
-     */
+    /** Whether an analysis exists for that item at all — the honest null. */
+    attached: boolean;
+    /** The pace the tap declared for itself: the drawing rule, with no comparator behind it. */
     framePeriodMs: number | null;
-    frameAgeMs: number | null;
+    /** When that item's tap produced the frame in hand, epoch ms; 0 for none yet. */
+    lastAnalysisAt: number | null;
   };
 }
 

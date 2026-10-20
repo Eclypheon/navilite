@@ -102,7 +102,7 @@ export interface PressLabel {
 export interface PressLabelResult {
   /** The entry the label must name now. Always the one that is sounding. */
   label: string | null;
-  /** Whether the label moved. `false` is a press that was refused, not one that was taken. */
+  /** Whether the label moved. `false` is a press that was refused, not one that was applied. */
   moved: boolean;
   /** The sentence the press line carries, so the next report is decidable from the log alone. */
   why: string;
@@ -114,7 +114,7 @@ export interface PressLabelResult {
  *
  * Two outcomes, and the difference is the whole defect:
  *
- *  - the player is on the intended entry → the press was taken, the label moves with the sound;
+ *  - the player is on the intended entry → the press was applied, the label moves with the sound;
  *  - the player is on anything else (the queue did not move, or moved somewhere the press did not
  *    ask for) → the press was **refused**: the label stays with the sound and the log says why.
  *    Moving it anyway is how a label ends up naming a track nothing is playing, and how the next
@@ -131,7 +131,7 @@ export function labelAfterPress(seen: PressLabel): PressLabelResult {
       moved,
       why: moved
         ? `the player is on ${seen.sounding}, so the label names it`
-        : `the player is still on ${seen.sounding} and not on ${seen.intended}, so the label stays where the sound is — the press was refused, not taken`,
+        : `the player is still on ${seen.sounding} and not on ${seen.intended}, so the label stays where the sound is — the press was refused, not applied`,
     };
   }
   return {

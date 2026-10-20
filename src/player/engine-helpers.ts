@@ -84,7 +84,7 @@ export const MEASURED_DURATION_SLACK_RATIO = 0.02;
  *
  * So the estimate is not a measurement, it is a guess about a container nobody opened — 20× too long
  * for one Opus track and 13% too *short* for another, while MP3 and FLAC come back within 30 ms.
- * The app adopted it verbatim (v1.9.5: "the player's own numbers replace our guesses about them"),
+ * The app used it verbatim (v1.9.5: "the player's own numbers replace our guesses about them"),
  * which is what turned 3:30 into 70:01 on the bar **and** stopped every Opus track from ever being
  * judged finished — `reportIsAtEnd` compared a position of 210 s against a "duration" of 4202 s.
  *

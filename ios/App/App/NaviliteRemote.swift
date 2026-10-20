@@ -119,7 +119,9 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "detach", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "activateSession", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setQueue", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "now", returnType: CAPPluginReturnPromise),
+        /* unreleased — the one published snapshot: the whole reading of the one player (see
+         * `snapshot`). It replaces the reading `now` used to hand back. */
+        CAPPluginMethod(name: "snapshot", returnType: CAPPluginReturnPromise),
         /* v2.0-beta.16 — the persisted boundary log, so the owner can hand over the measurement
          * instead of reading a row on a screen while driving (see `boundaries`). */
         CAPPluginMethod(name: "boundaries", returnType: CAPPluginReturnPromise),
@@ -213,6 +215,10 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// The attached items, in `awayEntries` order — so a notification about one of them can be named as
     /// an entry instead of being anonymous (v2.0-beta.17 rework).
     private var awayItems: [AVPlayerItem] = []
+    /// The key minted for each item at creation (`makeItem`). It is the identity the spectrum frame
+    /// is dated to: `snapshot()` publishes it as `entry.key`, and the analysis publishes the same key
+    /// as `spectrum.itemKey`, so a frame from another item can never be drawn as this one's.
+    private var itemKeys: [ObjectIdentifier: String] = [:]
     /// Entries whose attached item refused to play. A boundary for one of these is fetched, never
     /// played from the queue: a dead item inside an `AVQueuePlayer` is a stop, not an advance.
     private var awayFailed: Set<String> = []
@@ -615,68 +621,117 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      * was addressed to a suspended web view — so the app asks on the way back and adopts the answer,
      * **by index** (v1.9.9).
      */
-    @objc func now(_ call: CAPPluginCall) {
+    /**
+     * **The one published snapshot — the whole reading of the one player (unreleased).**
+     *
+     * Every field the web layer renders comes from this call and no other: the entry the queue is
+     * on, the queue's place, the clock, the transport's word, and the spectrum frame the item's own
+     * tap produced. `entry.key` and `spectrum.itemKey` are minted per item (`makeItem`), so the row
+     * and the bars cannot describe two different items.
+     *
+     * Nothing is decided here and nothing is written: a return to the app is a read of this, and
+     * the player was never interrupted by the app in the first place. The analysis publishes an
+     * immutable frame and this reads that reference, so no lock the audio thread touches is taken.
+     */
+    @objc func snapshot(_ call: CAPPluginCall) {
         DispatchQueue.main.async { [weak self] in
             guard let self else {
                 call.reject("plugin deallocated")
                 return
             }
             self.logIdentityOnce()
-            let playing = (self.index >= 0 && self.index < self.queue.count) ? self.queue[self.index] : nil
-            call.resolve([
-                "assetId": self.audible?.assetId ?? "",
-                "songId": self.audible?.songId ?? playing?.songId ?? "",
+            call.resolve(self.snapshotPayload())
+        }
+    }
+
+    /// The snapshot's own body: assembled from the queue, and from the tap's published frame.
+    private func snapshotPayload() -> [String: Any] {
+        let player = awayQueue
+        let sounding = queueSoundingEntry()
+        let current = player?.currentItem
+        let itemKey = current.flatMap { itemKeys[ObjectIdentifier($0)] } ?? ""
+        let publishedIndex = sounding.map {
+            NavilitePressRules.publishedIndex(
+                order: queue.map { $0.songId }, songId: $0.songId, fallback: $0.cursor)
+        } ?? -1
+        let entry = (publishedIndex >= 0 && publishedIndex < queue.count) ? queue[publishedIndex] : nil
+        let seconds = player?.currentTime().seconds ?? 0
+        let durationSeconds = current?.duration.seconds ?? 0
+        let tap = AudibleSpectrumTap.shared.snapshot()
+        let attached = tap["attached"] as? Bool ?? false
+        /*
+         * The tap is installed on every item this side builds, so "attached" means it is holding
+         * *this* item's analysis. A tap that holds nothing publishes an empty key, and the web layer
+         * draws nothing from a frame it cannot date.
+         */
+        let spectrumKey = attached ? itemKey : ""
+        let ageMs = tap["itemFrameAgeMs"] as? Int ?? -1
+        let now = Int(Date().timeIntervalSince1970 * 1000)
+        let played = (self.index >= 0 && self.index < self.queue.count) ? self.queue[self.index] : nil
+        return [
+            "generation": self.generation,
+            "entry": [
+                "songId": entry?.songId ?? self.audible?.songId ?? "",
+                "index": publishedIndex,
+                "url": entry?.url ?? "",
+                "assetId": entry?.slot ?? "",
+                "key": itemKey,
+            ],
+            "positionMs": seconds.isFinite && seconds > 0 ? Int((seconds * 1000).rounded()) : 0,
+            "durationMs": durationSeconds.isFinite && durationSeconds > 0
+                ? Int((durationSeconds * 1000).rounded()) : 0,
+            "rate": player?.rate ?? 0,
+            "state": self.transportWord(),
+            "queue": [
                 "index": self.index,
-                "queued": self.queue.count,
+                "count": self.queue.count,
                 "repeat": self.repeatMode,
-                "generation": self.generation,
-                "advances": self.advances,
-                "failures": self.failures,
-                "ignored": self.ignored,
-                "awake": self.awake,
-                /*
-                 * Nothing is handed back on a statement any more: the queue is the only player, so the
-                 * app resumes by asking for `queueTransport('play', index, positionMs)` on the reading
-                 * below. Kept as an empty object so the web layer's shape does not change.
-                 */
-                "resume": [String: Any](),
-                /*
-                 * **The state the app adopts on the way back (v2.0.0-beta.21).** One reading of what is
-                 * actually sounding — the entry, its index in the published order, its live position,
-                 * the route that owns it (`queue`/`fetch`/`plugin`) and whether that route is the
-                 * queue — so the web layer moves its own state onto the track instead of rendering the
-                 * one it left, and never loads a track that is already playing.
-                 */
-                "return": self.returnReading(),
-                "reason": self.reason,
-                "cardRepairs": self.cardRepairs,
-                "sessionRetakes": self.sessionRetakes,
-                "sessionActive": self.sessionIsActive,
-                /* v2.0-beta.16 — who this app is as the phone knows it, and what the system has
-                 * asked its scene to do. The two facts the tap investigation is decided by, and
-                 * neither is readable from JavaScript. */
-                "identity": self.runtimeIdentity(),
-                "scene": NaviliteSceneEvents.shared.summary,
-                "timeline": self.boundaryTimeline(),
-                /* v2.0-beta.16 — the persisted log's own whereabouts, so the app can copy it out and
-                 * the row can carry the last lines without the owner opening a file by hand. */
-                "logPath": self.logFileURL?.path ?? "",
-                "logLines": self.logCount,
-                "logTail": Array(self.logTail.suffix(2)),
-                "cardTitle": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String) ?? "",
-                "cardRate": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? NSNumber)?.doubleValue ?? 0,
-                "artCached": playing.map { self.artworkCache[$0.songId] != nil } ?? false,
-                /*
-                 * What the system says the session's own shape is, and whether a card exists at all
-                 * (v2.0-beta.15). Attribution is the thing the owner's tap test is about — the module
-                 * expanded, the card named a track, and the tap opened nothing — and neither fact can
-                 * be read from JavaScript. Category options including `mixWithOthers` are the one
-                 * setting that costs the Now Playing entry outright.
-                 */
-                "sessionCategory": AVAudioSession.sharedInstance().category.rawValue,
-                "sessionOptions": Self.optionNames(AVAudioSession.sharedInstance().categoryOptions),
-                "cardPresent": MPNowPlayingInfoCenter.default().nowPlayingInfo != nil
-            ])
+            ],
+            "spectrum": [
+                "bands": tap["bands"] ?? [Int](),
+                "itemKey": spectrumKey,
+                "frames": tap["itemFrames"] ?? 0,
+                "lastAnalysisAt": ageMs >= 0 ? now - ageMs : 0,
+                "framePeriodMs": tap["itemFramePeriodMs"] ?? 0,
+                "attached": attached,
+            ],
+            /* ---- the diagnostics the debug screen reads, from the same read ---- */
+            "assetId": self.audible?.assetId ?? "",
+            "songId": self.audible?.songId ?? played?.songId ?? "",
+            "index": self.index,
+            "queued": self.queue.count,
+            "repeat": self.repeatMode,
+            "advances": self.advances,
+            "failures": self.failures,
+            "ignored": self.ignored,
+            "awake": self.awake,
+            "reason": self.reason,
+            "cardRepairs": self.cardRepairs,
+            "sessionRetakes": self.sessionRetakes,
+            "sessionActive": self.sessionIsActive,
+            "identity": self.runtimeIdentity(),
+            "scene": NaviliteSceneEvents.shared.summary,
+            "timeline": self.boundaryTimeline(),
+            "logPath": self.logFileURL?.path ?? "",
+            "logLines": self.logCount,
+            "logTail": Array(self.logTail.suffix(2)),
+            "cardTitle": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String) ?? "",
+            "cardRate": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyPlaybackRate] as? NSNumber)?.doubleValue ?? 0,
+            "artCached": played.map { self.artworkCache[$0.songId] != nil } ?? false,
+            "sessionCategory": AVAudioSession.sharedInstance().category.rawValue,
+            "sessionOptions": Self.optionNames(AVAudioSession.sharedInstance().categoryOptions),
+            "cardPresent": MPNowPlayingInfoCenter.default().nowPlayingInfo != nil,
+        ]
+    }
+
+    /// `timeControlStatus` in the words the web layer's chip uses — a total map, no fallthrough.
+    private func transportWord() -> String {
+        guard let player = awayQueue else { return "idle" }
+        switch player.timeControlStatus {
+        case .playing: return "playing"
+        case .waitingToPlayAtSpecifiedRate: return "loading"
+        case .paused: return "paused"
+        @unknown default: return "paused"
         }
     }
 
@@ -1677,6 +1732,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = Self.forwardBufferSeconds
         queuePlayer.automaticallyWaitsToMinimizeStalling = false
+        /*
+         * The item's own key, minted here and nowhere else. The row reads `entry.key` and the tap's
+         * frame reads `spectrum.itemKey`; they are the same value exactly when both describe the item
+         * this queue is playing.
+         */
+        itemKeys[ObjectIdentifier(item)] = UUID().uuidString
         // The tap goes on before the item can be inserted, so it travels with the item it measures.
         AudibleSpectrumTap.shared.install(on: item, player: queuePlayer, requestedUrl: url)
         return item
@@ -1692,6 +1753,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         queuePlayer.removeAllItems()
         awayEntries = []
         awayItems = []
+        itemKeys.removeAll()
         awayCursor = -1
         let saved = index
         index = target
@@ -2034,32 +2096,6 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         return seconds.isFinite && seconds > 0 ? Int((seconds * 1000).rounded()) : 0
     }
 
-    /**
-     * **The one reading a return is shown — the queue's own (v2.0.0-beta.32).**
-     *
-     * There is one player, so there is one reading: the item it is on, the index that item sits at in
-     * the published order, its live position and whether it is making a sound. Nothing here asks
-     * another player what it is doing, because there is no other player to ask.
-     */
-    private func returnReading() -> [String: Any] {
-        guard let queuePlayer = awayQueue, let sounding = queueSoundingEntry() else {
-            return [
-                "songId": "", "index": -1, "positionMs": 0, "path": "queue",
-                "sounding": false,
-                "why": "the queue holds no item, so there is no reading to give"
-            ]
-        }
-        let publishedIndex = NavilitePressRules.publishedIndex(
-            order: queue.map { $0.songId }, songId: sounding.songId, fallback: sounding.cursor)
-        return [
-            "songId": sounding.songId,
-            "index": publishedIndex,
-            "positionMs": queuePositionMs(queuePlayer),
-            "path": "queue",
-            "sounding": queueIsSounding,
-            "why": "the queue's own item is the only reading there is"
-        ]
-    }
     /**
      * **The away queue's own transport (unreleased, `t_05775526`).**
      *

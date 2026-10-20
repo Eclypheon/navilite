@@ -195,23 +195,16 @@ export function updatePlayerBar(ctx: AppContext, shell: Shell, status: EngineSta
   const detail =
     `${status.state} · ${status.backend} · spectrum ${status.spectrum ? 'live' : 'off'} · ` +
     `${status.pluginState === null ? 'player: nothing reported yet' : `player: ${status.pluginState}`} · ` +
-    `adopt: ${status.adoptOutcome} · warm: ${status.warmedIds.length} · ` +
+    `warm: ${status.warmedIds.length} · ` +
     /* v1.9.25 — **the tap's own numbers**, which no build has ever put on the screen: this item's
      * frames, the plugin's two counters and the two slot names. The defect this line exists for is
      * decided by exactly these — `frames/item` standing still while the audio plays is a tap that has
      * stopped measuring, `tapped` ≠ `audible` is a tap on another player, and `frames/item` growing
      * while the bars are flat is the drawing rather than the tap. The engine's sentence
      * (`modeReason`) says what the app concluded; these say what the phone did. */
-    `tap: +${status.tap.framesForItem} frames/item · ` +
-    `installs ${status.tap.installs ?? '—'}/verifies ${status.tap.verifies ?? '—'} · ` +
-    `tapped ${status.tap.tapped ?? '—'} (audible ${status.tap.audible ?? '—'}) · ` +
-    `plugin frames ${status.tap.pluginFrames ?? '—'} (${status.tap.pluginItemFrames ?? '—'} for this item) · ` +
-    /* v1.9.26 — **the tap's own pace**, the pair the drawing rule is judged on: the period the plugin
-     * declared for this item at `prepare` (`maxFrames` over the sample rate) and the age of the frame
-     * it is holding. The bars are drawn while the age is no longer than the period, so these two
-     * numbers *are* the rule — and the real period is a fact about his phone that no build has ever
-     * printed. Both `—` on a build whose plugin does not publish them. */
-    `tap pace ${status.tap.framePeriodMs ?? '—'} ms/frame (register ${status.tap.frameAgeMs ?? '—'} ms old) · ` +
+    `tap: +${status.tap.framesForItem} frames/item · attached ${status.tap.attached ? 'yes' : 'no'} · ` +
+    `item ${status.tap.itemKey ?? '—'} (row ${status.tap.entryKey ?? '—'}) · ` +
+    `pace ${status.tap.framePeriodMs ?? '—'} ms/frame · last frame ${status.tap.lastAnalysisAt ?? '—'} · ` +
     // v1.9.8 — the native player's own boundary: how many slots it will play by itself while the
     // app is away, how many tracks it has taken, and the sentence naming which state it is in.
     `native: ${status.nativeBoundary.armed} armed, ${status.nativeBoundary.advances} taken, ` +

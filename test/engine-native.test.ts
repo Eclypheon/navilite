@@ -2309,17 +2309,16 @@ test('a skip out of a loud passage never draws, or spends the chip, on a frame t
     assert.ok(staleReads >= 20, `the window was watched while playing (${staleReads} reads)`);
     assert.match(staleReason, /not produced by this item/, 'and the reason line names the state it is in');
     say(`2. the skip with no silence in it — ${staleReads} reads, never a frame drawn: ${staleReason}`);
-    const installsAtTheSkip = record.spectrum.installs;
+    const framesAtTheSkip = engine.status().tap.framesForItem;
 
     /* ---- 3. this item's own frames: what brings the bars up, with no new track and no re-attach ---- */
     record.spectrum.staleRegisterUrls = [];
     const live = await until(() => engine.status().spectrum === true, 500);
     assert.ok(live !== null, 'this item’s own first frame is what makes the bars live');
     const tap = engine.status().tap;
-    assert.ok(tap.installs !== null && tap.installs >= 2, `the tap has been installed for this track (${tap.installs})`);
-    assert.equal(tap.tapped, tap.audible, 'and the plugin says the tap is on the slot this bridge is playing');
-    assert.ok(tap.framesForItem > 0, 'with this item’s own frames counted — what the reason line now prints');
-    say(`3. this item's own frames: live ${live} ms later — installs ${tap.installs}/verifies ${tap.verifies}, tapped ${tap.tapped} (audible ${tap.audible}), ${tap.framesForItem} frames/item`);
+    assert.equal(tap.itemKey, tap.entryKey, 'the frame is dated to the entry the row is rendering');
+    assert.ok(tap.framesForItem > 0, 'with this item’s own frames counted — what the reason line prints');
+    say(`3. this item's own frames: live ${live} ms later — ${tap.framesForItem} frames/item, item ${tap.itemKey} = row ${tap.entryKey}, ${framesAtTheSkip} at the skip`);
 
     /* ---- 4. the teardown that lands *after* this item measured: the tap stops, and what it holds is
        flat — the whole-track state he reported, not a window. The last frame it produced *is* this
@@ -2373,16 +2372,16 @@ test('a skip out of a loud passage never draws, or spends the chip, on a frame t
     const back = await until(() => engine.status().spectrum === true, 500);
     assert.ok(back !== null, 'the same item’s frames bring the bars back');
     assert.equal(
-      record.spectrum.installs,
-      installsAtTheSkip,
-      'with nothing installed for it in between — the repair is the tap’s own, not a rebuild on a poll',
+      record.spectrum.itemFrames,
+      framesAtTheSkip,
+      'with no new frame in between — the register the tap left is the one that is drawn, not a rebuild on a poll',
     );
-    say(`5. the same item's frames again: live ${back} ms later, installs still ${record.spectrum.installs}`);
+    say(`5. the same item's frames again: live ${back} ms later, ${record.spectrum.itemFrames} frames for the item`);
 
     /* ---- 6. the boundary the native player takes by itself, entered the way the queue enters it ---- */
     record.spectrum.staleRegisterUrls = [LOCAL_TRACK_3.url];
     record.playingUrl = LOCAL_TRACK_3.url;
-    engine.adoptNativeAdvance(LOCAL_TRACK_3);
+    engine.nativeMovedTo(LOCAL_TRACK_3);
     await settle(120);
     const adopted = engine.status();
     assert.equal(adopted.state, 'playing', 'the adopted track is the one playing');
@@ -2487,7 +2486,7 @@ test('a healthy tap polled faster than it produces keeps the bars live and the c
       assert.notEqual(
         frame,
         null,
-        `read ${reads}: this item's tap has produced ${record.spectrum.itemFrames} frames for it and its register is ${status.tap.frameAgeMs ?? 'not published'} ms old against a declared period of ${status.tap.framePeriodMs ?? 'not published'} ms — a tap between its own frames is not a reason to blank the bars, and that is the whole of the SEND BACK (${status.modeReason})`,
+        `read ${reads}: this item's tap has produced ${record.spectrum.itemFrames} frames for it and its last frame is dated ${status.tap.lastAnalysisAt ?? 'not published'} against a declared period of ${status.tap.framePeriodMs ?? 'not published'} ms — a tap between its own frames is not a reason to blank the bars, and that is the whole of the SEND BACK (${status.modeReason})`,
       );
       assert.equal(
         status.spectrum,
@@ -2529,7 +2528,7 @@ test('a healthy tap polled faster than it produces keeps the bars live and the c
     /* ---- 2. the same cadence through the other entry point a transition has: the boundary's
        adoption, which resets the per-item state without passing through `startNative` ---- */
     record.playingUrl = LOCAL_TRACK_3.url;
-    engine.adoptNativeAdvance(LOCAL_TRACK_3);
+    engine.nativeMovedTo(LOCAL_TRACK_3);
     const adoptedAt = await until(() => engine.status().spectrum === true, 600);
     assert.ok(adoptedAt !== null, 'the adopted item’s own frames are what the bars are');
 
@@ -2931,7 +2930,7 @@ test('the web path wears the spectrum’s own word until its analyser has answer
  * `t_71dc787e` closed the web path's window (a browser's first frames arrive a moment after the
  * element plays, and the chip spent the amber `theme` for them). The native path has the same window
  * at the one transition no writer arms: **a resume.** `spectrumArming` is only ever set by a start
- * (`startNative`), an adoption (`adoptNativeAdvance`) and the polls that find the tap producing
+ * (`startNative`), an adoption (`nativeMovedTo`) and the polls that find the tap producing
  * nothing or sitting on another item; a resume is none of those, and `disarmConsumers` (the pause)
  * clears `spectrumLive` — so the instant the resume returns the transport to `playing`, the chip's
  * licence line (`state === 'playing'` and nothing being fed) paints **`native audio`** on an item
@@ -3460,4 +3459,5 @@ test('a browser that reads the container exactly keeps its own number — the ga
     await stopAll(engines);
   }
 });
+
 

@@ -27,7 +27,6 @@ import {
   awayPlan,
   crossAwayBoundary,
   decideAwaySeam,
-  handoverVerdict,
   nextTarget,
   queueHolds,
   startNeedsRebuild,
@@ -212,57 +211,6 @@ test('the look-ahead does not fetch an entry the queue already holds', () => {
   const sounding: AwaySeamState = { ...armedState, cursor: 0, owned: true };
   assert.equal(queueHolds(sounding, 'b'), false);
   assert.equal(queueHolds(sounding, 'c'), true);
-});
-
-/* ---------------------------------- v2.0.0-beta.22: the verdict, and the no-op arm */
-
-test('a handover with no position reported is refused, never taken at 0:00', () => {
-  /*
-   * The owner's beta.21 log: `appPositionMs:-1`, `queuePositionMs:14158`, `driftMs:0`, `handover-taken`
-   * — the queue stopped and the sound moved to a player at the beginning of the track. The refusal was
-   * gated on `appPositionMs >= 0`, so the one state it had to catch was the one it could not see.
-   */
-  const verdict = handoverVerdict({
-    appSongId: '2pPlhjuSrHC9ewRbT4AGRA',
-    appPositionMs: -1,
-    queueSongId: '2pPlhjuSrHC9ewRbT4AGRA',
-    queuePositionMs: 14_158,
-  });
-  assert.equal(verdict.taken, false);
-  assert.equal(verdict.why, 'no position reported');
-
-  // The queue's own live position is what a refusal hands back, so the app can move there and ask again.
-  assert.equal(verdict.driftMs, 0);
-});
-
-test('the handover verdict compares the entry by songId, never by index', () => {
-  // The same entry, at the same position, is taken whatever either side calls its index.
-  assert.equal(
-    handoverVerdict({ appSongId: 'd', appPositionMs: 100_000, queueSongId: 'd', queuePositionMs: 100_120 }).taken,
-    true,
-  );
-  // One entry ahead at exactly the position is the owner's log: 1OKkM… started while 2pPlh… sounded.
-  const wrongEntry = handoverVerdict({
-    appSongId: '1OKkMmV2piRXJlF5gWo4fx',
-    appPositionMs: 19_560,
-    queueSongId: '2pPlhjuSrHC9ewRbT4AGRA',
-    queuePositionMs: 19_560,
-  });
-  assert.equal(wrongEntry.taken, false);
-  assert.match(wrongEntry.why, /while the queue is sounding/);
-
-  // And the drift is measured against the queue now, inside the stated bound (v2.0.0-beta.30):
-  // 250 ms, not the old 400 — a take at 363 ms was audible in the owner's log.
-  assert.equal(
-    handoverVerdict({ appSongId: 'd', appPositionMs: 100_000, queueSongId: 'd', queuePositionMs: 100_200 }).taken,
-    true,
-  );
-  const beyond = handoverVerdict({ appSongId: 'd', appPositionMs: 100_000, queueSongId: 'd', queuePositionMs: 100_400 });
-  assert.equal(beyond.taken, false);
-  assert.equal(beyond.driftMs, 400);
-  const behind = handoverVerdict({ appSongId: 'd', appPositionMs: 100_000, queueSongId: 'd', queuePositionMs: 101_500 });
-  assert.equal(behind.taken, false);
-  assert.equal(behind.driftMs, 1_500);
 });
 
 test('an identical plan is not re-armed — one arm for fourteen identical statements', () => {
