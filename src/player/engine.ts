@@ -1068,7 +1068,7 @@ export class AudioEngine {
         ? `${plugin.state}${plugin.reason ? ` · ${plugin.reason}` : ''} · ${(plugin.currentTimeMs / 1000).toFixed(1)}/${(plugin.durationMs / 1000).toFixed(1)} s`
         : null,
       droppedEvents: this.native?.droppedEvents?.() ?? { inaudible: 0, slotGrace: 0 },
-      /** Empty by construction: this engine holds no track warm (unreleased — `prepareNext`). */
+      /** Empty by construction: this engine holds no track warm (unreleased — the look-ahead is gone). */
       warmedIds: [],
       /*
        * The native side's own boundary (v1.9.8). Read straight from the bridge, which is the only
@@ -1649,65 +1649,6 @@ export class AudioEngine {
       return;
     }
     await this.startWeb(track, startMs);
-  }
-
-  /**
-   * Prepare the track that follows the current one — the queue's look-ahead.
-   *
-   * **There is nothing left to warm here** (unreleased). Warming was a claim map in this engine over
-   * the native-audio plugin's prepared slots; the plugin and the slots went with the two-player
-   * machinery, and what holds the next items now is the one player's own queue (`armAwayQueue`/
-   * `topUpAwayQueue` in `NaviliteRemote.swift`, fed by {@link setQueue}). So the bridge's answer is
-   * the whole answer: `prepare()` returns `false` on every build that ships, because no bridge holds
-   * a track warm for this engine, and `false` is the truth rather than a failure.
-   *
-   * Kept, with the queue's other two asks below, because `state/queue.ts` still makes them on every
-   * selection: deleting the call sites is the queue's look-ahead going, which the design files as
-   * its own subtraction. It is a named no-op until then, never a silent one.
-   */
-  async prepareNext(track: TrackRequest): Promise<boolean> {
-    if (!this.nativePlatform) return false;
-    const bridge = this.native ?? (await this.ensureNative());
-    if (!bridge?.prepare) return false;
-    return (
-      (await bridge.prepare({
-        id: track.id,
-        url: track.url,
-        title: track.title,
-        artist: track.artist,
-        album: track.album,
-        artworkUrl: track.artworkUrl,
-      })) === true
-    );
-  }
-
-  /**
-   * The queue's word that it has moved: there were claims to drop here once (v1.9.5).
-   *
-   * Nothing is warm in this engine any more ({@link prepareNext}), so there is nothing to drop and
-   * nothing to restate to the native side. A named no-op, kept for the caller.
-   */
-  pruneWarmed(_keep: readonly string[]): void {}
-
-  /**
-   * The exact URL a track is warm under — `null`, because this engine warms nothing (unreleased).
-   *
-   * The queue still asks before a start, and `null` is the answer that means "fetch it": no URL in
-   * the app is a warmed asset, so every start asks for the track's own file.
-   */
-  warmedUrl(_songId: string): string | null {
-    return null;
-  }
-
-  /**
-   * Throw the warmed tracks away — the queue is not going where they were warmed for.
-   *
-   * There are none ({@link prepareNext}); what is left is telling the player to drop what *it* holds.
-   */
-  async discardPrepared(): Promise<void> {
-    const bridge = this.native;
-    if (this.backend !== 'native' || !bridge?.discard) return;
-    await bridge.discard();
   }
 
   /* ------------------------------------------------- the native boundary (v1.9.8) */

@@ -473,21 +473,6 @@ export interface NativeQueueStatement {
 
 export interface NativeBridge {
   load(info: NativeTrackInfo): Promise<void>;
-  /**
-   * Put a track on the player, warmed and silent (v1.9.1, pooled in v1.9.5).
-   *
-   * Its own asset id, its own `AVPlayerItem`, its own `AVPlayer` — and nothing ever sends that
-   * player `play`. It is not a second engine: it makes no sound, it is not tapped for the spectrum,
-   * and it is not in the engine's state machine. What it is, is buffered: used at a boundary, a
-   * step forward or a step back, the track starts within a seek's time instead of paying for a cold
-   * fetch after the previous track has already stopped.
-   *
-   * Up to three tracks are held warm at once (the previous song and the next two); the slot for a
-   * fourth replaces the oldest, whose asset is unloaded as the new one is written. Optional, so
-   * a bridge without it (an older plugin, the fake bridge in the tests) is a bridge that still
-   * plays — with a cold fetch, which is where v1.9.0 left it.
-   */
-  prepare?(info: NativeTrackInfo): Promise<boolean>;
   /** Throw the prepared track away — the queue is not going where it was prepared for. */
   discard?(): Promise<void>;
   /**
@@ -1313,18 +1298,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         audibleSongId = info.id ?? audibleSongId;
         loadOutcome = 'the queue holds every entry — this selection is the start that follows it';
       },
-      /**
-       * **Nothing to warm here any more.** Warming was three plugin slots holding the previous song
-       * and the next two; the queue's own next items are that now (`armAwayQueue`/`topUpAwayQueue`
-       * in `NaviliteRemote.swift`, fed by `setQueue`), so this answers `false` — no track is held
-       * warm by *this* bridge, and the engine must not record one as if it were.
-       */
-      async prepare() {
-        return false;
-      },
       invalidatePrepared() {
         // A prepare the listener did not ask for has nothing to refuse: there is no slot job to
-        // stand aside. Kept as a callable no-op because the queue still makes it.
+        // stand aside. Left as a callable no-op; nothing in the app calls it any more.
       },
       /*
        * ------------------------------------------------------ the published queue (v1.9.9)
@@ -1629,7 +1605,7 @@ const NAVILITE_DOWNLOADS = 'NaviliteDownloads';
 /**
  * Our own iOS download plugin (v1.9.12): a background `URLSession` transfer, a staging write, an
  * atomic move and a byte-count check — none of it on the audio bridge or the `AssetLanes` queue.
- * A download may never `prepareNext`, `warmedUrl`, `discardPrepared` or `yieldToAudible`.
+ * A download may never `yieldToAudible`.
  */
 interface NaviliteDownloadsPlugin {
   configure(options: { allowsCellular: boolean; maxConcurrent: number }): Promise<void>;

@@ -87,16 +87,12 @@ interface Boundary {
   stated: Stated[];
   /** The track the native player moved to by itself, as the app was told. */
   advanced: string[];
-  /** Slots the bridge asked the plugin to make warm, and what the plugin answered. */
-  warmed: string[];
   /** Every `load` the bridge was asked for — a boundary must not produce one. */
   loads: string[];
   plays: string[];
   /** What the app asked the player to do when it retried a start that produced no sound. */
   retries: number;
   events: NativeBridgeEvents | null;
-  /** False models a slot whose item exists and holds nothing (the defect this release fixes). */
-  warmHoldsBytes: boolean;
 }
 
 /**
@@ -107,9 +103,6 @@ function fakeBridge(record: Boundary): (os: string, events: NativeBridgeEvents) 
   return async (_os: string, events: NativeBridgeEvents) => {
     record.events = events;
     const wait = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
-    /** The slots the bridge believes hold warm tracks: `songId -> slot`. */
-    const slots = new Map<string, string>();
-    let nextSlot = 1;
     return {
       async load(info: NativeTrackInfo) {
         record.loads.push(info.url);
@@ -125,26 +118,8 @@ function fakeBridge(record: Boundary): (os: string, events: NativeBridgeEvents) 
          */
         setTimeout(() => events.onPosition(Math.max(0, seconds)), 5);
       },
-      async prepare(info: NativeTrackInfo) {
-        const slot = `navilite-slot-${nextSlot++}`;
-        slots.set(info.id ?? info.url, slot);
-        record.warmed.push(slot);
-        await wait();
-        // The plugin's own answer: whether the slot holds the media it was asked for.
-        return record.warmHoldsBytes;
-      },
-      async adopt(songId?: string) {
-        if (typeof songId !== 'string') return false;
-        const slot = slots.get(songId);
-        if (slot === undefined) return false;
-        slots.delete(songId);
-        record.plays.push('play@0');
-        await wait();
-        setTimeout(() => events.onPosition(0), 5);
-        return true;
-      },
       async discard() {
-        slots.clear();
+        // Nothing is held warm by either side any more (unreleased — the look-ahead is gone).
       },
       async setQueue(statement: NativeQueueStatement) {
         const songs = statement.list.map((entry) => entry.songId);
@@ -190,7 +165,7 @@ function stubLibrary(): Library {
 }
 
 function blank(): Boundary {
-  return { stated: [], advanced: [], warmed: [], loads: [], plays: [], retries: 0, events: null, warmHoldsBytes: true };
+  return { stated: [], advanced: [], loads: [], plays: [], retries: 0, events: null };
 }
 
 /** The engine and the queue, wired to each other exactly as `src/ui/app.ts` wires them. */
@@ -348,23 +323,27 @@ test('a boundary the native side refuses comes back to the app, and the track st
   await stopAll([engine]);
 });
 
-test('a warm slot that holds no media is not warm, and the entry is published without a slot', async () => {
+test('the published statement hands the native side no slots, and the queue is still the boundary', async () => {
   const record = blank();
-  record.warmHoldsBytes = false;
   const { engine, queue } = pair(record);
   await engine.handleVisibility(true);
 
   void queue.play(queueOf('song-1', 'song-2', 'song-3'), 0, CONTEXT);
   await settle();
 
-  assert.ok(record.warmed.length > 0, 'the app asked the player for the media a warm slot needs');
-  assert.deepEqual(engine.status().warmedIds, [], 'a slot that answered "no media" is not claimed as warm by the engine');
+  /*
+   * There is no warm pool to hand over any more (unreleased — the look-ahead and the engine's claim
+   * map are both gone), so the statement is the whole of the boundary: three entries, none of them
+   * carrying a slot, and the native side fetches each one itself. The engine claims nothing warm,
+   * which is now true by construction rather than by a slot answering "no media".
+   */
+  assert.deepEqual(engine.status().warmedIds, [], 'the engine claims nothing warm');
   assert.deepEqual(
     lastStated(record).slots,
     [null, null, null],
-    'so no entry is published with a slot — the native side fetches each one itself rather than being handed an asset that cannot start',
+    'and no entry is published with a slot — the native side fetches each one itself',
   );
-  assert.equal(engine.status().nativeBoundary.armed, 3, 'and the queue is still the boundary: totality is the list, not the warmth');
+  assert.equal(engine.status().nativeBoundary.armed, 3, 'the queue is still the boundary: totality is the list, not the warmth');
   await stopAll([engine]);
 });
 
@@ -429,11 +408,7 @@ test('a start that failed is retried in place by the queue — no second cold lo
       retries.push('retry');
       return true;
     },
-    warmedUrl: () => null,
-    pruneWarmed: () => undefined,
-    prepareNext: async () => true,
     setQueue: () => undefined,
-    discardPrepared: async () => undefined,
     adoptNativeAdvance: () => undefined,
     status: () => ({ state: 'idle' as const, positionMs: 0 }),
     seek: async () => undefined,

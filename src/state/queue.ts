@@ -24,14 +24,6 @@ import { fillSong } from './song-metadata.ts';
 import type { Library } from './library.ts';
 
 const SAVE_QUEUE_DEBOUNCE_MS = 5000;
-/**
- * How many tracks ahead and behind are kept warm on the player (v1.9.5).
- *
- * The owner's own rule — the previous song and the **next two** — and it is the same number the
- * engine's claims and the bridge's slot pool are built on. Closest first, and the boundary before
- * everything: the next track is what a track ending plays.
- */
-const WARM_STEPS: readonly number[] = [1, -1, 2];
 /** How often the local resume snapshot is allowed to be written (see `src/storage/session.ts`). */
 const SNAPSHOT_INTERVAL_MS = 5000;
 const PLAY_THRESHOLD_MS = 240000; // Subsonic: half the song, or four minutes
@@ -138,15 +130,6 @@ export class PlaybackQueue {
    * instead of a transport that claims to be playing while nothing sounds.
    */
   private startFailed = false;
-  /**
-   * Which warm run is the current one (v1.9.5).
-   *
-   * Bumped by every `warmNeighbours`, incremented only — a run that is not the newest stops before
-   * its next call, so a chain of preloads for a queue the listener has left cannot go on issuing
-   * them. Nothing has to be cleared, and nothing grows: the value is one number, and the only
-   * reader is the loop that compares it to the value it captured.
-   */
-  private warmRun = 0;
   /**
    * v1.9.1: the song the engine has been asked for and has not answered yet.
    *
@@ -272,30 +255,12 @@ export class PlaybackQueue {
     this.pendingStartMs = 0;
     this.loading = true;
     /*
-     * v1.9.2 — there is no WebView probe to cancel any more (the prefetch is deleted), so all this
-     * has to do is make sure nothing is left buffering for where the listener *was*: that is the warm
-     * pool, handled below.
-     */
-    /*
-     * And the warm pool follows the same rule (v1.9.1) — with one exception that matters.
-     *
-     * A warmed track that is not around the one he touched is buffering something nobody is going to
-     * hear: on his link that is a download competing with the very stream he is waiting for, so its
-     * claim is dropped. When it *is* a neighbour of what he touched, it is kept — and that is the
-     * case the exception exists for: he taps a row that was already being got ready, so there is
-     * nothing to fetch at all and the track starts in a seek's time. The bridge's own slots are not
-     * touched here: the pool is fixed at four, and the warm that follows this selection writes the
-     * slots it needs.
-     */
-    this.engine.pruneWarmed?.(this.neighbourhoodIds());
-    /*
      * And the queue is **published to the native side** the moment a selection moves it (v1.9.9).
      *
-     * This is not the look-ahead v1.9.8 used to arm here — that was a chain of two warm slots, and
-     * the listener has just moved away from them. What goes now is the new queue: the resolved order,
-     * the entry this tap is on, and the repeat mode. The native side may not act on it (the app is
-     * on screen, so the statement carries `awake: true`), but it holds the picture, so a track that
-     * ends while the app is in the background advances from where the listener actually is.
+     * What goes is the queue: the resolved order, the entry this tap is on, and the repeat mode.
+     * The native side may not act on it (the app is on screen, so the statement carries
+     * `awake: true`), but it holds the picture, so a track that ends while the app is in the
+     * background advances from where the listener actually is.
      */
     this.publishQueue();
     this.startFailed = false;
@@ -319,13 +284,11 @@ export class PlaybackQueue {
   }
 
   /**
-   * The bitrate the app is asking for on the **next track's background preparation**: `null` = no
-   * cap at all, a number = Navidrome transcodes the warmed stream to it.
+   * The rate the ladder has landed on: `null` = no cap, a number = the rung.
    *
-   * The player bar shows the number while a cap is in force, so a cap is never silent (v1.9.0).
-   * Since v1.9.8 it is a cap on what is *prepared*, never on what is being tapped: the track the
-   * listener is waiting for is always the original file (`trackRequest`), which is the owner's own
-   * rule about transcoding.
+   * The player bar shows the number, so nothing about the ladder is silent (v1.9.0). Since the
+   * look-ahead went (unreleased) **no URL is asked for at a cap any more** — every request is the
+   * track's own file (`trackRequest`) — so this is a readout of the measurement, not a request.
    */
   get streamKbps(): number | null {
     return this.rate.maxBitRate;
@@ -521,7 +484,6 @@ export class PlaybackQueue {
     this.startFailed = false;
     // There is no queue, so the native side is told there is none (v1.9.9).
     this.publishQueue();
-    this.cancelPrepared();
     clearSnapshot();
     await this.engine.stop();
     this.onChanged?.();
@@ -630,18 +592,7 @@ export class PlaybackQueue {
     this.playToken += 1;
     const token = this.playToken;
     const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
-    /*
-     * **The URL the track was warmed under is the URL it is played with** (v1.9.1).
-     *
-     * Same string, so Navidrome is asked for the transcode it has already started rather than for a
-     * second one at a rate the link measurement moved in the meantime — and so the asset that is
-     * already buffered is the asset that becomes audible. The string comes from the engine, which is
-     * what actually warmed it and what drops a claim a cold load invalidated (v1.9.5), and the
-     * engine's own condition for adopting an asset is exactly this equality: a URL that has moved
-     * since the warm is a cold load, not a mismatch played as if it were the same stream.
-     */
-    const warmedUrl = this.engine.warmedUrl?.(song.id) ?? null;
-    const request = this.trackRequest(song, warmedUrl, artworkUrl);
+    const request = this.trackRequest(song, artworkUrl);
     this.inFlightSongId = song.id;
     this.onChanged?.();
     /*
@@ -664,9 +615,8 @@ export class PlaybackQueue {
      *
      * The time it took is the measurement the ladder is built on (v1.9.2) — and since v1.9.8 it is
      * taken from **audio-start**: only a start the player itself concluded (`lastStartOutcome` of
-     * `player`) is a number about this link. A start that was adopted out of the warm pool is not
-     * measured at all (it fetched nothing), and neither is one that ended in a timeout or in the
-     * app going off screen.
+     * `player`) is a number about this link. A start that ended in a timeout, or in the app going
+     * off screen, is not measured at all.
      */
     const startedAt = Date.now();
     /*
@@ -686,12 +636,13 @@ export class PlaybackQueue {
       await this.engine.play(request, startMs);
       failed = this.engine.startDidFail?.() === true;
       const concludedByThePlayer = (this.engine.lastStartOutcome?.() ?? 'player') === 'player';
-      if (!failed && warmedUrl === null && concludedByThePlayer) this.rate.noteStart(Date.now() - startedAt);
+      if (!failed && concludedByThePlayer) this.rate.noteStart(Date.now() - startedAt);
       if (failed && token === this.playToken) {
         /*
-         * One rung down, and **the same item tried again** (v1.9.8). The rung only decides what is
-         * warmed next — see `warmNeighbours` — and the retry asks the player that already holds
-         * this track for sound rather than fetching it a second time.
+         * One rung down, and **the same item tried again** (v1.9.8). No URL is asked for at a cap
+         * any more (unreleased — the look-ahead that carried it is gone), so the rung moves the
+         * readout and nothing else; the retry asks the player that already holds this track for
+         * sound rather than fetching it a second time.
          */
         this.rate.demote();
         this.onChanged?.();
@@ -709,10 +660,8 @@ export class PlaybackQueue {
     this.inFlightSongId = null;
     if (token !== this.playToken) return;
     /*
-     * The engine has the stream — or has told us it does not. Either way the wait is over: the
-     * loading state comes off with this same redraw, and the look-ahead starts here rather than
-     * anywhere else, because "the next track" only means something once the current one is actually
-     * the current one.
+     * The engine has the stream — or has told us it does not. Either way the wait is over and the
+     * loading state comes off with this same redraw.
      */
     this.loading = false;
     this.startFailed = failed;
@@ -720,14 +669,6 @@ export class PlaybackQueue {
       /*
        * Nothing is playing, so nothing is reported as playing: no now-playing, no media session, no
        * play queue. What is left is the row and the chip saying so, and the tap that tries again.
-       *
-       * **And the look-ahead is re-armed here rather than left dead (v1.9.4).** This path used to
-       * cancel the warm pool and return *before* warming anything — so from the first start that
-       * failed, the player held nothing the next boundary could adopt, and every later track paid a
-       * full cold fetch on the one link where a cold fetch is the problem. That is the second half
-       * of the owner's report: *"the first track that plays starts very quickly, but this behaviour
-       * quickly stops"*. Nothing is claimed about the track that failed; the tracks around it are got
-       * ready exactly as they are on the path where a start succeeded.
        */
       /*
        * v1.9.17 — **a start that produced no sound for a `file://` track is the file that has gone,
@@ -745,9 +686,8 @@ export class PlaybackQueue {
        * problem, and no download row is involved in it at all.
        */
       if (request.url.startsWith('file://')) this.onLocalFileUnplayable?.(song.id);
-      this.cancelPrepared();
       this.onChanged?.();
-      this.warmNeighbours();
+      this.publishQueue();
       return;
     }
     this.reportNowPlaying(song);
@@ -756,28 +696,24 @@ export class PlaybackQueue {
     // A new track, at a known position: the snapshot is written now rather than on the next tick.
     this.persistSnapshot(true);
     this.onChanged?.();
-    // Every start is a selection (v1.9.5): the boundary, a tap, a skip and a step back all land
-    // here, so all four leave the previous song and the next two warming behind them.
-    this.warmNeighbours();
+    // Every start is a selection: the boundary, a tap, a skip and a step back all land here, so all
+    // four leave the queue stated to the native side behind them.
+    this.publishQueue();
   }
 
   /**
-   * A play/ warm request for one song at one exact URL.
-   *
-   * `url` is the warm pool's own URL when the track was already got ready, and otherwise the
-   * **original file** — with no `maxBitRate` at all (v1.9.8).
+   * A play request for one song — always the **original file**, with no `maxBitRate` at all
+   * (v1.9.8).
    *
    * That absence is the owner's rule, and it is the whole of the first-tap regression: v1.7 asked
    * for `streamUrl(song.id)` and nothing else, v1.9.0 started asking for `maxBitRate=128` on every
    * URL, and a request for `maxBitRate` is a request for Navidrome to spawn a transcode *before the
-   * first byte*. A track the listener is waiting to hear is now never asked for at a lower rate.
-   * The ladder has not gone away — it decides what is warmed for the *next* track, off this path
-   * entirely (`warmNeighbours`).
+   * first byte*. A track the listener is waiting to hear is never asked for at a lower rate.
    */
-  private trackRequest(song: Song, url: string | null, artworkUrl: string | null): TrackRequest {
+  private trackRequest(song: Song, artworkUrl: string | null): TrackRequest {
     return {
       id: song.id,
-      url: url ?? this.library.streamUrl(song),
+      url: this.library.streamUrl(song),
       crossOrigin: this.library.crossOrigin,
       title: song.title,
       artist: song.artist ?? 'Unknown artist',
@@ -788,91 +724,12 @@ export class PlaybackQueue {
   }
 
   /**
-   * Get the neighbourhood ready on the player, while this one plays (v1.9.1, pooled in v1.9.5).
-   *
-   * The player is warmed: the previous song and the next two are loaded by the plugin itself, each
-   * under its own asset id, in assets that are buffered, silent and never played. When one of them
-   * is started — at the track boundary, on a step forward, on a step back — its asset is adopted, so
-   * it begins in a seek's time: this is what "the whole previous track was available to warm the
-   * next one" buys, and it is the owner's second rule, in his words: *"after any selection the app
-   * must commence prefetching/caching the previous song and the NEXT TWO songs, so stepping back or
-   * forward is instant."*
-   *
-   * Order and bounds, both deliberate:
-   *
-   *  - **The next track first**, because the boundary is the one that must never pay a cold fetch;
-   *    then the previous one (a step back), then the one after next.
-   *  - **One at a time.** These are network preloads on the link the listener is already streaming
-   *    on; three at once would compete with the track he is listening to, which is the exact failure
-   *    this app has shipped before.
-   *  - **A run token, not a counter.** Every call replaces the previous run's token, and a run checks
-   *    it before each warm: when the listener moves (a tap, a skip, a boundary) the older chain stops
-   *    where it is instead of warming for a track that is no longer next. There is nothing to clear —
-   *    a run that is not the newest simply never issues another call.
-   *
-   * The claims it records are the **URLs** it asked for (`this.warmed`), and the engine's own claims
-   * are set before each call and given back when the call did not happen. Exactly this pairing is
-   * what makes the boundary's adoption possible: the same string, asked for again.
-   */
-  private warmNeighbours(): void {
-    const started = this.currentSong;
-    if (!started) return;
-    this.engine.pruneWarmed?.(this.neighbourhoodIds());
-    /*
-     * **And the queue itself is published to the native side (v1.9.9).**
-     *
-     * In v1.9.8 this spot named the two warm slots after the one playing — the *look-ahead*, which
-     * is a bet on the track that is playing still being the one that ends, and which nothing could
-     * refill once the web layer was suspended. What goes now is the queue: the resolved play order,
-     * the entry playing, the repeat mode. The native side walks it and fetches what it has no slot
-     * for, so a track that ends while the app is away always has somewhere to go.
-     */
-    this.publishQueue();
-    const run = (this.warmRun += 1);
-    void (async () => {
-      for (const target of this.warmTargets()) {
-        /*
-         * Abandoned runs stop here: the queue has moved on (a newer run), so warming more of the old
-         * chain's neighbourhood would be a download for a track nobody is next to.
-         */
-        if (run !== this.warmRun || this.currentSong?.id !== started.id) return;
-        /*
-         * **The entries a press consumes are warmed as the original file (v1.9.9)**, and the
-         * ladder's cap reaches only the track beyond them.
-         *
-         * This is the second half of the owner's no-transcode rule. v1.9.8 stopped the *start* from
-         * asking for a lower rate, but the ladder still decided what the neighbourhood was warmed
-         * under — and a tap adopts the warmed URL. So on a demoted link the track he was waiting for
-         * was the 128 kbps variant, silently. `next` (the boundary, and the next button) and
-         * `previous` (a step back) are both one press away and are therefore warmed as the file sits
-         * on the server; only the look-ahead beyond them may carry a cap, which is the job the
-         * ladder was always for — less bandwidth on a slow link, spent on a track nobody is waiting
-         * for.
-         */
-        const url = target.capped ? this.library.streamUrl(target.song, this.rate.maxBitRate) : this.library.streamUrl(target.song);
-        /*
-         * The engine is asked whether it already holds this track, under **this** URL, rather than
-         * the queue keeping its own copy of what it asked for (v1.9.5). That is the asymmetry that
-         * makes the pool honest: a cold load drops every claim at once, and a queue that remembered
-         * "warm" on its own would skip the re-warm and leave the next boundary without anything to
-         * adopt.
-         */
-        if (this.engine.warmedUrl?.(target.song.id) === url) continue;
-        // The engine claims the track itself, before it issues anything, and gives the claim back
-        // when the player did not take it — so there is nothing to record here.
-        await this.engine.prepareNext(this.trackRequestFor(target.song, url));
-      }
-    })();
-  }
-
-  /**
    * Publish the queue to the engine (v1.9.9), which states it to the native side.
    *
    * The list is the **resolved play order** — `order` applied, so a shuffled queue is published
    * shuffled and the native side needs no second model of what shuffle means — and `index` is the
    * position in that order the listener is on. Every URL is the track's own file: an entry is only
-   * ever a URL the native side could fetch and play as it sits on the server, and the warmth of an
-   * entry is the engine's to attach, from its own pool, under the exact string it holds it.
+   * ever a URL the native side could fetch and play as it sits on the server.
    */
   private publishQueue(): void {
     this.engine.setQueue?.({
@@ -894,36 +751,6 @@ export class PlaybackQueue {
     };
   }
 
-  /** The song at `step` places from the current one in the play order, or `null`. */
-  private songAt(step: number): Song | null {
-    return this.items[this.order[this.cursor + step]]?.song ?? null;
-  }
-
-  /**
-   * The songs kept warm around the current one, with whether the ladder's cap may reach each
-   * (v1.9.9).
-   *
-   * Closest first, and the boundary before everything: the next track (what a track ending plays),
-   * then the previous one (a step back), then the one after next. Songs that repeat inside the
-   * window (a two-song queue) appear once. Only the last of those is beyond a single press, so only
-   * the last of those may be prepared as a lower-bitrate variant.
-   */
-  private warmTargets(): Array<{ song: Song; capped: boolean }> {
-    const out: Array<{ song: Song; capped: boolean }> = [];
-    for (const step of WARM_STEPS) {
-      const song = this.songAt(step);
-      if (!song || out.some((target) => target.song.id === song.id)) continue;
-      out.push({ song, capped: Math.abs(step) > 1 });
-    }
-    return out;
-  }
-
-  /** The current track and its neighbourhood by id — what a selection is allowed to keep warm. */
-  private neighbourhoodIds(): string[] {
-    const current = this.currentSong;
-    return [...(current ? [current.id] : []), ...this.warmTargets().map((target) => target.song.id)];
-  }
-
   /**
    * The native player took the boundary by itself, and this is the queue catching up (v1.9.8).
    *
@@ -937,7 +764,7 @@ export class PlaybackQueue {
    *     was waiting for the web view, and the foreground reconciliation that reads the player's own
    *     record), and it can arrive after the ordinary JS advance has already moved there. In both
    *     cases the answer is the same: the cursor is already on it, so there is nothing to move —
-   *     only the look-ahead to re-arm.
+   *     only the statement to re-send.
    *   - **a track this queue does not hold is ignored**, not guessed at: a chain armed before the
    *     queue was replaced can name a song that is not in this list any more, and moving the cursor
    *     to it would be inventing one.
@@ -975,7 +802,7 @@ export class PlaybackQueue {
         this.engine.renderReading(positionMs);
       }
       this.pendingStartMs = 0;
-      this.warmNeighbours();
+      this.publishQueue();
       return;
     }
     this.cursor = at;
@@ -989,33 +816,13 @@ export class PlaybackQueue {
     const song = this.items[this.order[at]!]!.song;
     const artworkUrl = this.library.coverUrl(song.coverArt ?? song.albumId, 512);
     this.onChanged?.();
-    await this.engine.nativeMovedTo(this.trackRequest(song, this.engine.warmedUrl?.(song.id) ?? null, artworkUrl), positionMs);
+    await this.engine.nativeMovedTo(this.trackRequest(song, artworkUrl), positionMs);
     this.reportNowPlaying(song);
     this.setupMediaSession(song, artworkUrl);
     this.scheduleSaveQueue();
     this.persistSnapshot(true);
     this.onChanged?.();
-    this.warmNeighbours();
-  }
-
-  /** A play/ warm request for one song at one exact URL. */
-  private trackRequestFor(song: Song, url: string): TrackRequest {
-    return {
-      id: song.id,
-      url,
-      crossOrigin: this.library.crossOrigin,
-      title: song.title,
-      artist: song.artist ?? 'Unknown artist',
-      album: song.album ?? '',
-      artworkUrl: this.library.coverUrl(song.coverArt ?? song.albumId, 512),
-      durationMs: (song.duration ?? 0) * 1000,
-    };
-  }
-
-  private cancelPrepared(): void {
-    // The engine holds the pool, so it is the engine that is told to throw it away (v1.9.5) — the
-    // queue keeps no copy that could disagree with it.
-    void this.engine.discardPrepared?.();
+    this.publishQueue();
   }
 
   private reportNowPlaying(song: Song): void {

@@ -86,10 +86,6 @@ function stubEngine(): Stub {
       played.push(track.url);
       return Promise.resolve();
     },
-    prepareNext: async () => true,
-    warmedUrl: () => null,
-    pruneWarmed: () => undefined,
-    discardPrepared: async () => undefined,
     seek: async () => undefined,
     resume: async () => undefined,
     pause: async () => undefined,
