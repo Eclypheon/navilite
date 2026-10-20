@@ -1781,6 +1781,11 @@ export class AudioEngine {
      */
     if (this.handover && this.handover.songId === track.id && startMs === 0) {
       startMs = this.handover.positionMs;
+    } else if (this.handover && this.handover.songId !== track.id) {
+      void this.abandonHandover(
+        this.handover.songId,
+        `the app started track ${track.id} instead of the handed over track ${this.handover.songId}`,
+      );
     }
     /*
      * The same track, **already playing**, is a second press on the same thing — not a second
@@ -2220,6 +2225,22 @@ export class AudioEngine {
     this.claimSound('app', songId);
   }
 
+  /**
+   * **The app is taking the sound somewhere else, so the queue stops (v2.0-beta.19).**
+   *
+   * An app that starts a different entry, or stops, explicitly abandons any pending handover
+   * reading so the queue does not sound under the app's player.
+   */
+  private async abandonHandover(songId?: string, why?: string): Promise<void> {
+    if (!this.handover) return;
+    const abandonedSongId = songId ?? this.handover.songId;
+    this.handover = null;
+    await this.native?.abandonHandover?.({
+      songId: abandonedSongId,
+      why: why ?? 'the app took the sound somewhere else',
+    });
+  }
+
   async toggle(): Promise<void> {
     if (this.state === 'playing') {
       await this.pause();
@@ -2493,6 +2514,9 @@ export class AudioEngine {
     // Nothing is playing, so there is no queue for the native side to walk (v1.9.9).
     this.statement = { list: [], index: -1, repeat: 'off' };
     void this.syncQueue();
+    if (this.handover) {
+      void this.abandonHandover(this.handover.songId, 'the app stopped playback');
+    }
     this.setNativePosition(0);
     this.nativeDurationMs = 0;
     this.dispatch({ type: 'cleared' });

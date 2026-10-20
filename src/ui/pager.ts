@@ -382,7 +382,9 @@ export function createPager(options: PagerOptions): Pager {
     }
     // The release position, not the last move: a finger that travelled between events still counts.
     const panes = resisted(-(touch.clientX - active.startX) / width);
-    settle(panes, -active.velocity / width);
+    const now = performance.now();
+    const velocity = now - active.lastAt > 80 ? 0 : active.velocity;
+    settle(panes, -velocity / width);
   };
 
   const onTouchCancel = (): void => {

@@ -540,7 +540,7 @@ test('a handover arms the first boundary: the native side preloads ahead when it
   assert.ok(setQueue.includes('self.installEndObserver()'), 'the handover no longer installs the end observer');
   assert.match(
     setQueue,
-    /if !self\.awake \{ self\.preloadAhead\(token: self\.generation\) \}/,
+    /if !self\.awake \{[\s\S]*?self\.preloadAhead\(token: self\.generation\)/,
     'the handover does not arm the next entry — the first boundary after the app goes away would be a fetch again',
   );
   assert.ok(

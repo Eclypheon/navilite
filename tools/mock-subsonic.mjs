@@ -1080,6 +1080,13 @@ const server = createServer((request, response) => {
    */
   if (path.startsWith('/offline-art/')) {
     const name = path.replace('/offline-art/', '');
+    if (name.endsWith('.opus')) {
+      const songId = name.replace(/\.opus$/, '');
+      const song = songs.find((item) => item.id === songId) ?? songs[0];
+      const wav = wavFor(song);
+      send(response, 200, wav, { 'content-type': 'audio/wav', 'accept-ranges': 'bytes' });
+      return;
+    }
     const seed = name.split('').reduce((total, char) => (total * 31 + char.charCodeAt(0)) % 997, 7);
     send(response, 200, coverFor(seed, 512), { 'content-type': 'image/png', 'cache-control': 'no-store' });
     return;

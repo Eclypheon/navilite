@@ -113,7 +113,7 @@ async function drag(cdp, from, to, steps = 10, gapMs = 14) {
     await wait(gapMs);
     await touchMove(cdp, from.x + ((to.x - from.x) * index) / steps, from.y + ((to.y - from.y) * index) / steps);
   }
-  await wait(gapMs);
+  await wait(100);
   await touchEnd(cdp);
   await wait(400);
 }

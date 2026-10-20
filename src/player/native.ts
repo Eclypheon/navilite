@@ -208,6 +208,7 @@ interface NaviliteRemotePlugin {
    */
   handover?(): Promise<{ songId?: string; index?: number; positionMs?: number }>;
   releaseHandover?(next?: { songId?: string; positionMs?: number }): Promise<{ released?: boolean }>;
+  abandonHandover?(next?: { songId?: string; why?: string }): Promise<{ released?: boolean }>;
   /**
    * `NaviliteRemote.queueTransport` — the away queue's own transport (unreleased, `t_05775526`):
    * `op` is `pause` | `resume` | `seek`, and `positionMs` is where a seek lands. Answers `ok` when the
@@ -529,6 +530,10 @@ export interface NativeBridge {
    * reading about items that are no longer the sound. Called only after the start has committed.
    */
   releaseHandover?(next?: { songId?: string; positionMs?: number }): Promise<boolean>;
+  /**
+   * **The app is taking the sound somewhere else, so the queue stops (v2.0-beta.19).**
+   */
+  abandonHandover?(next?: { songId?: string; why?: string }): Promise<boolean>;
   /**
    * **A transport press, sent to the away queue's own player (unreleased, `t_05775526`).**
    *
@@ -2022,6 +2027,15 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           remote.releaseHandover({ songId: next?.songId ?? '', positionMs: next?.positionMs ?? -1 }),
           null,
           'releaseHandover',
+        );
+        return answer?.released === true;
+      },
+      async abandonHandover(next) {
+        if (!remote?.abandonHandover) return false;
+        const answer = await bounded(
+          remote.abandonHandover({ songId: next?.songId ?? '', why: next?.why ?? '' }),
+          null,
+          'abandonHandover',
         );
         return answer?.released === true;
       },

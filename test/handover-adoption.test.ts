@@ -74,6 +74,7 @@ interface Record {
   playing: boolean;
   syncPositionMs: number;
   released: number;
+  abandoned: { songId: string; why: string }[];
   songNow: string;
   /** When set, `load` waits on it: a start that is genuinely still in flight. */
   loadGate: Promise<void> | null;
@@ -97,6 +98,7 @@ const blank = (): Record => ({
   playing: true,
   syncPositionMs: 42_000,
   released: 0,
+  abandoned: [],
   songNow: '',
   loadGate: null,
   silent: false,
@@ -167,6 +169,12 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
       async releaseHandover() {
         record.order.push('release');
         record.released += 1;
+        await wait(ROUND_TRIP_MS);
+        return true;
+      },
+      async abandonHandover(next?: { songId?: string; why?: string }) {
+        record.order.push('abandon');
+        record.abandoned.push({ songId: next?.songId ?? '', why: next?.why ?? '' });
         await wait(ROUND_TRIP_MS);
         return true;
       },
@@ -284,6 +292,46 @@ test('a reading about an entry nobody is starting is kept, and spent by the next
     const playAt = record.order.indexOf('play:61');
     const releaseAt = record.order.indexOf('release');
     assert.ok(releaseAt > playAt, `released after the commit (${record.order.join(' → ')})`);
+  } finally {
+    await engine.stop();
+    await settle();
+  }
+});
+
+test('a reading about an entry is abandoned when a different track is started or playback stopped', async () => {
+  const record = blank();
+  const engine = engineFor(record);
+  try {
+    await engine.play(track('a'));
+    await engine.handleVisibility(true);
+    // Away queue reached c
+    record.reading = { songId: 'c', index: 2, positionMs: 61_000 };
+    record.plays = [];
+    record.order = [];
+    await engine.handleVisibility(false);
+    await settle();
+
+    // The owner taps track 'd' instead of 'c': 'c' is abandoned so the away queue doesn't play underneath
+    record.order = [];
+    record.abandoned = [];
+    await engine.play(track('d'));
+    await settle();
+    assert.deepEqual(record.plays, ['0'], 'track d starts from 0');
+    assert.equal(record.abandoned.length, 1, 'abandonHandover was called');
+    assert.equal(record.abandoned[0].songId, 'c', 'abandoned track is c');
+
+    // Offer another handover for 'e'
+    record.reading = { songId: 'e', index: 3, positionMs: 15_000 };
+    await engine.handleVisibility(true);
+    await engine.handleVisibility(false);
+    await settle();
+
+    // The owner stops playback: 'e' is abandoned
+    record.abandoned = [];
+    await engine.stop();
+    await settle();
+    assert.equal(record.abandoned.length, 1, 'abandonHandover was called on stop');
+    assert.equal(record.abandoned[0].songId, 'e', 'abandoned track is e');
   } finally {
     await engine.stop();
     await settle();
