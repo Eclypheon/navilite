@@ -433,3 +433,8 @@ Plain language, user-visible changes only. The app shows this same list under
 - The phone answers "is this queue making a sound" from the player it is running rather than from a note the app kept, so a pause you took from the Lock Screen is read as a pause.
 - The log on the phone now names the version and build that wrote it, writes exactly one line per return, and names the branch that return took beside the route it took — so a return can be dated and read off the log instead of guessed.
 - One limit on this build: every line above was checked against the app's own playback logic, not on the phone, so the seam itself is still the phone's to answer — and on a row the phone's own queue owns, the spectrum still shows the album art's colours rather than a live reading.
+
+## 2.0-beta.21 — 2026-10-21
+
+- The visualiser stays live when you return to the app while the phone's background queue is playing: it now taps the background player directly, instead of showing a flat row or falling back to album-art colours.
+- Coming back from the background seamlessly continues audio playback without pauses, restarts or duplicate tracks sounding together.
