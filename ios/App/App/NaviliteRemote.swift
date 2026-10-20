@@ -716,7 +716,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             "logLines": self.logCount,
             "logTail": Array(self.logTail.suffix(2)),
             "cardTitle": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String) ?? "",
-            "cardRate": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyPlaybackRate] as? NSNumber)?.doubleValue ?? 0,
+            "cardRate": (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? NSNumber)?.doubleValue ?? 0,
             "artCached": played.map { self.artworkCache[$0.songId] != nil } ?? false,
             "sessionCategory": AVAudioSession.sharedInstance().category.rawValue,
             "sessionOptions": Self.optionNames(AVAudioSession.sharedInstance().categoryOptions),
