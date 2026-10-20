@@ -997,6 +997,12 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
                 self.begin(call: call, player: found.player, assetId: found.assetId, requested: requested)
                 return
             }
+            if let remote = self.bridge?.plugin(withName: "NaviliteRemote") as? NaviliteRemote,
+               remote.currentAwayOwnsAudible,
+               let queue = remote.currentAwayQueue, queue.currentItem != nil {
+                self.begin(call: call, player: queue, assetId: NaviliteRemote.awaySlotName, requested: requested)
+                return
+            }
             guard let audible = AudibleBridgePlayer.find(from: self.bridge) else {
                 call.reject("the audible player was not found on the bridge, so there is nothing to tap — the bars stay on the album-art theme")
                 return
@@ -1493,6 +1499,13 @@ enum AudibleBridgePlayer {
      * different player's frames.
      */
     static func player(_ assetId: String, from bridge: CAPBridgeProtocol?) -> (player: AVPlayer, assetId: String)? {
+        if assetId == NaviliteRemote.awaySlotName {
+            if let remote = bridge?.plugin(withName: "NaviliteRemote") as? NaviliteRemote,
+               let queue = remote.currentAwayQueue, queue.currentItem != nil {
+                return (queue, NaviliteRemote.awaySlotName)
+            }
+            return nil
+        }
         guard let plugin = bridge?.plugin(withName: "NativeAudio") else { return nil }
         for child in Mirror(reflecting: plugin).children where child.label == "audioList" {
             guard let assets = child.value as? [String: Any], let value = assets[assetId] else { continue }

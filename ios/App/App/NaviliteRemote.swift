@@ -217,7 +217,10 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// advances to the item it already holds. No fetch, no `playSlot`, no preload — the advance is the
     /// platform's. `awaySlotName` is the synthetic name the queue's sound is published under, because no
     /// plugin asset holds it; nothing may look it up as one.
-    private static let awaySlotName = "navilite-away-queue"
+    public static let awaySlotName = "navilite-away-queue"
+    /// Accessible to NaviliteSpectrum so the visualizer tap can attach to away queue items.
+    var currentAwayQueue: AVQueuePlayer? { awayQueue }
+    var currentAwayOwnsAudible: Bool { awayOwnsAudible }
     /// How many entries are attached ahead of the one the queue is playing.
     private static let awayAhead = 2
     /// The queue itself, created once and re-filled from each statement.

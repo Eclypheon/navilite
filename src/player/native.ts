@@ -621,7 +621,7 @@ export interface NativeBridge {
    * (an older APK, the PWA) simply has no `startSpectrum`, and the visualiser falls back to its
    * album-art theme exactly as it does when there are no samples for any other reason.
    */
-  startSpectrum?(url: string, positionMs: number): Promise<boolean>;
+  startSpectrum?(url: string, positionMs: number, assetId?: string): Promise<boolean>;
   stopSpectrum?(): Promise<void>;
   spectrumFrame?(): Promise<NativeSpectrumFrame | null>;
   /**
@@ -2278,16 +2278,16 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       droppedEvents() {
         return { inaudible: droppedInaudible, slotGrace: droppedSlotGrace };
       },
-      async startSpectrum(url, positionMs) {
+      async startSpectrum(url, positionMs, assetId) {
         if (!spectrum) return false;
         try {
           /*
            * The slot **this bridge** is playing goes with the request (v1.9.5): the plugin looks the
-           * player up by that id and taps that one, or refuses. It used to choose for itself and
-           * could land on the prepared, silent asset and report `started: true` while the bars read
-           * a player nobody is hearing.
+           * player up by that id and taps that one, or refuses. If a specific target slot was requested
+           * (e.g. the away queue), that slot is targeted directly.
            */
-          const result = await spectrum.start({ url, positionMs, assetId: audibleId });
+          const targetSlot = assetId ?? audibleId;
+          const result = await spectrum.start({ url, positionMs, assetId: targetSlot });
           /*
            * The slot the plugin says it tapped (v1.9.25): kept for the reason line, never acted on.
            * A request that came back `started: false` answers nothing, so the last *answer* stands —

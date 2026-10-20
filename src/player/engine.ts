@@ -2149,16 +2149,7 @@ export class AudioEngine {
     this.claimSound('queue', this.track?.id ?? '');
     this.dispatch({ type: 'engine-state', playing: true });
     this.modeReason = `the return was answered with ${this.track?.id ?? 'the visible entry'} at ${Math.round(at / 1000)} s — the queue holds that sound, so the row renders the reading and the app's own player stays silent; nothing is loaded, started, paused or seeked`;
-    /*
-     * **The bars say nothing rather than lying flat (unreleased, `t_05775526`).** The spectrum tap is
-     * on the app's own player, which is not the sound here; a tap that renders "playing" over a silent
-     * player is the dead spectrum in the owner's report. The visualiser therefore goes to its
-     * album-art theme, and the reason line says why instead of leaving a flat row unexplained.
-     */
-    this.spectrumLive = false;
-    this.setSpectrumReason(
-      'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
-    );
+    if (this.track) this.attachSpectrum(this.track);
     this.startClockTick();
     this.emit();
     this.onProgress?.(this.nativePositionMs, this.durationMs());
@@ -2649,13 +2640,11 @@ export class AudioEngine {
       await this.readReturn('adopt', false, held);
       /*
        * The boundary goes back to the web layer here exactly as it does on the handover below — the
-       * same statement, made in both directions, so no flag can stick (v1.9.8). Safe on this branch:
-       * `returnIsAdoption` is false whenever the away queue owns the sound (`path === 'queue'`), so
-       * the native side's `awake && awayOwnsAudible` handover cannot fire, `armAwayQueue` only
-       * attaches items, and `preloadAhead` only fetches bytes. No `play`, `pause` or `seek`.
+       * same statement, made in both directions, so no flag can stick (v1.9.8).
        */
       await this.syncQueue();
       await this.recordReturn('adopt', held, startsBefore);
+      if (this.state === 'playing') this.verifySpectrum();
       return;
     }
     this.returnPath = 'handover';
@@ -2786,7 +2775,6 @@ export class AudioEngine {
     held: NativeReturnReading | null = null,
   ): Promise<void> {
     const startsBefore = this.startsIssued;
-    const stateBefore = this.state;
     await this.native?.activateSession();
     const truth = await this.native?.sync();
     /*
@@ -2914,7 +2902,7 @@ export class AudioEngine {
        * confirms it is still on the item (see {@link verifySpectrum}).
        */
       this.startClockTick();
-      if (truth?.playing && stateBefore === 'playing' && this.backend === 'native') this.verifySpectrum();
+      if (this.backend === 'native') this.verifySpectrum();
     }
     /*
      * **The guard, where the return decides (unreleased).** An adoption that started a player is the
@@ -3843,8 +3831,6 @@ export class AudioEngine {
    */
   private verifySpectrum(): void {
     if (this.backend !== 'native' || this.state !== 'playing') return;
-    // A tap on a player that is not the sound measures nothing (unreleased, `t_05775526`).
-    if (this.queueOwnsSound()) return;
     const bridge = this.native;
     const track = this.track;
     if (!bridge?.startSpectrum || !track) return;
@@ -3866,7 +3852,8 @@ export class AudioEngine {
      * {@link claimSpectrumInstall}); a verify's own answer changes nothing else, as it never has.
      */
     const serial = this.claimSpectrumInstall(track);
-    void bridge.startSpectrum(track.url, this.nativePositionMs).then(
+    const targetSlot = this.queueOwnsSound() ? 'navilite-away-queue' : undefined;
+    void bridge.startSpectrum(track.url, this.nativePositionMs, targetSlot).then(
       (started) => void this.settleSpectrumInstall(serial, started === true),
       () => void this.settleSpectrumInstall(serial, false),
     );
@@ -3903,22 +3890,10 @@ export class AudioEngine {
   private attachSpectrum(track: TrackRequest): void {
     const bridge = this.native;
     if (this.backend !== 'native' || !bridge?.startSpectrum) return;
-    /*
-     * **The tap follows the sound or says nothing (unreleased, `t_05775526`).** The tap is on the
-     * app's own player. When the away queue owns the sound that player is silent, so a tap there
-     * renders "playing" over no samples — the owner's dead spectrum. The honest choice is the
-     * album-art theme with the reason on the line, not a flat row under a playing icon.
-     */
-    if (this.queueOwnsSound()) {
-      this.spectrumLive = false;
-      this.setSpectrumReason(
-        'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
-      );
-      return;
-    }
     const serial = this.claimSpectrumInstall(track);
+    const targetSlot = this.queueOwnsSound() ? 'navilite-away-queue' : undefined;
     void bridge
-      .startSpectrum(track.url, this.nativePositionMs)
+      .startSpectrum(track.url, this.nativePositionMs, targetSlot)
       .then((started) => {
         // A request a newer one has overtaken is not a verdict about anything this engine holds.
         if (!this.settleSpectrumInstall(serial, started === true)) return;
