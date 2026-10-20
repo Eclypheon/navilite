@@ -328,6 +328,109 @@ struct PressRulesTests {
               && refuseAnswer(NavilitePressRules.releaseTake(readingSongId: "a", appSongId: "b", appSounding: true,
                                                             queueSongId: "c", appMs: 1, queueMs: 1000)))
 
+        print("\n# the away queue is named from the player, so a return after an advance has a reading")
+
+        func stopped(_ decision: NavilitePressRules.Return?) -> Bool {
+            if case .stop = decision { return true }
+            return false
+        }
+        func stopsTheQueue(_ answer: NavilitePressRules.Unreleased) -> Bool {
+            if case .stopTheQueue = answer { return true }
+            return false
+        }
+        func keepsTheQueue(_ answer: NavilitePressRules.Unreleased) -> Bool {
+            if case .keepTheQueue = answer { return true }
+            return false
+        }
+
+        let published: [NavilitePressRules.PublishedEntry] = [
+            .init(songId: "a", url: "file:///a.m4a"),
+            .init(songId: "b", url: "file:///b.m4a"),
+            .init(songId: "c", url: "file:///c.m4a"),
+            .init(songId: "d", url: "file:///d.m4a"),
+        ]
+
+        // After an away advance the player holds the entry it sounded and the two attached ahead.
+        let identity = NavilitePressRules.nameQueue(
+            items: [.init(attachedSongId: "b", url: "file:///b.m4a"),
+                    .init(attachedSongId: "c", url: "file:///c.m4a"),
+                    .init(attachedSongId: "d", url: "file:///d.m4a")],
+            currentAt: 0, published: published)
+        check("an item this side attached is named by identity, at the player's own index",
+              identity.sounding?.songId == "b" && identity.sounding?.cursor == 0)
+        check("every item is named — the bookkeeping may be re-derived from the player", identity.complete)
+
+        // THE CARD: the app's own top-up added d and cancelled c between the advance and the return.
+        // The player holds b (sounding) and d; identity places b, and d's own url places d.
+        let toppedUp = NavilitePressRules.nameQueue(
+            items: [.init(attachedSongId: "b", url: "file:///b.m4a"),
+                    .init(attachedSongId: nil, url: "file:///d.m4a")],
+            currentAt: 0, published: published)
+        check("a top-up that added d and cancelled c does not break the name of the entry sounding",
+              toppedUp.sounding?.songId == "b" && toppedUp.sounding?.cursor == 0)
+        check("the entry the top-up appended is named by its own url",
+              toppedUp.names.count == 2 && toppedUp.names[1] == "d")
+
+        // The owner's log: awayItems longer than awayEntries, so the identity lookup names the sounding
+        // item with an index the entry list does not have — and used to answer nothing at all.
+        let drifted = NavilitePressRules.nameQueue(
+            items: [.init(attachedSongId: nil, url: "file:///c.m4a"),
+                    .init(attachedSongId: nil, url: "file:///d.m4a")],
+            currentAt: 0, published: published)
+        check("an item the bookkeeping lost is named from the player, not answered with nil",
+              drifted.sounding?.songId == "c")
+        check("...and the repaired list is complete, so the pairing can be rebuilt", drifted.complete)
+
+        let twice = NavilitePressRules.nameQueue(
+            items: [.init(attachedSongId: nil, url: "file:///a.m4a"),
+                    .init(attachedSongId: nil, url: "file:///a.m4a")],
+            currentAt: 1,
+            published: [.init(songId: "a", url: "file:///a.m4a"),
+                        .init(songId: "a-again", url: "file:///a.m4a")])
+        check("a url the order holds twice is consumed once each, in the player's order",
+              twice.names.count == 2 && twice.names[0] == "a" && twice.names[1] == "a-again")
+
+        let unnameable = NavilitePressRules.nameQueue(
+            items: [.init(attachedSongId: nil, url: "file:///a-stream.m3u8")],
+            currentAt: 0, published: published)
+        check("an item nothing this side knows cannot be named, and the list is not complete",
+              unnameable.sounding == nil && !unnameable.complete)
+
+        print("\n# a return ends in a reading or in a decision — never in neither")
+
+        check("the queue's entry is named — offer it, with the queue's own index and position",
+              NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: "b",
+                                                soundingIndex: 1, positionMs: 3588)
+              == .offer(songId: "b", index: 1, positionMs: 3588))
+        check("the queue holds the sound and cannot be named — STOP it, never a second player",
+              stopped(NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: nil,
+                                                        soundingIndex: -1, positionMs: 3588)))
+        check("an empty songId is not a name — the queue is stopped rather than offered nothing",
+              stopped(NavilitePressRules.returnDecision(queueOwnsSound: true, soundingSongId: "",
+                                                        soundingIndex: -1, positionMs: 3588)))
+        check("a queue that is not the sound has nothing to decide (releaseHandover writes that line)",
+              NavilitePressRules.returnDecision(queueOwnsSound: false, soundingSongId: nil,
+                                                soundingIndex: -1, positionMs: 0) == nil)
+
+        print("\n# an offer nobody released still ends in exactly one decision")
+
+        check("the ladder re-asks on its four rungs and settles on the one after",
+              NavilitePressRules.releaseReasks(attempt: 0) && NavilitePressRules.releaseReasks(attempt: 1)
+              && NavilitePressRules.releaseReasks(attempt: 2) && NavilitePressRules.releaseReasks(attempt: 3)
+              && !NavilitePressRules.releaseReasks(attempt: 4))
+
+        // The owner's 15:39:40 return: three offers, `positionMs:3588`, `sounding:true`, and nothing
+        // after them — the app's start never committed, so its release was never sent.
+        let neverCommitted = NavilitePressRules.releaseTake(readingSongId: "b", appSongId: "b",
+                                                            appSounding: false, queueSongId: "b",
+                                                            appMs: 3588, queueMs: 3588)
+        check("the app's start has not reached the speakers — the release waits, it does not decide",
+              waitAnswer(neverCommitted))
+        check("the rung that settles answers where the release never would: the queue keeps the sound",
+              keepsTheQueue(NavilitePressRules.unreleasedOffer(appSounding: false)))
+        check("and if the app's own player IS sounding, the queue stops rather than playing under it",
+              stopsTheQueue(NavilitePressRules.unreleasedOffer(appSounding: true)))
+
         print("\n\(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

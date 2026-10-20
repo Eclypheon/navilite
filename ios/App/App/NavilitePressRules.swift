@@ -271,6 +271,134 @@ enum NavilitePressRules {
         return (attached[itemIndex], itemIndex)
     }
 
+    /* ------------------------------------- which entry the away queue is on (v2.0.0-beta.19) */
+
+    /// One item the away queue holds, as the two facts that can name it.
+    ///
+    /// `attachedSongId` is what this side's bookkeeping says the item was attached for, found by
+    /// **object identity** in the attached-items array; `url` is what the item's own asset was built
+    /// from. Either can be missing, and each covers the other's failure: the identity lookup dies the
+    /// moment the item array and the entry array stop describing the same list, and the url is the
+    /// fact the player itself keeps stating after that.
+    struct QueueItem: Equatable {
+        var attachedSongId: String?
+        var url: String
+    }
+
+    /// One entry of the published order, for naming an item whose identity was lost, by its url.
+    struct PublishedEntry: Equatable {
+        var songId: String
+        var url: String
+    }
+
+    /// The player's own item list, named.
+    struct QueueNaming: Equatable {
+        /// One name per item the player holds, in the player's own order; `nil` where nothing this
+        /// side knows names it.
+        var names: [String?]
+        /// Where the player's `currentItem` sits in `names`, or -1 when it holds none.
+        var cursor: Int
+        /// Every item the player holds is named, so the bookkeeping can be re-derived from the player.
+        var complete: Bool { !names.isEmpty && names.allSatisfy { $0 != nil } }
+        /// The entry the queue is on, when it can be named.
+        var sounding: (songId: String, cursor: Int)? {
+            guard cursor >= 0, cursor < names.count, let songId = names[cursor] else { return nil }
+            return (songId, cursor)
+        }
+    }
+
+    /// **Name the queue's own items (v2.0.0-beta.19).**
+    ///
+    /// The identity lookup that used to be the only way to name the sounding entry
+    /// (`awayItems.firstIndex { $0 === item }`) answers nothing the moment the item array and the
+    /// entry array stop describing one list — a rebuild that cleared one and not the other, a prune
+    /// that took an item out twice, a top-up appended to the names and not to the items. Every return
+    /// then logged `queue-handover-unmapped` and offered **no reading at all**, and the app started
+    /// its own player over a queue that was still sounding (the owner's 15:20:21 → 15:26:12 burst:
+    /// thirty lines, one per return, none of them a reading).
+    ///
+    /// The player still states the fact: its item's asset carries the url it was built from. So each
+    /// item is named by identity first, then by its url against the published order — consumed once
+    /// each, in the player's own order, so a url the order legitimately holds twice (repeat all) is
+    /// not handed to both.
+    static func nameQueue(items: [QueueItem], currentAt: Int?, published: [PublishedEntry]) -> QueueNaming {
+        var claimed: [Int] = []
+        var names: [String?] = []
+        for item in items {
+            if let attached = item.attachedSongId, !attached.isEmpty {
+                names.append(attached)
+                continue
+            }
+            var named: (songId: String, at: Int)?
+            if !item.url.isEmpty {
+                for (at, entry) in published.enumerated() where !claimed.contains(at) && entry.url == item.url {
+                    named = (entry.songId, at)
+                    break
+                }
+            }
+            if let named {
+                claimed.append(named.at)
+                names.append(named.songId)
+            } else {
+                names.append(nil)
+            }
+        }
+        let cursor = currentAt.map { $0 >= 0 && $0 < names.count ? $0 : -1 } ?? -1
+        return QueueNaming(names: names, cursor: cursor)
+    }
+
+    /// What a return does with the queue's reading (v2.0.0-beta.19).
+    enum Return: Equatable {
+        /// The queue's entry is named: offer it, at the position the queue is at.
+        case offer(songId: String, index: Int, positionMs: Int)
+        /// The queue holds the sound and nothing here can name it: **stop the queue**. Never "offer
+        /// nothing, and let the app start a second player over it".
+        case stop(String)
+    }
+
+    /// **A return ends in a reading or in a decision — never in neither (v2.0.0-beta.19).**
+    ///
+    /// `nil` is the one case with nothing to decide: the queue is not a sound of this side's, so
+    /// `releaseHandover` writes the "nothing was offered" line instead.
+    static func returnDecision(queueOwnsSound: Bool, soundingSongId: String?, soundingIndex: Int,
+                               positionMs: Int) -> Return? {
+        if let songId = soundingSongId, !songId.isEmpty {
+            return .offer(songId: songId, index: soundingIndex, positionMs: positionMs)
+        }
+        guard queueOwnsSound else { return nil }
+        return .stop("the away queue holds the sound and its current item is not an entry this side attached, so the queue is stopped rather than left sounding under the app's own player — no reading is built from another player's songId")
+    }
+
+    /* ------------------------------------------- an offer nobody released (v2.0.0-beta.19) */
+
+    /// How many times a release is re-asked when the app's own start has not reached the speakers yet.
+    static let releaseAttempts = 4
+    /// How long an offer stands with no release at all before it is settled here. The app's own
+    /// `releaseHandover` only arrives when its start **commits**; a start that never commits used to
+    /// leave the return silent — three `queue-handover` offers at 15:39:40, nothing after them, the UI
+    /// on the row in its loading state while the queue was audible.
+    static let offerSettle: TimeInterval = 3.0
+
+    /// Whether an attempt still has a rung to ask on, or is the one that must settle.
+    static func releaseReasks(attempt: Int) -> Bool { attempt < releaseAttempts }
+
+    /// The one answer an offer that was never released gets, stated once so the deadline and the
+    /// spent wait cannot disagree.
+    enum Unreleased: Equatable {
+        /// The app's own player is sounding: the queue stops rather than playing under it.
+        case stopTheQueue(String)
+        /// Nothing of the app's is sounding: the queue keeps the sound, and the web layer is told
+        /// which entry is sounding so its row can leave the loading state.
+        case keepTheQueue(String)
+    }
+
+    static func unreleasedOffer(appSounding: Bool) -> Unreleased {
+        if appSounding {
+            return .stopTheQueue("the offer was never released and the app's own player is sounding, so the queue stops rather than sounding under it")
+        }
+        return .keepTheQueue("the offer was never released and nothing of the app's is sounding, so the queue keeps the sound and the app is told which entry is sounding rather than sitting on a row that says loading")
+    }
+
     /* -------------------------------------------- one owner: refuse the start, do not describe it */
 
     /// What the sweep found, and whether the start it was sweeping for may be issued at all.

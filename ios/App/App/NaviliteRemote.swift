@@ -248,6 +248,9 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// queue's position yet (v2.0-beta.19). Bounded: an app that cannot be brought to the position
     /// must not leave two players sounding for ever, so the queue takes the handover on the last one.
     private var handoverRefusals = 0
+    /// Which offer is current (v2.0.0-beta.19). The deadline armed by `handOverAwayQueue` fires only
+    /// while its own offer is still the standing one; a release, a later offer or a stop retires it.
+    private var offerTicket = 0
     /// Whether the sound being heard comes from the queue rather than a plugin slot. Every reader of
     /// the audible state goes through `audiblePlayer()` so this one flag is the only difference.
     private var awayOwnsAudible = false
@@ -277,7 +280,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// How many times a release is re-asked when the app's own start has not reached the speakers yet
     /// (v2.0.0-beta.31), and how long between those asks. A start crosses to the speakers a turn or
     /// two after the plugin answers, and a release that gave up in that gap is the second song.
-    private static let releaseAttempts = 4
+    private static let releaseAttempts = NavilitePressRules.releaseAttempts
     private static let releaseRetry: TimeInterval = 0.2
     /// How often a fetched slot is asked whether it can start yet (50ms for responsive background handoff).
     private static let fetchStep = 0.05
@@ -2114,6 +2117,16 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         }
         queuePlayer.removeAllItems()
         awayEntries = []
+        /*
+         * **The items are re-built with the names (v2.0.0-beta.19).** This cleared the entry list and
+         * left the item list as it was, so `awayItems` became longer than `awayEntries` by whatever was
+         * attached before — and the identity lookup that names the sounding entry then answered an
+         * index past the end of `awayEntries`, which `attachedEntry` turns into nil. From that rebuild
+         * on, every return was `queue-handover-unmapped` with the queue still sounding (the owner's
+         * 15:20:21 → 15:26:12 burst: thirty lines, no reading among them). The two arrays describe one
+         * queue, so they are emptied together.
+         */
+        awayItems = []
         awayCursor = -1
         for entry in planned {
             guard let url = URL(string: entry.url) else { continue }
@@ -2352,22 +2365,35 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          */
         let sounding = queueSoundingEntry()
         /*
-         * **No reading is offered from another player's songId (v2.0.0-beta.30).** This fell back to
-         * `audible?.songId` when the queue's item could not be mapped, which paired *this* player's
-         * position with *that* player's track — the app then adopted a track nothing was sounding. A
-         * queue whose item this side cannot name has no reading to offer, and the app keeps its own
-         * statement until the players agree.
+         * **No reading is offered from another player's songId (v2.0.0-beta.30) — and a queue that
+         * cannot be named is stopped, not left sounding (v2.0.0-beta.19).**
+         *
+         * This fell back to `audible?.songId` when the queue's item could not be mapped, which paired
+         * *this* player's position with *that* player's track — the app then adopted a track nothing
+         * was sounding. So a queue whose item this side cannot name has no reading to offer. What it
+         * used to do instead — return, and leave the queue playing — is the defect: the app's own
+         * start then sounds a second track underneath it, one player the listener cannot reach, and
+         * the only way out is a force-quit (the owner's 15:20:21 → 15:26:12 returns). A stop is a
+         * decision; silence is not.
          */
-        guard let sounding else {
+        let decision = NavilitePressRules.returnDecision(
+            queueOwnsSound: awayOwnsAudible,
+            soundingSongId: sounding?.songId,
+            soundingIndex: sounding?.cursor ?? -1,
+            positionMs: positionMs
+        )
+        if case .stop(let stopWhy) = decision {
             record("queue-handover-unmapped", [
                 "songId": audible?.songId ?? "",
                 "attached": awayEntries.count,
-                "why": why + " — the away queue's current item is not an entry this side attached, so no reading is offered rather than one built from another player's songId"
+                "sounding": queueIsSounding,
+                "why": why + " — " + stopWhy
             ])
+            stopAwayQueue(why: stopWhy)
             return
         }
-        let songId = sounding.songId
-        awayCursor = sounding.cursor
+        guard case .offer(let songId, let soundingCursor, _) = decision else { return }
+        awayCursor = soundingCursor
         let statedIndex = index
         /*
          * **The reading's index is derived from its songId, never copied from the statement
@@ -2390,6 +2416,73 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             "sounding": true,
             "why": why + " — the queue keeps the sound until the app's own player reports playing at this position (releaseHandover)"
         ])
+        armOfferDeadline()
+    }
+
+    /**
+     * **An offer nobody releases still ends in exactly one decision (v2.0.0-beta.19).**
+     *
+     * The release is the app's: `engine.ts` calls it from the start's commit, and only when the start
+     * committed (`if (!this.startFailed) await this.releaseHandover(track.id)`). A start that never
+     * commits therefore produced no release at all, and the offer stood for the rest of the session:
+     * the owner's 15:39:40 return is three `queue-handover` offers with `positionMs:3588`,
+     * `sounding:true` and **nothing after them** — no `handover-taken`, no `handover-refused`, no
+     * `return-adopted` — while the phone was already audible and the row on screen said loading.
+     *
+     * So the offer carries a deadline. When it passes with the reading still standing and the queue
+     * still the sound, the same rule the spent wait uses answers here (`unreleasedOffer`): an app
+     * whose own player is sounding takes the sound and the queue stops; an app whose start never
+     * reached the speakers leaves the queue the one sound, and the web layer is told which entry is
+     * sounding so its row can leave the loading state. Either way one line is written and exactly one
+     * player is sounding.
+     */
+    private func armOfferDeadline() {
+        offerTicket += 1
+        let ticket = offerTicket
+        after(NavilitePressRules.offerSettle) { [weak self] in
+            guard let self, ticket == self.offerTicket,
+                  let reading = self.awayResume,
+                  self.awayOwnsAudible, self.awayQueue != nil else { return }
+            self.settleUnreleasedOffer(reading)
+        }
+    }
+
+    /// The deadline's answer, written once. The reading is **not** spent in the kept case: a release
+    /// that arrives late is still the app saying it is playing the queue's entry, and it still takes.
+    private func settleUnreleasedOffer(_ reading: (songId: String, index: Int, positionMs: Int)) {
+        let appFound = appSoundingPlayer()
+        let appSounding = Self.isSounding(appFound?.player)
+        let liveMs = awayQueue.map { queuePositionMs($0) } ?? reading.positionMs
+        let soundingSongId = queueSoundingEntry()?.songId
+        switch NavilitePressRules.unreleasedOffer(appSounding: appSounding) {
+        case .stopTheQueue(let why):
+            record("handover-abandoned", [
+                "songId": reading.songId, "soundingSongId": soundingSongId ?? "",
+                "slot": appFound?.assetId ?? "", "queuePositionMs": liveMs,
+                "kept": "the app's own player",
+                "why": why
+            ])
+            awayResume = nil
+            handoverRefusals = 0
+            stopAwayQueue(why: why)
+        case .keepTheQueue(let why):
+            record("handover-refused", [
+                "songId": reading.songId, "soundingSongId": soundingSongId ?? "",
+                "slot": appFound?.assetId ?? "", "queuePositionMs": liveMs,
+                "kept": "the away queue",
+                "why": why
+            ])
+            /*
+             * The web layer's own adoption of a boundary the native player took (`advanced`, the same
+             * event every away boundary already sends) is what moves the row out of its loading state
+             * — it sets the entry, marks it playing and starts nothing, so the queue stays the one
+             * sound while the screen agrees with it.
+             */
+            notifyListeners("advanced", data: [
+                "songId": reading.songId, "assetId": "", "index": reading.index,
+                "queue": true, "paused": false
+            ])
+        }
     }
 
     /// Where the queue is **now**, in milliseconds. It is still playing until a handover is taken, so
@@ -2642,6 +2735,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 call.reject("plugin deallocated")
                 return
             }
+            // The app answered this offer, so its deadline has nothing left to settle.
+            self.offerTicket += 1
             guard let reading = self.awayResume else {
                 /*
                  * **A take that has already happened answers yes (v2.0.0-beta.21).** `playSlot` spends
@@ -2657,7 +2752,13 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                                   "why": "the handover was already taken by the app's own start at the queue's position"])
                     return
                 }
-                // Nothing was offered: there is no sound of this side's to hand back.
+                // Nothing was offered: there is no sound of this side's to hand back. The answer is
+                // written down as well as resolved (v2.0.0-beta.19): a return that ends here is still
+                // a decision, and a log with no line at all is the one thing this cannot be.
+                self.record("queue-handover-none", [
+                    "songId": appSongId,
+                    "why": "the app released an entry while no reading was offered and no take had happened in the last five seconds, so there was nothing of this side's to hand back"
+                ])
                 call.resolve(["taken": false, "released": false, "songId": "", "positionMs": 0, "driftMs": 0,
                               "why": "no handover was offered, so there was nothing to take"])
                 return
@@ -2770,6 +2871,12 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                                 statedPositionMs: Int,
                                 attempt: Int) {
         guard awayOwnsAudible, let queuePlayer = awayQueue else {
+            // Written down before the answer, for the same reason as the no-offer branch above
+            // (v2.0.0-beta.19): a return always ends in a line.
+            record("queue-handover-none", [
+                "songId": reading.songId, "positionMs": reading.positionMs,
+                "why": "the release arrived while the queue was no longer the sound, so there was nothing here to take"
+            ])
             call.resolve(["taken": false, "released": false, "songId": reading.songId,
                           "positionMs": reading.positionMs, "driftMs": 0,
                           "why": "the queue no longer owns the sound, so there is nothing here to take"])
@@ -2800,7 +2907,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         )
         switch verdict {
         case .wait(let why):
-            guard attempt < Self.releaseAttempts else {
+            guard NavilitePressRules.releaseReasks(attempt: attempt) else {
                 /*
                  * **The wait is spent, and the answer still leaves one owner (v2.0.0-beta.31).** If
                  * the app's own player is making a sound this side could not name (the rare case the
@@ -3042,10 +3149,62 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
          * `audible?.songId`, which is the same two-sources-of-truth lie one layer down. The flag is
          * corrected *from* the reading, never required for it.
          */
-        guard let queuePlayer = awayQueue, let item = queuePlayer.currentItem,
-              let at = awayItems.firstIndex(where: { $0 === item }) else { return nil }
+        guard let queuePlayer = awayQueue else { return nil }
+        /*
+         * **The player's own list is named, not one array by the other's index (v2.0.0-beta.19).**
+         *
+         * This read `awayItems.firstIndex { $0 === currentItem }` and then `awayEntries[at]`, which
+         * is only an answer while the two arrays describe one list. They can stop: a rebuild that
+         * cleared one and not the other, a prune that took an item out of one, a top-up appended to
+         * the names while the player refused the insert. The lookup then answers an index past the
+         * end of `awayEntries`, `attachedEntry` turns that into nil, and **every** return is
+         * `queue-handover-unmapped` for the rest of the session — the owner's 15:20:21 → 15:26:12
+         * burst, thirty lines and not one reading among them, with the queue still sounding under
+         * the app's own player.
+         *
+         * So each item the player actually holds is named — by identity first, then by the url its
+         * asset was built from (`NavilitePressRules.nameQueue`) — and when every one of them is
+         * named, the bookkeeping is re-derived from the player. A list derived from the player
+         * cannot disagree with it, which is the whole reason the identity lookup kept dying.
+         */
+        let items = queuePlayer.items()
+        let currentItem = queuePlayer.currentItem
+        let currentAt = currentItem.flatMap { current in items.firstIndex { $0 === current } }
+        var queued: [NavilitePressRules.QueueItem] = []
+        var unnamedByBookkeeping = 0
+        for item in items {
+            let at = awayItems.firstIndex(where: { $0 === item })
+            let attachedSongId = at.flatMap { $0 < awayEntries.count ? awayEntries[$0] : nil }
+            if attachedSongId == nil { unnamedByBookkeeping += 1 }
+            queued.append(NavilitePressRules.QueueItem(
+                attachedSongId: attachedSongId,
+                url: (item.asset as? AVURLAsset)?.url.absoluteString ?? ""
+            ))
+        }
+        let published = queue.map { NavilitePressRules.PublishedEntry(songId: $0.songId, url: $0.url) }
+        let naming = NavilitePressRules.nameQueue(items: queued, currentAt: currentAt, published: published)
+        if naming.complete {
+            let names = naming.names.compactMap { $0 }
+            if names != awayEntries || items.count != awayItems.count {
+                /*
+                 * One line, only when the bookkeeping had lost an item: the repair is otherwise the
+                 * ordinary derivation and would say nothing worth reading on every boundary.
+                 */
+                if unnamedByBookkeeping > 0 {
+                    record("queue-map-repaired", [
+                        "entries": names.joined(separator: ","),
+                        "cursor": naming.cursor,
+                        "unnamed": unnamedByBookkeeping,
+                        "why": "the item the queue is on was not an entry the bookkeeping could place, so the pairing was re-derived from the player's own list (identity first, then the url each item was built from)"
+                    ])
+                }
+                awayEntries = names
+                awayItems = items
+                awayCursor = naming.cursor
+            }
+        }
         if !awayOwnsAudible, queueIsSounding { awayOwnsAudible = true }
-        return NavilitePressRules.attachedEntry(itemIndex: at, attached: awayEntries)
+        return naming.sounding
     }
 
     /// **Every plugin asset making a sound right now** — by the assetIds the plugin actually answers
