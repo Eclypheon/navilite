@@ -197,3 +197,100 @@ export function crossAwayBoundary(
     state: { attached: [...state.attached, ...tail], cursor: sounded, owned: true, fetches: state.fetches },
   };
 }
+
+/* ------------------------------------------- the return's two verdicts (v2.0.0-beta.22) */
+
+/**
+ * How far the app's own player may be from the queue before the take is refused. The same number as
+ * `NavilitePressRules.maxDriftMs` in `ios/App/App/NavilitePressRules.swift`, stated here so the rule
+ * can be driven without a phone.
+ *
+ * It was 400 ms, and that is the number the owner heard: a take at `driftMs:363` (`09:10:32`) was
+ * inside it and was taken, and 363 ms of two players under one track is audible. 250 ms is the
+ * tolerance this release states — a real handover is one position, and the app seeks and asks again
+ * when it is not.
+ */
+export const HANDOVER_DRIFT_MS = 250;
+
+/** What the return's take came to, and why when it was refused. */
+export type HandoverVerdict =
+  | { taken: true; driftMs: number; why: string }
+  | { taken: false; driftMs: number; why: string };
+
+/**
+ * **Does the app's own player take the sound where the queue is? (v2.0.0-beta.22)**
+ *
+ * Three facts have to hold, and each of them was a false accept in the owner's beta.21 log:
+ *
+ *   1. **a position was reported.** `appPositionMs: -1` means the player said nothing, and the old
+ *      gate (`appPositionMs >= 0 && abs(drift) > bound`) could not fire for it: the drift was written
+ *      as 0, the take fell through, and the queue stopped on a player at 0:00 while it was 14.158 s
+ *      into the track. An unknown is not a match — it is `"no position reported"`.
+ *   2. **the same entry, by songId.** The log numbers the published order with a 0-based `index`
+ *      (`entry 9 of 269` at `index 8`) and the two sides' statements drift a generation, so an index
+ *      compared against an index is a coin flip. songId is the identity both sides agree on.
+ *   3. **the drift is inside the bound**, measured against where the queue is *now*.
+ */
+export function handoverVerdict(input: {
+  appSongId: string;
+  appPositionMs: number;
+  queueSongId: string;
+  queuePositionMs: number;
+  driftMs?: number;
+}): HandoverVerdict {
+  const bound = input.driftMs ?? HANDOVER_DRIFT_MS;
+  if (input.appPositionMs < 0) {
+    return { taken: false, driftMs: 0, why: 'no position reported' };
+  }
+  if (input.appSongId !== input.queueSongId) {
+    return {
+      taken: false,
+      driftMs: 0,
+      why: `the app's own player is on ${input.appSongId || 'nothing'} while the queue is sounding ${input.queueSongId}`,
+    };
+  }
+  const drift = input.queuePositionMs - input.appPositionMs;
+  if (Math.abs(drift) > bound) {
+    return {
+      taken: false,
+      driftMs: drift,
+      why: `the app's own player is ${Math.round(Math.abs(drift))} ms from the queue's position`,
+    };
+  }
+  return {
+    taken: true,
+    driftMs: drift,
+    why: "the app's own player is playing this entry at the position the queue reached",
+  };
+}
+
+/**
+ * **Is a re-arm a no-op? (v2.0.0-beta.22)**
+ *
+ * The owner's beta.21 log arms the queue fourteen times inside two seconds — generations 6, 7, 8, 10,
+ * 11, 12, 14, 15, 16, 18, 19, 20, 21, 22 — with identical `entries` every time. Each rebuild removes
+ * and re-creates the item list, and the statement that lands between two rebuilds is what can describe
+ * a queue that is no longer there. A plan equal to what the queue already holds is therefore not a
+ * rebuild: nothing is removed, nothing is re-created, and no `queue-armed` line is written.
+ *
+ * Only the not-yet-sounding state can be a no-op. A queue that owns the sound is topped up instead
+ * (which compares its own unplayed tail), and a queue that has sounded cannot be rebuilt underneath
+ * the track that is playing.
+ */
+export function armIsNoOp(input: {
+  /** songIds the queue is holding now. */
+  attached: readonly string[];
+  /** songIds `awayPlan()` says it should hold. */
+  plan: readonly string[];
+  /** How many entries the queue has sounded; `-1` before it has been started. */
+  cursor: number;
+  /** Whether the queue, rather than a plugin slot, is making the sound. */
+  owned: boolean;
+  /** Whether a queue player exists at all. */
+  armed: boolean;
+}): boolean {
+  const { attached, plan, cursor, owned, armed } = input;
+  if (!armed || owned || cursor >= 0) return false;
+  if (attached.length !== plan.length) return false;
+  return attached.every((songId, at) => songId === plan[at]);
+}
