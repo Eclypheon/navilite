@@ -113,6 +113,14 @@ enum NativeSpectrumError: LocalizedError {
  * playback the user can hear, and nothing in it fetches or decodes a second copy of the stream.
  */
 final class AudibleSpectrumTap {
+    /// The one tap object the app installs from (v2.0.0-beta.33).
+    ///
+    /// It used to exist only as a stored property of the bridge plugin, so JavaScript was the only
+    /// thing that could ask for a tap. Item creation now happens in `NaviliteRemote.makeItem`, native
+    /// code that must not be told what to measure through a bridge, so the object is shared:
+    /// whichever side touches it first creates it, and both see the same installs.
+    static let shared = AudibleSpectrumTap()
+
     static let bandCount = 64
     /// 2048-point FFT (1024 usable bins), a hop of 1024 samples — ~23 ms of audio at 44.1 kHz,
     /// which is a frame for every animation frame the canvas draws.
@@ -130,12 +138,16 @@ final class AudibleSpectrumTap {
 
     /// Guards the counts this object keeps about itself — never a measurement (v1.9.25).
     private let lock = NSLock()
-    private var item: AVPlayerItem?
+    /**
+     * **One install per item (v2.0.0-beta.33).** The tap used to be a single slot: `attach` began
+     * with `detach()`, so installing the tap on a *new* item took it off whatever item was sounding
+     * — which, now that every queue item is tapped at creation, would leave the tap on the last item
+     * built and the item playing with none. A queue holds several items at once, so this object holds
+     * several installs, keyed by the item they are on. Nothing is ever removed because a *different*
+     * item was tapped: an install goes away when its own item does (`finalize`), or on teardown.
+     */
+    private var installs: [ObjectIdentifier: ItemTap] = [:]
     private weak var player: AVPlayer?
-    private var tap: MTAudioProcessingTap?
-    /// The mix this class put on the item — the only one it will ever remove.
-    private var installedMix: AVMutableAudioMix?
-    private var url: URL?
     /// Evidence of the lifecycle rule v1.7.7 exists for: how many times a tap was *installed* on an
     /// item, and how many times a healthy one was only *verified*. The second grows with every pause,
     /// resume, seek and return to the foreground; the first may only grow for a new item.
@@ -167,7 +179,20 @@ final class AudibleSpectrumTap {
      * item that is playing. Nothing about the audio changes — the FFT is on its own queue
      * (`SpectrumAnalysis.analysisQueue`), no mix is written and no tap is reconfigured.
      */
-    private var currentAnalysis: SpectrumAnalysis?
+    /**
+     * The install for the item the player is on **now** — the one whose frame `snapshot` publishes.
+     *
+     * With one install per item, "which item is being measured" is not a pointer kept in step by
+     * hand: the player's own `currentItem` is the answer, and the install it names is the one this
+     * app is hearing (v2.0.0-beta.33). An item that is attached but not sounding still carries its
+     * own tap — it simply publishes nothing until it is the current item.
+     */
+    private func sounding() -> ItemTap? {
+        guard let current = player?.currentItem else { return nil }
+        return installs[ObjectIdentifier(current)]
+    }
+
+    private var currentAnalysis: SpectrumAnalysis? { sounding()?.analysis }
 
     /// Frames the FFT has produced for the life of the app process — what `snapshot`'s `frames` has
     /// always been. Nothing decides anything from it any more (v1.9.25; see
@@ -210,6 +235,44 @@ final class AudibleSpectrumTap {
     /* ------------------------------------------------------------------ attachment */
 
     /**
+     * **Install this item's own tap, from the moment the item exists (v2.0.0-beta.33).**
+     *
+     * Called by `NaviliteRemote.makeItem` on the main actor while it builds a queue item, so that
+     * "an item the queue can play without a tap" is not a state this app can express. Every item the
+     * queue will play — the sounding one and the parked ones behind it — goes through it, including
+     * the items `armAwayQueue` creates in the background, which no JS path ever reached.
+     *
+     * The item's audio track is resolved through the **async** property API, off the main thread
+     * (`audioTrack(of:)`), never `tracks`/`tracksWithMediaType`: on a remote asset those are a
+     * synchronous round trip to the media server, which is the `0x8BADF00D` class of watchdog kill
+     * this file's own comments describe. So the mix is written when the track list answers — for an
+     * item that was created a moment ago, before AVFoundation has a buffer to render.
+     *
+     * A second call for the same item verifies and returns: there is nothing to install twice.
+     */
+    func install(on item: AVPlayerItem, player: AVPlayer, requestedUrl: URL?) {
+        if carriesOurTap(item) {
+            verifyCount += 1
+            self.player = player
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let track = await AudibleSpectrumTap.audioTrack(of: item)
+            await MainActor.run {
+                guard let self else { return }
+                if case let .failure(error) = self.attach(to: item, track: track, player: player, requestedUrl: requestedUrl) {
+                    /*
+                     * A tap that could not be installed is *reported*, never swallowed: `snapshot`'s
+                     * `attached` stays false and the register answers zeros — the honest state — and
+                     * this line names why, because the engine can only say "not attached".
+                     */
+                    print("[navilite] spectrum: no tap on the item just made: \(error.errorDescription ?? "no reason given")")
+                }
+            }
+        }
+    }
+
+    /**
      * Install the tap on the audible player's own item.
      *
      * This is the whole of v1.7.6's change of engine: no asset is loaded, no player is created, no
@@ -239,10 +302,11 @@ final class AudibleSpectrumTap {
         if carriesOurTap(item) {
             verifyCount += 1
             self.player = player
-            self.url = requestedUrl
             return .success(publishedSampleRate)
         }
-        detach()
+        // An install whose own item has been released is not worth holding, and this is where a new
+        // install arrives, so it is where the registry is pruned (v2.0.0-beta.33).
+        prune()
         /*
          * The track is handed in rather than looked up here (v1.9.1): the lookup is asynchronous,
          * and doing it inside `attach` would either make this whole install asynchronous for no
@@ -311,27 +375,19 @@ final class AudibleSpectrumTap {
         mix.inputParameters = [parameters]
         item.audioMix = mix
 
-        self.tap = tap
-        self.installedMix = mix
-        self.item = item
+        installs[ObjectIdentifier(item)] = ItemTap(item: item, tap: tap, mix: mix, analysis: analysis)
         self.player = player
-        self.url = requestedUrl
         installCount += 1
         /*
-         * **And the item this install replaces stops being measured (v1.9.25).**
+         * **And the item this install replaces is not touched (v2.0.0-beta.33).**
          *
-         * The analysis that was current belongs to an item the player is no longer on: it is
-         * *retired* — its timer cancelled, its FFT destroyed — which is a change to a queue on this
-         * side and to nothing the listener can hear, and it is what keeps the process from running a
-         * second FFT for a track nobody is listening to. The analysis being installed has no timer at
-         * all until AVFoundation prepares *its* tap (`prepare`), so the hand-over itself measures
-         * nothing and delays nothing; from the item's first frame on, `snapshot` publishes this
-         * analysis and only this one.
+         * Until this version the tap was one slot, so a new install had to *retire* the analysis of
+         * whatever item it displaced — the two items could not both be measured. A queue is several
+         * items, so both are: each holds its own tap, its own analysis and its own FFT, and the one
+         * the player is actually on is the one `snapshot` publishes (`sounding()`). An analysis is
+         * retired by its own item's `finalize`, and by nothing else.
          */
-        currentAnalysis?.retire()
-        currentAnalysis = analysis
-
-        return .success(publishedSampleRate)
+        return .success(analysis.published.sampleRate)
     }
 
     /// The analysis's own sample rate, or 0 while no item is being measured (v1.9.25).
@@ -353,9 +409,24 @@ final class AudibleSpectrumTap {
      * very same instance we put there.
      */
     private func carriesOurTap(_ item: AVPlayerItem) -> Bool {
-        guard self.item === item, let tap else { return false }
+        guard let entry = installs[ObjectIdentifier(item)], entry.item === item else { return false }
         guard let processor = item.audioMix?.inputParameters.first?.audioTapProcessor else { return false }
-        return processor === tap
+        return processor === entry.tap
+    }
+
+    /// Drop the installs whose own item has been released (v2.0.0-beta.33).
+    ///
+    /// `ItemTap.item` is weak: the queue owns its items, and an install must not keep a track the
+    /// player has finished with alive. Once an item is gone its entry measures nothing, and without
+    /// this its analysis — and its FFT — would be held by the registry for the life of the process.
+    /// Called from the two places an install can arrive (`install`, `attach`) and from `snapshot`, so
+    /// an entry cannot outlive its item by more than one of those calls.
+    private func prune() {
+        let gone = installs.filter { $0.value.item == nil }.map { $0.key }
+        for key in gone {
+            installs[key]?.analysis.retire()
+            installs.removeValue(forKey: key)
+        }
     }
 
     /// Whether this tap is already on `item` — the readiness test `install` uses, so an item whose
@@ -389,16 +460,15 @@ final class AudibleSpectrumTap {
      * from it any more.
      */
     func detach() {
-        if let item, carriesOurTap(item) {
-            item.audioMix = nil
+        for entry in installs.values {
+            if let item = entry.item,
+               item.audioMix?.inputParameters.first?.audioTapProcessor === entry.tap {
+                item.audioMix = nil
+            }
+            entry.analysis.retire()
         }
-        tap = nil
-        installedMix = nil
-        item = nil
+        installs.removeAll()
         player = nil
-        url = nil
-        currentAnalysis?.retire()
-        currentAnalysis = nil
     }
 
     /* -------------------------------------------------------------------- reporting */
@@ -424,10 +494,11 @@ final class AudibleSpectrumTap {
         let lifetime = lifetimeFrames
         lock.unlock()
         let player = self.player
-        let item = self.item
+        let heard = sounding()
+        let item = heard?.item
         let itemSeconds = item?.currentTime().seconds ?? 0
         let playerSeconds = player?.currentTime().seconds ?? itemSeconds
-        let measurement = currentAnalysis?.published
+        let measurement = heard?.analysis.published
         return [
             "bands": (measurement?.bands ?? [UInt8](repeating: 0, count: AudibleSpectrumTap.bandCount)).map { Int($0) },
             "bandCount": AudibleSpectrumTap.bandCount,
@@ -475,6 +546,30 @@ final class AudibleSpectrumTap {
         lock.lock()
         lifetimeFrames += 1
         lock.unlock()
+    }
+    /**
+     * One item's tap: the mix written on that item, and the analysis that mix's tap measures into.
+     *
+     * The tap belongs to an **item**, not to the process (v2.0.0-beta.33). A queue holds several
+     * items and every one of them carries its own, so this is the object that means "this item's
+     * measurement". `item` is weak — the queue owns its items, and an install must not keep a track
+     * the player has finished with alive — which is what lets `prune` tell an install whose item has
+     * gone.
+     */
+    private final class ItemTap {
+        weak var item: AVPlayerItem?
+        let tap: MTAudioProcessingTap
+        /// The mix this app wrote on the item — held so its own retain is predictable, and the only
+        /// mix this class will ever remove.
+        let mix: AVMutableAudioMix
+        let analysis: SpectrumAnalysis
+
+        init(item: AVPlayerItem, tap: MTAudioProcessingTap, mix: AVMutableAudioMix, analysis: SpectrumAnalysis) {
+            self.item = item
+            self.tap = tap
+            self.mix = mix
+            self.analysis = analysis
+        }
     }
 }
 
@@ -947,7 +1042,7 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
     /// The asset id `src/player/native.ts` loads every track under.
     static let audibleAssetId = "navilite-current"
 
-    private let spectrum = AudibleSpectrumTap()
+    private let spectrum = AudibleSpectrumTap.shared
     /// Bumped by every `start` and `stop`, so a `start` that is still waiting for the player's item
     /// to load cannot install itself over a newer one.
     private var generation = 0
@@ -1264,7 +1359,7 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
          * question put to the media server, and on a remote item that question is asked
          * *synchronously* — the same `remoteXPCAsset_CopyProperty` round trip over XPC that the
          * track list costs, in the crash report the owner sent. This function is called from the
-         * main thread by `WarmAttempt` and by `NaviliteRemote.playSlot`, on items that may have only
+         * main thread, on items that may have only
          * just been created, so it was the app asking that question on the main thread at every
          * boundary and every skip.
          *

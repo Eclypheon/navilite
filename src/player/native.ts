@@ -210,10 +210,12 @@ interface NaviliteRemotePlugin {
   releaseHandover?(next?: { songId?: string; positionMs?: number }): Promise<{ released?: boolean }>;
   /**
    * `NaviliteRemote.queueTransport` — the away queue's own transport (unreleased, `t_05775526`):
-   * `op` is `pause` | `resume` | `seek`, and `positionMs` is where a seek lands. Answers `ok` when the
-   * queue's player took the command, and `why` when this side has no queue to command.
+   * `op` is `play` | `pause` | `resume` | `seek`. `play` carries the entry (`index`, position in the
+   * order the queue was given) and where in it to start (`positionMs`); `positionMs` alone is where a
+   * seek lands. Answers `ok` when the queue's player took the command, and `why` when this side has
+   * no queue to command.
    */
-  queueTransport?(next: { op: string; positionMs?: number }): Promise<{ ok?: boolean; why?: string }>;
+  queueTransport?(next: { op: NativeQueueOp; index?: number; positionMs?: number }): Promise<{ ok?: boolean; why?: string }>;
   /**
    * **One line into the persisted log, for the return (unreleased).**
    *
@@ -442,6 +444,12 @@ export interface NativeQueueEntry {
   warmUrl?: string | null;
 }
 
+/**
+ * The ops `queueTransport` takes on the one surviving player: `play` starts entry `index` at
+ * `positionMs`, and `pause`/`resume`/`seek` are the presses (unreleased, `t_fa149147`).
+ */
+export type NativeQueueOp = 'play' | 'pause' | 'resume' | 'seek';
+
 /** The app's statement of the queue: the resolved play order, the entry playing, and the rules. */
 export interface NativeQueueStatement {
   list: readonly NativeQueueEntry[];
@@ -538,7 +546,7 @@ export interface NativeBridge {
    * press on the row stops, restarts or moves what the owner is listening to. Optional: a build
    * without it answers nothing, and the engine keeps its old route.
    */
-  queueTransport?(op: 'pause' | 'resume' | 'seek', positionMs?: number): Promise<boolean>;
+  queueTransport?(op: NativeQueueOp, positionMs?: number, index?: number): Promise<boolean>;
   /**
    * **Write the return's own line into the phone's log (unreleased).**
    *
@@ -878,16 +886,6 @@ const NAVILITE_SPECTRUM = 'NaviliteSpectrum';
 const BRIDGE_TIMEOUT_MS = 5000;
 /** A seek is short by nature, and the position the UI shows is written optimistically. */
 const SEEK_TIMEOUT_MS = 1500;
-/**
- * How long after a slot is written a completion for it is still the plugin's own doing (v1.9.1).
- *
- * `unload` stops the asset it holds, and the plugin reports a **completion** for it — on its own
- * audio queue, so the report can land after the call has already resolved. With two slots in the
- * player, one of them prepared and silent, that is a completion nobody asked for arriving at the
- * exact moment the listener has changed track: the engine's one event that moves the queue would act
- * on it and skip a track. A real completion inside this window is not music.
- */
-const SLOT_WRITE_GRACE_MS = 800;
 
 /**
  * Run a bridge call under a deadline: it resolves with `fallback` if the plugin does not answer.
@@ -1089,139 +1087,14 @@ const BRIDGE_BUILD_TIMEOUT_MS = 10000;
 
 export { BRIDGE_BUILD_TIMEOUT_MS };
 
-/**
- * How far ahead of the play position the audible item is asked to fill, in seconds (v1.9.2).
- *
- * This is the owner's own request — *"play as soon as ~5 seconds of audio are buffered, then keep
- * filling behind it"* — and it is the one lever AVFoundation exposes for it. Unset, the player
- * fills as much as it can and playback begins when it decides it has enough; set, it is the target
- * the player starts on and keeps filling behind.
- */
-const BUFFER_AHEAD_SECONDS = 5;
 
-/**
- * How much media a **warm** slot has to hold before the app will call it warm (v1.9.8).
- *
- * The slot is prepared ahead of the track that is playing, and what it is for is starting without a
- * fetch: a slot with less than this much media ahead of it is a slot that will stall at the
- * boundary. The proof is asked of the plugin, which reads it from the item's own loaded ranges.
- */
-const WARM_MIN_SECONDS = 1.5;
 
-/**
- * How long the whole of `prepare` may take (v1.9.8) — creating the slot *and* proving it holds
- * media. Longer than the default bridge deadline because a warm now waits for real bytes: the
- * track is one the listener is not waiting for, so its preparation is allowed to take as long as a
- * fetch takes, and the answer it gives back has to be about the bytes that arrived.
- */
-const PREPARE_TIMEOUT_MS = 8000;
 
 export async function createNativeBridge(os: OsName, events: NativeBridgeEvents): Promise<NativeBridge | null> {
   if (os === 'web') return null;
   try {
-    const { NativeAudio } = await import('@capgo/capacitor-native-audio');
-    await NativeAudio.configure({
-      // We are the primary audio source: take focus, take the `.playback` session, show the
-      // lock-screen card and accept its transport commands.
-      showNotification: true,
-      background: true,
-      backgroundPlayback: os === 'android',
-      focus: true,
-    });
-
-    /*
-     * **Four slots and a pool, not two names that swap** (v1.9.5).
-     *
-     * One slot is what the listener hears. The other three hold tracks warmed on the same plugin
-     * and never sent `play` — the previous song and the next two, which is what the owner asked for
-     * (*"after any selection the app must commence prefetching/caching the previous song and the
-     * next two songs, so stepping back or forward is instant"*). Warming the next track is what
-     * makes a track boundary instant; warming the one after it and the one behind it is what makes
-     * a step forward or back instant.
-     *
-     * The pool is **fixed and small on purpose**: at most four assets exist on the player at any
-     * moment, whatever the listener does, which is the bound the whole "no leaks" rule needs. A
-     * warm target goes into a free slot, or — when all three are taken — into the oldest one, whose
-     * asset `fillSlot` unloads as it writes (so a replaced track's bytes are released the moment
-     * its slot is reused, and never accumulate).
-     *
-     * The audible slot is **never** a warm target, and every call in this file is keyed on
-     * `audibleId` and never on a literal: the audible name moves to whichever slot was adopted.
-     */
-    const SLOTS: readonly string[] = ['navilite-slot-0', 'navilite-slot-1', 'navilite-slot-2', 'navilite-slot-3'];
-    let audibleId = SLOTS[0] ?? 'navilite-slot-0';
-    /**
-     * The slot the plugin last answered it had put (or kept) the tap on (v1.9.25).
-     *
-     * `NativeAudio`-side of the pair `spectrumEvidence` reports: the plugin's `start` resolves with
-     * `tapped`, and until this release the bridge dropped it on the floor (`started === true` was all
-     * it kept). It is not a decision — nothing in the engine acts on it — it is the one fact that
-     * says whether the tap is even looking at the slot the listener is hearing.
-     */
-    let spectrumTapped: string | null = null;
-    /**
-     * What each non-audible slot is holding warm: `slot -> { songId, url }`, in warming order.
-     *
-     * Insertion order *is* the eviction order (the oldest goes first), so a slot is re-inserted
-     * whenever it is warmed again. The map is the bridge's own claim of what it holds, and every
-     * way an entry leaves it is named: the slot is adopted (deleted, the asset becomes audible), it
-     * is evicted because all three slots were taken (deleted by `pickWarmSlot`, the asset is
-     * replaced by `fillSlot`), the same track is re-warmed under a different URL (deleted and
-     * unloaded — one stream per track), or the listener moves the chain (`load`/`discard` clear it).
-     */
-    const warm = new Map<string, { songId: string; url: string }>();
-    /**
-     * What each slot **actually holds on the player**, as opposed to what the app claims it holds
-     * (v1.9.11): `slot -> { songId, url }`, and it is not cleared when the claims are.
-     *
-     * This is the difference the boundary needed. `warm` is a *claim*: the app drops it whenever the
-     * claim stops being one it can stand behind (a cold load clears it, a timed-out prepare gives it
-     * back, a track that is no longer a neighbour is pruned). But dropping the claim does not empty
-     * the slot — the item stays loaded and buffered on the player, which is exactly the thing a
-     * boundary wants to start from. Until v1.9.11 nothing remembered that, so a boundary whose claim
-     * had gone took the audible slot over and refetched a track that was already sitting there
-     * buffered in the slot next to it — the owner's *"it does advance but it pauses for a moment, and
-     * it seems to clear out all songs from the native player"*.
-     *
-     * So: `held` is written by `fillSlot` (after the preload resolved, so the plugin really has it),
-     * deleted by `unloadSlot` and by any write to that slot, and it survives `load`/`discard` clearing
-     * the claims. Stale entries are impossible to act on — a handover additionally requires the
-     * **exact** URL, the same rule the engine's own adoption uses — and the pool is fixed at four
-     * slots, so nothing can accumulate.
-     */
-    const held = new Map<string, { songId: string; url: string }>();
-    /**
-     * The slot the listener was hearing before a handover, freed once the incoming item has been
-     * asked to play (v1.9.11) — never before it.
-     *
-     * `null` means there is nothing to free. It is set by a load that hands the audible name to
-     * another slot and cleared by `play`, which is the one call that makes the new slot the one that
-     * is sounding; a load that never got as far as its play leaves the old item loaded, which is a
-     * slot's worth of memory and not a broken queue.
-     */
-    let outgoing: string | null = null;
     /** What the last `load` did, in the words the reason line shows (v1.9.11). */
     let loadOutcome = 'not attempted';
-    /**
-     * When each slot was last written, by slot. See {@link SLOT_WRITE_GRACE_MS}.
-     *
-     * v1.9.7 — **per slot, not one engine-wide timestamp.** The grace exists to swallow the
-     * completion the plugin emits for the asset `unload` just stopped; as one timestamp it was set by
-     * a write to *any* slot, including the silent ones, and a warm to a silent slot therefore
-     * suppressed the AUDIBLE item's real completion for 800 ms. Every start fires up to three warms
-     * on the slots that are not audible, so that was the common case rather than a corner. A slot's
-     * own stamp can only ever be about that slot's own unload.
-     */
-    const slotWrittenAt = new Map<string, number>();
-    /**
-     * The prepare epoch (v1.9.2). See {@link NativeBridge.invalidatePrepared}.
-     *
-     * A prepared job captures the epoch when it is asked for, and checks it again when its turn on
-     * the lane comes: a prepare for a chain the listener has left is not merely late, it is a
-     * request nobody made, so it issues nothing at all. Bumped here, by the two things that take
-     * the slot over — a load and a discard.
-     */
-    let preparedEpoch = 0;
     /** What the last `adopt()` did, in the words the reason line shows (v1.9.5). */
     let adoptOutcome = 'not attempted';
     /** The track the audible slot holds (v1.9.8) — what the native boundary is told is playing. */
@@ -1401,64 +1274,6 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
     let nativeFailures = 0;
     let nativeIgnored = 0;
 
-    /**
-     * Whether an event is about the asset the listener is hearing.
-     *
-     * With a prepared asset in the player, *its* events are not the engine's business: unloading a
-     * slot makes the plugin emit a completion for it (so a stale slot would otherwise advance the
-     * queue), and a playback state belonging to a silent item says nothing about what is playing.
-     * An event with no `assetId` (an older plugin) is passed through, as it always was.
-     *
-     * v1.9.5 — and it is **counted**. Both filters below are deliberate, and both were silent: a
-     * completion that never reached the engine could not be told from one the plugin never sent,
-     * which is a third of the reason the boundary has been diagnosed three times without an
-     * answer. The counters ride to the screen in `status.droppedEvents`.
-     *
-     * v1.9.6 — and the counter no longer ticks at a boundary that *worked*: the slot being adopted is
-     * named as audible before its play call (see `adopt`), because the plugin reports `.playing`
-     * before it resolves that call. `inaudible` is a count of real losses again — events about an
-     * asset the listener is genuinely not hearing.
-     */
-    let droppedInaudible = 0;
-    let droppedSlotGrace = 0;
-    const isAudible = (event: { assetId?: string } | undefined): boolean => {
-      const audible = !event?.assetId || event.assetId === audibleId;
-      if (!audible) droppedInaudible += 1;
-      return audible;
-    };
-
-    await NativeAudio.addListener('currentTime', (event) => {
-      if (!isAudible(event)) return;
-      events.onPosition(event.currentTime);
-    });
-    await NativeAudio.addListener('playbackState', (event) => {
-      if (!isAudible(event)) return;
-      /*
-       * The plugin's own four facts, forwarded whole (v1.9.5). `reason`, `currentTime` and
-       * `duration` are what let the engine decide "this item is at its end" from measurement
-       * instead of from one spelling of one state.
-       */
-      events.onState(event.state, event.isPlaying, {
-        currentTime: Number.isFinite(event.currentTime) ? event.currentTime : undefined,
-        duration: Number.isFinite(event.duration) ? event.duration : undefined,
-        reason: typeof event.reason === 'string' ? event.reason : undefined,
-      });
-      // And the JS-side boundary's end, on the first report that this start is sounding (v2.0-beta.15).
-      noteForegroundAudible(event.isPlaying, event.currentTime);
-    });
-    await NativeAudio.addListener('complete', (event) => {
-      if (!isAudible(event)) return;
-      /*
-       * A slot we wrote a moment ago: this completion is the plugin stopping the asset we replaced.
-       * v1.9.7 — the stamp is the *audible* slot's, so a warm that was just written into a silent
-       * slot can no longer swallow the item the listener is hearing.
-       */
-      if (Date.now() - (slotWrittenAt.get(audibleId) ?? 0) < SLOT_WRITE_GRACE_MS) {
-        droppedSlotGrace += 1;
-        return;
-      }
-      events.onComplete();
-    });
 
     const service = Capacitor.isPluginAvailable(BACKGROUND_AUDIO_SERVICE)
       ? registerPlugin<BackgroundAudioPlugin>(BACKGROUND_AUDIO_SERVICE)
@@ -1471,153 +1286,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
 
     let lastPositionMs = 0;
 
-    /*
-     * **Two lanes, and the audible one is never behind warm work.**
-     *
-     * A track is loaded with `unload`+`preload` under its slot's name, which makes an unfinished
-     * `preload` and the next track's `unload`+`preload` two writers on one slot: the older one can
-     * finish last and leave the plugin holding the wrong stream. So the writes are serialised — but
-     * until v1.9.9 they were serialised **on one lane with the warm work**, and that is the
-     * contention the owner can feel: `prepare` waits for real bytes now (it proves the slot holds
-     * media), a tap's `load` queues behind it, and `boundedSettled` giving up on *waiting* does not
-     * let the job go — the tap then waits for the whole network-bound warm to finish before its own
-     * first byte is asked for.
-     *
-     * So the two are separate lanes: the audible one carries what the listener is waiting for (a
-     * load, an adoption, the play of a start, the slot an adoption frees), the warm one carries what
-     * he is not (a warm, its proof, a replaced slot's unload, a discard). A warm job additionally
-     * **yields** while a start or an adoption is in flight — the bytes still share one pipe, so a
-     * fetch competing with the track he is waiting for is the failure this app has shipped before.
-     * The mechanism is exported (`createAssetLanes`) so the rule can be tested without a phone.
-     */
-    const lanes = createAssetLanes();
 
-    /** What the lock-screen card shows for a track, in one place — the audible and prepared alike. */
-    const metadata = (info: NativeTrackInfo) => ({
-      title: info.title,
-      artist: info.artist,
-      album: info.album,
-      artworkUrl: toAbsoluteArtworkUrl(info.artworkUrl, info.url),
-    });
-
-    /** Put `info` into `slot`, replacing whatever it held. Best-effort: the plugin rejects both on an empty slot. */
-    const fillSlot = async (slot: string, info: NativeTrackInfo): Promise<void> => {
-      slotWrittenAt.set(slot, Date.now());
-      // Whatever this slot held is on its way out with the unload below (v1.9.11): nothing may claim
-      // the old track for a slot that is about to hold a new one.
-      held.delete(slot);
-      try {
-        await NativeAudio.unload({ assetId: slot });
-      } catch {
-        // Nothing loaded under that name yet — unload is best-effort.
-      }
-      try {
-        await NativeAudio.preload({ assetId: slot, assetPath: info.url, isUrl: true, notificationMetadata: metadata(info) });
-      } catch (error) {
-        held.delete(slot);
-        throw error;
-      }
-      // The slot holds it *now* — recorded from the plugin's own answer rather than from the intent.
-      held.set(slot, { songId: info.id ?? info.url, url: info.url });
-    };
-
-    /** Give a slot's asset back to the player. Best-effort: an empty slot rejects. */
-    const unloadSlot = async (slot: string): Promise<void> => {
-      slotWrittenAt.set(slot, Date.now());
-      held.delete(slot);
-      try {
-        await NativeAudio.unload({ assetId: slot });
-      } catch {
-        // Nothing loaded under that name — nothing to free.
-      }
-    };
-
-    /**
-     * Free the slot the listener was hearing before a handover, now that the new item has been asked
-     * to play (v1.9.11).
-     *
-     * Called from `play`, after the play call and the buffer target — the order is the whole point.
-     * Until v1.9.11 a load took the audible slot over first (`unload` + `preload` on the same name),
-     * so the player held **nothing** while the incoming stream was fetched: the lock screen had no
-     * item, the plugin had no current asset, and the next track appeared out of an empty player. The
-     * incoming track now goes into a different slot and the outgoing one is only released once the
-     * new one has been asked to play, so the queue is never emptied and no silence is *introduced* by
-     * the app; whatever wait the fetch costs is the fetch's, not a hole the app made.
-     */
-    const freeOutgoing = async (): Promise<void> => {
-      const slot = outgoing;
-      outgoing = null;
-      if (slot === null || slot === audibleId) return;
-      await bounded(lanes.audible(() => unloadSlot(slot)), undefined, 'handover-unload');
-    };
-
-    /**
-     * Where a new warm target goes: a free slot, or the oldest warm one (v1.9.5).
-     *
-     * The audible slot is never a candidate. When all three warm slots are taken, the oldest is
-     * chosen — its claim is dropped here and `fillSlot` unloads its asset as it writes the new one,
-     * so the pool cannot grow and a replaced track's bytes do not linger behind it.
-     */
-    const pickWarmSlot = (): string => {
-      for (const slot of SLOTS) if (slot !== audibleId && !warm.has(slot)) return slot;
-      const oldest = warm.keys().next();
-      const evicted = oldest.done ? null : oldest.value;
-      if (evicted !== null) warm.delete(evicted);
-      return evicted ?? SLOTS.find((slot) => slot !== audibleId) ?? audibleId;
-    };
-
-    /**
-     * Tell the player how far ahead to fill the item the listener is hearing (v1.9.2).
-     *
-     * This is ours to do because the audible item is reachable from our own iOS plugin, which
-     * already finds the audible `AVPlayer` reflectively for the spectrum tap (see
-     * `ios/App/App/NaviliteSpectrum.swift`); the vendor plugin exposes no API for it. It runs
-     * *after* the item is in place — a load, or an adoption at a boundary — so it is a property
-     * written on an item that is already the right one, and it makes no sound.
-     *
-     * Android has no equivalent call: the vendor's player builds stock `DefaultLoadControl`, which
-     * fills 50 s of media before it will start. That one is patched at the source by
-     * `tools/patch-native-audio.mjs`, which is the only way to reach it.
-     */
-    const configureBuffer = async (): Promise<void> => {
-      if (!spectrum) return;
-      try {
-        // The audible slot is named (v1.9.5): the buffer target belongs on the item being heard, and
-        // with a pool of four assets the plugin cannot work out which one that is by itself.
-        await spectrum.configureBuffer({ seconds: BUFFER_AHEAD_SECONDS, assetId: audibleId });
-      } catch (error) {
-        console.warn('[navilite] the player would not take a forward-buffer target', error);
-      }
-    };
-
-    /**
-     * Make one **warm** slot demonstrably able to start, and say whether it is (v1.9.8).
-     *
-     * `preload` resolving only ever meant "an `AVPlayerItem` and an `AVPlayer` exist"; nothing had
-     * been asked of them, so the "next two songs" could be prepared in name only — which is the
-     * owner's *"it should already have prefetched the next song but it still doesn't load and play
-     * instantly"*. This aims the slot at a forward buffer and asks AVFoundation for the media data
-     * needed to start it; the seconds it reports back are what the slot actually holds.
-     *
-     * `null` means **warmth cannot be proved here** — Android has no spectrum plugin, and it is our
-     * plugin that reaches the vendor's players — and the caller then keeps the old behaviour rather
-     * than failing a warm it cannot judge. `false` means the slot was asked and has no bytes: it is
-     * not a warm slot, and the caller gives it back.
-     */
-    const proveWarm = async (slot: string): Promise<boolean | null> => {
-      if (!spectrum?.warmSlot) return null;
-      try {
-        const answer = await spectrum.warmSlot({ assetId: slot, seconds: BUFFER_AHEAD_SECONDS, minSeconds: WARM_MIN_SECONDS });
-        if (answer.buffered === true) return true;
-        const held = Number.isFinite(answer.seconds) ? Number(answer.seconds).toFixed(1) : '0';
-        console.warn(`[navilite] a warm slot holds ${held} s of media (${answer.reason ?? 'no reason given'})`);
-        return false;
-      } catch (error) {
-        // A plugin that does not implement this call at all is not a slot that failed to load.
-        console.warn('[navilite] a warm slot could not be asked whether it can start', error);
-        return null;
-      }
-    };
 
     /**
      * Publish the whole queue to the native side, and take its answer (v1.9.9).
@@ -1644,27 +1313,18 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         boundaryReason = 'this build has no native boundary plugin, so the web layer owns the boundary as it always did';
         return false;
       }
-      let warmEntries = 0;
-      const list = statement.list.map((entry) => {
-        const held =
-          entry.warmUrl == null
-            ? undefined
-            : [...warm.entries()].find(([, claim]) => claim.songId === entry.songId && claim.url === entry.warmUrl);
-        const artworkUrl = toAbsoluteArtworkUrl(entry.artworkUrl, entry.url);
-        if (held === undefined) {
-          return { songId: entry.songId, url: entry.url, title: entry.title, artist: entry.artist, album: entry.album, artworkUrl };
-        }
-        warmEntries += 1;
-        return {
-          songId: entry.songId,
-          url: entry.url,
-          title: entry.title,
-          artist: entry.artist,
-          album: entry.album,
-          artworkUrl,
-          assetId: held[0],
-        };
-      });
+      /*
+       * No entry is named with a slot any more: the queue is the only player and it fetches (or
+       * already holds) every entry itself, so the list is the order and nothing else.
+       */
+      const list = statement.list.map((entry) => ({
+        songId: entry.songId,
+        url: entry.url,
+        title: entry.title,
+        artist: entry.artist,
+        album: entry.album,
+        artworkUrl: toAbsoluteArtworkUrl(entry.artworkUrl, entry.url),
+      }));
       statementGeneration += 1;
       const answer = await bounded(
         remote.setQueue({
@@ -1672,7 +1332,6 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           index: statement.index,
           repeat: statement.repeat,
           awake: statement.awake,
-          audibleAssetId: audibleId,
           audibleSongId: audibleSongId ?? undefined,
           generation: statementGeneration,
         }),
@@ -1691,7 +1350,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         answer === null
           ? 'the native boundary plugin did not answer, so the web layer keeps the boundary'
           : boundaryArmed
-            ? `the native player will walk this queue itself if a track ends with the app away (${list.length} entries, ${warmEntries} of them held warm here)`
+            ? `the native player will walk this queue itself if a track ends with the app away (${list.length} entries, every one of them the queue's own to fetch)`
             : statement.awake
               ? 'the app is on screen, so the web layer takes the track boundary and the native side is only told what follows'
               : statement.index < 0
@@ -1717,6 +1376,43 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       }
     };
 
+    /** Where the entry the app is on sits in the order the phone was given. */
+    const entryIndex = (): number => {
+      if (audibleSongId !== null) {
+        const at = statement.list.findIndex((entry) => entry.songId === audibleSongId);
+        if (at >= 0) return at;
+      }
+      return statement.index;
+    };
+
+    /**
+     * **The one call that reaches the player making the sound.**
+     *
+     * `NaviliteRemote.queueTransport` is the away queue's own transport — a lock-screen press takes
+     * the same path — so a start, a pause, a resume and a seek all leave the web layer as one intent
+     * about the queue: `play` names the entry (`index`) and where in it to start (`positionMs`), and
+     * `pause`/`resume`/`seek` are the presses. Bounded like every other call on this bridge: the row
+     * has already moved, so a plugin that never answers must not hold a press open.
+     */
+    const sendTransport = async (
+      op: NativeQueueOp,
+      positionMs?: number,
+      ms = BRIDGE_TIMEOUT_MS,
+      index = entryIndex(),
+    ): Promise<boolean> => {
+      if (!remote?.queueTransport) return false;
+      const at = Number.isFinite(positionMs) ? Math.round(positionMs as number) : -1;
+      /* `index` travels only with `play`: it names an entry, and the presses name none. */
+      const asked: { op: NativeQueueOp; index?: number; positionMs: number } = { op, positionMs: at };
+      if (op === 'play') asked.index = index;
+      const answer = await bounded(remote.queueTransport(asked), null, `queueTransport-${op}`, ms);
+      if (!answer?.ok) {
+        boundaryReason = `the queue's own player did not take the ${op}: ${answer?.why ?? 'the plugin did not answer'}`;
+        return false;
+      }
+      return true;
+    };
+
     return {
       async load(info) {
         /*
@@ -1736,257 +1432,25 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         } else {
           beginForegroundBoundary();
         }
-        /*
-         * A load is the listener's own request, and it takes the audible slot over (v1.9.2): any
-         * prepare still on the lane for the chain he has left is refused rather than performed.
-         *
-         * v1.9.5 — **and it drops every warm claim**, which is the "state is reset on every
-         * selection" half of the owner's third rule. The slots it drops are not unloaded here: the
-         * only thing the load may not do is spend the listener's wait on freeing bytes he is not
-         * waiting for, and the queue re-warms around the new track a moment after it starts, which
-         * writes those same slots (`fillSlot` unloads as it writes). The pool is fixed at four
-         * either way, so nothing accumulates meanwhile.
-         *
-         * v1.9.11 — **and dropping a claim is not the same as emptying a slot.** Every branch below is
-         * about that distinction, because this call is the boundary's fallback and it used to take the
-         * audible slot over unconditionally (`unload` then `preload` on the same name), which leaves
-         * the player holding *nothing* until the new stream's first bytes arrive. In order:
-         *
-         *   1. **The track is already audible.** It is on the player under exactly this URL, so there
-         *      is nothing to fetch and the play that follows is the whole start. (The old code
-         *      unloaded and refetched it: the one case where a start has the most to lose and the
-         *      least to gain.)
-         *   2. **The player holds it in another slot.** This is the handover the invariant asks for:
-         *      the armed item becomes current from its own buffered state, the audible name moves to
-         *      it, and the outgoing slot is freed by `play` — never before the new item has been
-         *      asked for. Nothing is fetched, nothing is emptied, and this works from what the
-         *      *player* holds (`held`) rather than from the app's claims (`warm`), which is what makes
-         *      it survive a boundary whose claim was dropped by a timeout or a prune.
-         *   3. **Nothing holds it.** Then it is a genuine fetch, and it is performed *into a slot that
-         *      is not the one being heard*: the incoming track is written beside the outgoing item,
-         *      the audible name is handed over, and `play` frees the slot the old track was in. The
-         *      queue is never empty and the lock screen never has to show nothing.
-         */
-        preparedEpoch += 1;
-        warm.clear();
         audibleSongId = info.id ?? audibleSongId;
-        const key = info.id ?? info.url;
-        // A handover that never reached its play leaves the slot it was going to free still set, and
-        // this call is another selection — free it now rather than carry it.
-        await freeOutgoing();
-        const audibleTrack = held.get(audibleId);
-        if (audibleTrack?.songId === key && audibleTrack.url === info.url) {
-          loadOutcome = `nothing to fetch — the audible slot already holds this track under exactly this URL, so this start is the play that follows it`;
-          return;
-        }
-        const elsewhere = [...held.entries()].find(
-          ([slot, h]) => slot !== audibleId && h.songId === key && h.url === info.url,
-        );
-        if (elsewhere) {
-          const [slot] = elsewhere;
-          warm.delete(slot);
-          outgoing = audibleId;
-          audibleId = slot;
-          loadOutcome = `handed over to the slot that already holds this track, buffered (${slot}) — nothing was unloaded and nothing was fetched`;
-          return;
-        }
-        /*
-         * Into a slot that is not the one being heard. With a pool of four there is always such a
-         * slot; the audible one is the fallback only for a bridge with a single slot, where there is
-         * no other place to put it.
-         */
-        const spare = SLOTS.find((slot) => slot !== audibleId) ?? audibleId;
-        // The listener's own request, on the lane that belongs to him — and while it is in flight,
-        // warm work stands aside instead of competing for the link.
-        await lanes.audible(() => bounded(fillSlot(spare, info), undefined, 'load'));
-        if (spare === audibleId) {
-          loadOutcome = `fetched into the audible slot itself — this bridge has no second slot to load beside the one being heard`;
-          return;
-        }
-        outgoing = audibleId;
-        audibleId = spare;
-        loadOutcome = `fetched into ${spare} beside the track being heard, and the audible name was handed over to it — the previous item is freed once the new one has been asked to play`;
+        loadOutcome = 'the queue holds every entry — this selection is the start that follows it';
       },
-      async prepare(info) {
-        /*
-         * One warm target, into **its own slot**, and nothing here touches what is playing: it is a
-         * preload on the same plugin under a free slot's asset id, and the player it creates is
-         * never sent `play` — which is the whole difference between this and the second engine
-         * v1.7.6 deleted. Three of these can be held at once (the previous track and the next two);
-         * the slot for a fourth is taken from the oldest.
-         *
-         * v1.9.2 — **it answers whether it happened, and it performs nothing if the listener has
-         * moved on.** Two halves of one fix: the epoch, checked on the lane rather than at the call,
-         * so a prepare the listener did not ask for issues nothing even when it was queued; and the
-         * boolean, so the queue records a warm track only when there is one. A prepare that timed
-         * out used to be indistinguishable from a successful one, and the slot it claimed was never
-         * given back.
-         *
-         * v1.9.5 — **keyed on the track, not on the slot.** The same track under the same URL is
-         * already warm and a second preload of it is nothing (the answer is `true` without asking
-         * the plugin); the same track under a *different* URL loses its old asset first, so one
-         * track never holds two streams.
-         */
-        const epoch = preparedEpoch;
-        const key = info.id ?? info.url;
-        for (const claim of warm.values()) if (claim.songId === key && claim.url === info.url) return true;
-        const result = await boundedSettled(
-          lanes.warm(async () => {
-            if (epoch !== preparedEpoch) return false;
-            /*
-             * **And warm work stands aside while a start or an adoption is in flight (v1.9.9).**
-             *
-             * The lanes are separate, which is what keeps a tap from *queueing* behind a warm — but
-             * the bytes are one pipe, and a fetch that runs while the listener waits for the first
-             * seconds of a track he tapped is competing with the very stream he is waiting for. So
-             * the warm waits for the audible lane to be quiet, with a bound: past it, this answers
-             * "not warm" and issues nothing at all, which the engine reads as a claim that was never
-             * made. Nothing is lost — the look-ahead warms again after the start has settled.
-             */
-            if (!(await lanes.yieldToAudible())) return false;
-            if (epoch !== preparedEpoch) return false;
-            for (const [slot, held] of [...warm]) {
-              if (held.songId !== key) continue;
-              warm.delete(slot);
-              await unloadSlot(slot);
-            }
-            const slot = pickWarmSlot();
-            await fillSlot(slot, info);
-            /*
-             * **And the slot has to be able to start, or it is not a warm slot (v1.9.8).**
-             *
-             * Creating a player was never the claim this call makes; holding the bytes is. A slot
-             * that was asked for media and did not get any is given straight back — the engine drops
-             * its claim with this answer, so the next boundary reports an honest cold fetch instead
-             * of a "warm" track that still has to be downloaded.
-             */
-            if ((await proveWarm(slot)) === false) {
-              await unloadSlot(slot);
-              return false;
-            }
-            // Re-inserted so the warming order stays the eviction order.
-            warm.delete(slot);
-            warm.set(slot, { songId: key, url: info.url });
-            return true;
-          }),
-          false,
-          'prepare',
-          PREPARE_TIMEOUT_MS,
-        );
-        return result.settled && result.value;
+      /**
+       * **Nothing to warm here any more.** Warming was three plugin slots holding the previous song
+       * and the next two; the queue's own next items are that now (`armAwayQueue`/`topUpAwayQueue`
+       * in `NaviliteRemote.swift`, fed by `setQueue`), so this answers `false` — no track is held
+       * warm by *this* bridge, and the engine must not record one as if it were.
+       */
+      async prepare() {
+        return false;
       },
       invalidatePrepared() {
-        // A caller that knows the chain is abandoned can say so without touching the player; the
-        // lane job that is already waiting for its turn reads this and issues nothing.
-        preparedEpoch += 1;
+        // A prepare the listener did not ask for has nothing to refuse: there is no slot job to
+        // stand aside. Kept as a callable no-op because the queue still makes it.
       },
-      async adopt(songId) {
-        /*
-         * The slot holding `songId`, when the engine names the track it is starting — the boundary
-         * case, and the only one where the app knows exactly what it is adopting. Without an id
-         * (an older caller) the most recently warmed slot is used, which is the track after the
-         * current one.
-         */
-        let from: string | null = null;
-        if (typeof songId === 'string') {
-          for (const [slot, claim] of warm) {
-            if (claim.songId !== songId) continue;
-            from = slot;
-            break;
-          }
-        } else {
-          for (const slot of warm.keys()) from = slot;
-        }
-        const to = audibleId;
-        /*
-         * Order matters, and it is the order the plugin's own bookkeeping needs.
-         *
-         * The prepared asset is played first: from that instant it is what the listener hears, so
-         * the *next* thing — freeing the slot the old track held — fires the plugin's synthetic
-         * completion for an asset id that is no longer the audible one, reports nothing to the
-         * engine's transport state, and leaves the now-playing card alone. Unloading first would
-         * take the audio session and the card down between the two tracks, audibly.
-         *
-         * v1.9.5 — **and it says what happened.** Every way this can end is now named: nothing in
-         * the slot, the player refusing the play, the call not answering inside its deadline, or
-         * the adoption itself. `false` used to be all four at once, and the engine turned all four
-         * into "load it cold" with no word anywhere.
-         */
-        let refusal: string | null = null;
-        if (from === null || from === to) {
-          adoptOutcome = 'nothing prepared';
-          return false;
-        }
-        const slotName = from;
-        /*
-         * **The slot is named before the play call, not after it (v1.9.6).**
-         *
-         * The plugin notifies the state change *before* it resolves the call it was given:
-         * `notifyPlaybackState(assetId:…, reason: "play", state: .playing)` and then `call.resolve()`
-         * (`Plugin.swift`, in the play block). So the adopted slot's own "playing" report — the one
-         * event that says this boundary worked, and the first thing that tells the engine sound
-         * exists — arrived while `audibleId` still named the outgoing slot, and `isAudible` threw it
-         * away as an event about an asset nobody is hearing. The engine then learned "playing" from
-         * the plugin's 100 ms current-time timer instead, and `droppedEvents.inaudible` — the counter
-         * built to explain a boundary *failure* — ticked at every successful boundary, which is a
-         * counter pointing at a loss that did not happen.
-         *
-         * Naming the slot here is not a guess about what the plugin will do: it is the claim this
-         * bridge is making anyway — the play has been issued for this slot and nothing else can be
-         * audible — and the failure paths below put it back, because then the outgoing asset really
-         * is still the one playing.
-         */
-        audibleId = slotName;
-        audibleSongId = songId ?? audibleSongId;
-        const result = await lanes.audible(async () => {
-          const attempt = (async (): Promise<boolean> => {
-            try {
-              await NativeAudio.play({ assetId: slotName, time: 0 });
-            } catch (error) {
-              refusal = `play refused (${error instanceof Error ? error.message : String(error)})`;
-              return false;
-            }
-            return true;
-          })();
-          return boundedSettled(attempt, false, 'adopt');
-        });
-        if (!result.settled) {
-          // Nothing is known to be playing on this slot, and the engine is about to load the track
-          // into the audible one: give the name back so the outgoing asset's events are its again.
-          audibleId = to;
-          adoptOutcome = 'timed out';
-          return false;
-        }
-        if (!result.value) {
-          audibleId = to;
-          adoptOutcome = refusal ?? 'play refused';
-          return false;
-        }
-        adoptOutcome = 'adopted';
-        warm.delete(slotName);
-        // `audibleId` already names this slot — it was named before the play call, above, so that the
-        // plugin's own report of this boundary could reach the engine.
-        // The adopted item is the audible one now: the forward-buffer target belongs on it, and
-        // the item it was prepared as is a different one by the time it is heard (v1.9.2).
-        await configureBuffer();
-        await startService();
-        // The slot that was just emptied is the one written here (v1.9.7: the stamp is per slot).
-        slotWrittenAt.set(to, Date.now());
-        // The slot this adoption emptied is not one a later load has to free (v1.9.11).
-        if (outgoing === to) outgoing = null;
-        await bounded(
-          lanes.audible(async () => {
-            try {
-              await NativeAudio.unload({ assetId: to });
-            } catch {
-              // The slot may already be empty (a cold first track) — nothing to free.
-            }
-          }),
-          undefined,
-          'adopt-unload',
-        );
-        lastPositionMs = 0;
-        return true;
+      async adopt() {
+        adoptOutcome = 'nothing to adopt — the queue already holds the item';
+        return false;
       },
       /*
        * ------------------------------------------------------ the published queue (v1.9.9)
@@ -2036,18 +1500,8 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
        * plugin that never answers must not hold a press open. `positionMs` travels in milliseconds —
        * the engine's unit — and the plugin converts.
        */
-      async queueTransport(op, positionMs) {
-        if (!remote?.queueTransport) return false;
-        const answer = await bounded(
-          remote.queueTransport({ op, positionMs: Number.isFinite(positionMs) ? Math.round(positionMs as number) : -1 }),
-          null,
-          'queueTransport',
-        );
-        if (!answer?.ok) {
-          boundaryReason = `the away queue's own player did not take the ${op}: ${answer?.why ?? 'the plugin did not answer'}`;
-          return false;
-        }
-        return true;
+      async queueTransport(op, positionMs, index) {
+        return sendTransport(op, positionMs, BRIDGE_TIMEOUT_MS, index ?? entryIndex());
       },
       async reconcile() {
         if (!remote?.now) return null;
@@ -2082,30 +1536,24 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         }
         if (state.identity) nativeIdentity = state.identity;
         if (state.scene) nativeScene = state.scene;
-        const slot = typeof state.assetId === 'string' && state.assetId ? state.assetId : null;
         const nativeIndex = Number.isFinite(state.index) ? Number(state.index) : -1;
         /*
-         * **The app is following the wrong track if either fact says so (v1.9.9).** The slot is the
-         * old test and it still holds — but the *index* is the one a shuffled order needs: two
-         * different tracks can be played from the same slot name over time, and the id lookup this
-         * used to fall back on cannot tell an advance from a re-warm. An index that differs from the
-         * one the app last published is a boundary the native side took, whether or not it happened
-         * to come out of the slot the app expected.
+         * **The index is the whole test now (unreleased, `t_fa149147`).** The slot comparison went
+         * with the slots: there is one player, so the only way the app can be following the wrong
+         * track is that the queue itself moved. An index that differs from the one the app last
+         * published is a boundary the native side took, whether or not the entry came out of the
+         * item the app expected — and an index is what a shuffled order needs, where a name is not.
          */
         const movedIndex = nativeIndex >= 0 && nativeIndex !== statement.index;
         const reading = returnReadingOf(state.return);
-        if (slot === null || (slot === audibleId && !movedIndex)) {
+        if (!movedIndex) {
           return { changed: false, songId: state.songId ?? null, index: nativeIndex, resume: handoverOf(state.resume), reading };
         }
         /*
          * The native player is on another entry than the app believed. That is a track the app
          * advanced to without being told, and the answer is to move onto it — never to play anything:
-         * the audio is already coming out of that slot.
+         * the sound is already coming out of the queue's own item.
          */
-        if (slot !== null) {
-          warm.delete(slot);
-          audibleId = slot;
-        }
         audibleSongId = typeof state.songId === 'string' && state.songId ? state.songId : null;
         // The load that moves the app onto this entry is an adoption, not a new clock (v2.0-beta.15).
         adoptingNextLoad = true;
@@ -2126,22 +1574,10 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       },
       async discard() {
         /*
-         * Every warm target goes back (v1.9.5). The queue calls this when the chain it was warming
-         * for is not the chain the listener is on any more, so all three slots are freed here —
-         * bounded by the pool, and with each claim deleted as its slot is unloaded, so nothing is
-         * left claiming a track the player no longer holds.
+         * Nothing is held warm by this bridge: the look-ahead is the queue's own next items
+         * (`armAwayQueue`/`topUpAwayQueue` in `NaviliteRemote.swift`), and an entry leaves that queue
+         * by leaving the order, not by being unloaded here.
          */
-        preparedEpoch += 1;
-        const slots = [...warm.keys()];
-        warm.clear();
-        if (slots.length === 0) return;
-        await bounded(
-          lanes.warm(async () => {
-            for (const slot of slots) await unloadSlot(slot);
-          }),
-          undefined,
-          'discard',
-        );
       },
       async play(startSeconds) {
         await startService();
@@ -2157,81 +1593,66 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           // What this start asked for — the offset its own reports can be near (`noteForegroundAudible`).
           foregroundAskedMs = Math.max(0, startSeconds) * 1000;
         }
-        // Behind the audible lane: the play for a track whose own load is still running must not
-        // overtake it, and it must not start the previous track's asset either.
-        await lanes.audible(() => bounded(NativeAudio.play({ assetId: audibleId, time: Math.max(0, startSeconds) }), undefined, 'play'));
         /*
-         * The forward-buffer target, written **after** the play call (v1.9.2).
-         *
-         * The plugin sets its `currentlyPlayingAssetId` when it is asked to play, and that is what
-         * our own plugin finds the audible player by; asking before this point would aim the target
-         * at the outgoing item. Setting it after the play is still in time — the player fills
-         * towards this target for as long as the item plays.
+         * **The start is an intent on the one surviving queue.** `op: 'play'` names the entry the
+         * app is on and where in it to start, and `NaviliteRemote` rebuilds its queue at that entry
+         * and seeks — the same call a lock-screen press takes. Nothing is fetched here first: the
+         * queue has held every entry of the order since `setQueue`.
          */
-        await configureBuffer();
-        /*
-         * **And only now the slot the previous track held (v1.9.11).** This is the whole of "the
-         * queue is never emptied": a load writes the incoming track *beside* the item being heard and
-         * hands the audible name over, and the item it replaced is released here — after the play has
-         * been issued, so from the plugin's point of view the new asset is the one that is current
-         * before the old one goes. Freeing it in `load` instead would be the empty player the owner
-         * reported, whatever the incoming stream was doing.
-         */
-        await freeOutgoing();
+        await sendTransport('play', Math.max(0, startSeconds) * 1000);
       },
       async pause() {
-        await bounded(NativeAudio.pause({ assetId: audibleId }), undefined, 'pause');
+        await sendTransport('pause');
       },
       async resume() {
-        await bounded(NativeAudio.resume({ assetId: audibleId }), undefined, 'resume');
+        await sendTransport('resume');
       },
       async stop() {
-        await bounded(NativeAudio.stop({ assetId: audibleId }), undefined, 'stop');
+        /*
+         * A stop was a teardown of a second player. The queue is never torn down per track — it is
+         * paused, and it keeps the item, its position and the card. What remains here is the Android
+         * foreground service and this side's own last reading.
+         */
         await stopService();
         lastPositionMs = 0;
       },
       async seek(seconds) {
         /*
-         * The one call with a short deadline, and the one that has been proved to hang: the plugin
-         * settles `setCurrentTime` only from AVFoundation's own seek completion, and a zero-tolerance
-         * seek reports `finished == false` on a transcoded remote item — the completion is never
-         * called, the promise never settles, and everything that waited on it waited for ever. The
-         * position the UI shows is written on the engine's side, so nothing is lost by giving up on
-         * the answer.
+         * The one call with a short deadline. It used to be proved to hang: the plugin settled its
+         * seek only from AVFoundation's completion, and a zero-tolerance seek on a transcoded remote
+         * item reported `finished == false` — the completion was never called and everything that
+         * waited waited for ever. The queue's own seek has the same shape, and the position the UI
+         * shows is written on the engine's side, so nothing is lost by giving up on the answer.
          */
-        await bounded(NativeAudio.setCurrentTime({ assetId: audibleId, time: Math.max(0, seconds) }), undefined, 'seek', SEEK_TIMEOUT_MS);
+        await sendTransport('seek', Math.max(0, seconds) * 1000, SEEK_TIMEOUT_MS);
       },
       positionMs() {
         return lastPositionMs;
       },
       async sync() {
-        try {
-          const [playing, current, duration] = await Promise.all([
-            NativeAudio.isPlaying({ assetId: audibleId }),
-            NativeAudio.getCurrentTime({ assetId: audibleId }),
-            NativeAudio.getDuration({ assetId: audibleId }),
-          ]);
-          lastPositionMs = Number.isFinite(current.currentTime) ? current.currentTime * 1000 : lastPositionMs;
-          /*
-           * The foreground boundary's end — the **second** reader (v2.0-beta.15). The primary one is
-           * the plugin's own `playbackState` report (`noteForegroundAudible`), because this call never
-           * runs at an awake track boundary: it runs on resume, after a seek, and on the return from
-           * hidden. It still closes a boundary here — a resumed or sought start is this layer's own —
-           * but never an **adopted** one: the return's `5–50 ms` was exactly that mistake, a number
-           * measuring the round trip rather than the gap.
-           */
-          if (playing.isPlaying === true && foregroundStartedAt > 0 && foregroundAudibleAt === 0 && !foregroundAdopted) {
-            foregroundAudibleAt = Date.now();
-          }
-          return {
-            playing: playing.isPlaying === true,
-            positionMs: lastPositionMs,
-            durationMs: Number.isFinite(duration.duration) ? duration.duration * 1000 : 0,
-          };
-        } catch (error) {
-          console.warn('[navilite] could not read the native transport state', error);
-          return null;
-        }
+        /*
+         * **The truth probe is the queue's own reading** (unreleased, `t_fa149147`). `now()` answers
+         * with `returnReading()`, and that is `currentItem`'s own position plus `queueIsSounding` —
+         * `timeControlStatus` on the player, not this side's copy of a flag. `durationMs` is left at
+         * 0 because the reading does not publish `currentItem.duration` yet; the engine keeps the
+         * track's own duration as its fallback (`durationMs()`, `engine.ts:1140`).
+         */
+        if (!remote?.now) return null;
+        const state = await bounded(remote.now(), null, 'sync');
+        if (!state) return null;
+        const reading = returnReadingOf(state.return);
+        const playing = reading?.sounding === true;
+        const positionMs = reading ? reading.positionMs : lastPositionMs;
+        lastPositionMs = positionMs;
+        /*
+         * The foreground boundary's end — the **second** reader (v2.0-beta.15). This call never runs
+         * at an awake track boundary: it runs on resume, after a seek, and on the return from
+         * hidden. It still closes a boundary here — a resumed or sought start is this layer's own —
+         * but never an **adopted** one: the return's `5–50 ms` was exactly that mistake, a number
+         * measuring the round trip rather than the gap.
+         */
+        noteForegroundAudible(playing, positionMs / 1000);
+        return { playing, positionMs, durationMs: 0 };
       },
       async activateSession() {
         if (!remote) return false;
@@ -2262,37 +1683,22 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         return adoptOutcome;
       },
       droppedEvents() {
-        return { inaudible: droppedInaudible, slotGrace: droppedSlotGrace };
+        // Two counters about the plugin's events: the inaudible ones and the ones swallowed by a
+        // slot's write grace. There are no plugin events and no slots, so neither can tick.
+        return { inaudible: 0, slotGrace: 0 };
       },
-      async startSpectrum(url, positionMs) {
-        if (!spectrum) return false;
-        try {
-          /*
-           * The slot **this bridge** is playing goes with the request (v1.9.5): the plugin looks the
-           * player up by that id and taps that one, or refuses. It used to choose for itself and
-           * could land on the prepared, silent asset and report `started: true` while the bars read
-           * a player nobody is hearing.
-           */
-          const result = await spectrum.start({ url, positionMs, assetId: audibleId });
-          /*
-           * The slot the plugin says it tapped (v1.9.25): kept for the reason line, never acted on.
-           * A request that came back `started: false` answers nothing, so the last *answer* stands —
-           * which is what the pair `tapped`/`audible` is read as.
-           */
-          if (result.started === true) spectrumTapped = typeof result.tapped === 'string' ? result.tapped : null;
-          return result.started === true;
-        } catch (error) {
-          console.warn('[navilite] the native spectrum tap did not start', error);
-          return false;
-        }
+      async startSpectrum() {
+        /*
+         * **The tap is not started from here any more.** It is installed once per item, at item
+         * creation, inside `makeItem` in `NaviliteRemote.swift` — keyed to the item, never attached
+         * by a state transition and never detached by a transport (§3 of the design). There is no
+         * install left to ask for, so this answers `false`: what the visualiser draws comes from the
+         * queue's own tap, through the snapshot.
+         */
+        return false;
       },
       async stopSpectrum() {
-        if (!spectrum) return;
-        try {
-          await spectrum.stop();
-        } catch (error) {
-          console.warn('[navilite] the native spectrum tap did not stop', error);
-        }
+        // Nothing detaches a tap except the item's own `finalize`.
       },
       async spectrumFrame() {
         if (!spectrum) return null;
@@ -2312,7 +1718,12 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
        * nothing"* are the same flat bars on the screen.
        */
       spectrumEvidence() {
-        return { tapped: spectrumTapped, audible: audibleId };
+        /*
+         * There is no slot to name (unreleased, `t_fa149147`): one item, one tap, installed when the
+         * item was built. The pair is kept in the shape the reason line reads, and answers that
+         * neither side has a slot to talk about.
+         */
+        return { tapped: null, audible: null };
       },
       listenRemoteCommands(handlers) {
         if (!remote) return () => undefined;
@@ -2339,7 +1750,6 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
                */
               remote.addListener('advanced', (event) => {
                 const songId = typeof event?.songId === 'string' ? event.songId : '';
-                const slot = typeof event?.assetId === 'string' ? event.assetId : '';
                 const moved = Number.isFinite(event?.index) ? Number(event?.index) : -1;
                 /*
                  * **A refusal that names the sound is an answer (unreleased).** `positionMs` is
@@ -2352,22 +1762,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
                 const answered = Number.isFinite(event?.positionMs) ? Number(event?.positionMs) : undefined;
                 nativeAdvances += 1;
                 /*
-                 * The slot the native side says it played is the audible one from that instant, and
-                 * it is taken from the message rather than looked up: it is the one thing that knows
-                 * which slot it made the sound come out of. The warm map is cleaned with it — a slot
-                 * it has played is not a slot held ready — and only if the name is missing does this
-                 * fall back to finding the track in the pool.
+                 * The entry the native side says it moved to is the one the queue is on from that
+                 * instant, and it is taken from the message rather than looked up.
                  */
-                if (slot) {
-                  warm.delete(slot);
-                  audibleId = slot;
-                } else if (songId) {
-                  for (const [held, entry] of [...warm]) {
-                    if (entry.songId !== songId) continue;
-                    warm.delete(held);
-                    audibleId = held;
-                  }
-                }
                 if (songId) audibleSongId = songId;
                 /*
                  * And the index the native side moved to becomes the index the app has published,

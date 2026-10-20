@@ -130,23 +130,6 @@ struct PressRulesTests {
               NavilitePressRules.driftRefusal(driftMs: 200) == nil)
         check("a take at exactly 0 is the take", NavilitePressRules.driftRefusal(driftMs: 0) == nil)
 
-        print("\n# the drift bound refuses when it is spent — exhaustion is not a permission")
-
-        if let spent = NavilitePressRules.handoverDriftRefusal(driftMs: 2886, refusals: 2, maxRefusals: 2) {
-            check("the third ask at 2886 ms is refused, not taken", true)
-            check("and the refusal says the bound was reached", spent.exhausted)
-        } else {
-            check("the third ask at 2886 ms is refused, not taken", false,
-                  "the rule answered nil on an exhausted count, so the take would have gone ahead at 2886 ms")
-            check("and the refusal says the bound was reached", false)
-        }
-        check("the first ask at 886 ms is refused and counted",
-              NavilitePressRules.handoverDriftRefusal(driftMs: 886, refusals: 0, maxRefusals: 2)?.exhausted == false)
-        check("-2886 ms on the last allowed ask is refused too",
-              NavilitePressRules.handoverDriftRefusal(driftMs: -2886, refusals: 1, maxRefusals: 2) != nil)
-        check("a take inside 250 ms is still a take after the bound was spent",
-              NavilitePressRules.handoverDriftRefusal(driftMs: 120, refusals: 5, maxRefusals: 2) == nil)
-
         print("\n# one identity, one decision — the id is minted at the button, whatever the move")
 
         let answered = [NavilitePressRules.PressIdentity(id: 41, at: t0.addingTimeInterval(-0.2))]
@@ -189,27 +172,6 @@ struct PressRulesTests {
               NavilitePressRules.refusalForCrossMove(move: "next", inFlightMove: "next") == nil)
         check("a boundary no press owns (a natural end) may be answered by a command",
               NavilitePressRules.refusalForCrossMove(move: "previous", inFlightMove: "") == nil)
-
-        print("\n# the take is proved, never assumed — an empty or unmappable answer does not pass")
-
-        check("the queue's item IS the entry and the reading names it — the live position is taken",
-              NavilitePressRules.handoverTake(soundingSongId: "0DHk", entrySongId: "0DHk",
-                                              readingSongId: "0DHk", liveMs: 14158) == 14158)
-        check("the queue's item cannot be mapped — no take (the old `?? \"\"` passed here)",
-              NavilitePressRules.handoverTake(soundingSongId: nil, entrySongId: "0DHk",
-                                              readingSongId: "0DHk", liveMs: 14158) == nil)
-        check("the queue answers an empty songId — no take",
-              NavilitePressRules.handoverTake(soundingSongId: "", entrySongId: "0DHk",
-                                              readingSongId: "0DHk", liveMs: 14158) == nil)
-        check("no reading was offered — no take",
-              NavilitePressRules.handoverTake(soundingSongId: "0DHk", entrySongId: "0DHk",
-                                              readingSongId: nil, liveMs: 14158) == nil)
-        check("the queue is sounding the other track — no take (app stated 5, queue sounding 25)",
-              NavilitePressRules.handoverTake(soundingSongId: "Yama", entrySongId: "0DHk",
-                                              readingSongId: "0DHk", liveMs: 14158) == nil)
-        check("the queue is at 0 — no position to adopt",
-              NavilitePressRules.handoverTake(soundingSongId: "0DHk", entrySongId: "0DHk",
-                                              readingSongId: "0DHk", liveMs: 0) == nil)
 
         print("\n# the reading's index is the sounding entry, not the statement")
 
@@ -650,117 +612,6 @@ struct PressRulesTests {
         check("(c) ...and the line names the statement it overwrote",
               displayOf(stale)?.why.contains("0jGX") == true
               && displayOf(stale)?.why.contains("index 5") == true)
-
-        print("\n# the answer's index is the PUBLISHED index, never AVPlayer's window (unreleased)")
-
-        /*
-         * The owner's log, as a state: the queue is on entry 8 of 269 (`index:7`) and answered it as
-         * `index 0`. `nameQueue`'s cursor is the item's position inside `queuePlayer.items()` — the
-         * attached window, 0..2 — so it can never be the index the app publishes, adopts by, or
-         * compares a statement against. The published order is 269 entries and the sounding entry is
-         * nowhere near the first window.
-         */
-        let publishedOrder: [String] = (0..<269).map { $0 == 7 ? "0DHkU6MZyX8NSQjaQTlhi5" : "entry-\($0)" }
-        let publishedAt = NavilitePressRules.publishedIndex(order: publishedOrder, songId: "0DHkU6MZyX8NSQjaQTlhi5",
-                                                           fallback: 0)
-        check("(d) an entry outside the attached window answers its PUBLISHED index, not the window cursor",
-              publishedAt == 7, "answered \(publishedAt)")
-        check("(d) ...so the refusal names entry 8 of 269 as index 7 — the same entry, the same index",
-              displayOf(NavilitePressRules.refusedReading(soundingSongId: "0DHkU6MZyX8NSQjaQTlhi5",
-                                                          soundingIndex: publishedAt,
-                                                          positionMs: 5974, statedSongId: "0jGX",
-                                                          statedIndex: 5))?.index == 7,
-              "answered \(String(describing: displayOf(NavilitePressRules.refusedReading(soundingSongId: "0DHkU6MZyX8NSQjaQTlhi5", soundingIndex: publishedAt, positionMs: 5974, statedSongId: "0jGX", statedIndex: 5))))")
-        check("(d) an entry the published order cannot name keeps the caller's last-resort index",
-              NavilitePressRules.publishedIndex(order: publishedOrder, songId: "not-in-the-order", fallback: 2) == 2)
-        check("(d) an empty or missing entry is the fallback too — never a 0 by accident",
-              NavilitePressRules.publishedIndex(order: publishedOrder, songId: "", fallback: -1) == -1
-              && NavilitePressRules.publishedIndex(order: publishedOrder, songId: nil, fallback: -1) == -1)
-        check("(d) an empty published order answers the fallback",
-              NavilitePressRules.publishedIndex(order: [], songId: "0DHk", fallback: -1) == -1)
-
-        check("(b) the same reading answered twice does not produce a second request",
-              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 7,
-                                               answeredSongId: "0DHk", answeredIndex: 7) != nil)
-        check("(b) a later offer of the same entry is the same question (the position moved, the entry did not)",
-              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 7,
-                                               answeredSongId: "0DHk", answeredIndex: 7) != nil)
-        check("(b) the queue advancing to another entry IS a new question",
-              NavilitePressRules.answeredOffer(offeredSongId: "next", offeredIndex: 8,
-                                               answeredSongId: "0DHk", answeredIndex: 7) == nil)
-        check("(b) nothing answered yet: every offer is a new question",
-              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 7,
-                                               answeredSongId: "", answeredIndex: -1) == nil)
-        /*
-         * **The answer's identity is the ENTRY, not the index (unreleased).**
-         *
-         * `answeredOffer` compared `(songId, index)` and the owner's log is still four offers of one
-         * entry, three seconds apart, with `queue-handover-answered` nowhere in it. The index is the
-         * number that drifts: `handOverAwayQueue` records the offer's `soundingIndex` over `queue` as
-         * it stands at the offer, and the guard re-derives `soundingIndex` over `queue` again — but the
-         * statement that asks a second time has already replaced `queue` from the web layer's own
-         * published list (`NaviliteRemote.swift` — `self.queue = entries…`, at the top of the
-         * statement, before the guard is reached). Two lookups over two arrays, and the app's order is
-         * provably not index-compatible with this side's: the same log's `queue-handover-jump` puts
-         * `0jGX…` at index 5 where the queue has `0DHk…` at 7. So the pair is only equal when the two
-         * snapshots happen to agree, and the equality the guard demanded was never an invariant. A
-         * request is one entry asked about; a statement that names that entry again is that same
-         * request, whatever index it carries.
-         */
-        check("(b) the same entry stated with a DIFFERENT index is the same request — the index is not the identity",
-              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 7,
-                                               answeredSongId: "0DHk", answeredIndex: 5) != nil)
-        check("(b) ...in either direction, because the statement is what re-bases the index",
-              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: 5,
-                                               answeredSongId: "0DHk", answeredIndex: 7) != nil)
-        check("(b) ...including the last-resort -1 an entry the published order cannot name",
-              NavilitePressRules.answeredOffer(offeredSongId: "0DHk", offeredIndex: -1,
-                                               answeredSongId: "0DHk", answeredIndex: 7) != nil)
-        check("(b) a DIFFERENT entry at the SAME index is still a new question — the queue advanced",
-              NavilitePressRules.answeredOffer(offeredSongId: "next", offeredIndex: 7,
-                                               answeredSongId: "0DHk", answeredIndex: 7) == nil)
-
-        print("\n# an answer is about one ask — a recurring entry is asked again (unreleased)")
-
-        /*
-         * **The walk from the review: X refused, the queue advances to Y, the queue comes back to X.**
-         *
-         * `answeredOffer` was cleared on abandon and on a fresh `handover()`, never on a *different*
-         * entry being offered. So the answer about X outlived its ask: Y was offered with the answer
-         * about X still standing, and when repeat-all (or the same song twice in the queue) brought X
-         * back, X's statement was swallowed as `queue-handover-answered` — no offer, so no deadline —
-         * while the queue was audibly playing X and the row held Y's reading. Driven here as the
-         * state the remote keeps: the answer after each ask is `answerAfter`, and the question a
-         * statement asks is `answeredOffer`.
-         */
-        var standing: (songId: String, index: Int)? = ("X", 7)          // X was refused
-        let afterX = NavilitePressRules.answeredOffer(offeredSongId: "X", offeredIndex: 3,
-                                                      answeredSongId: standing?.songId ?? "",
-                                                      answeredIndex: standing?.index ?? -1)
-        check("(1) the statement in reply to X's refusal is the same request — it does not re-ask",
-              afterX != nil)
-        standing = NavilitePressRules.answerAfter(offering: "Y",
-                                                  answeredSongId: standing?.songId,
-                                                  answeredIndex: standing?.index ?? -1)
-        check("(1) offering a DIFFERENT entry expires the answer — X was not what was asked", standing == nil,
-              "the answer that stood was \(String(describing: standing?.songId))")
-        let backToX = NavilitePressRules.answeredOffer(offeredSongId: "X", offeredIndex: 3,
-                                                       answeredSongId: standing?.songId ?? "",
-                                                       answeredIndex: standing?.index ?? -1)
-        check("(1) ...so the queue coming back to X is a NEW question, not `queue-handover-answered`",
-              backToX == nil)
-        check("(1) ...which is the offer path: an offer for X is made and `armOfferDeadline` runs with it",
-              backToX == nil && NavilitePressRules.answerAfter(offering: "X",
-                                                               answeredSongId: standing?.songId,
-                                                               answeredIndex: standing?.index ?? -1) == nil)
-        check("(1) the answer that IS about the entry asked about still stands — the index is re-based, the ask is not",
-              NavilitePressRules.answerAfter(offering: "X", answeredSongId: "X", answeredIndex: 5)?.songId == "X"
-              && NavilitePressRules.answerAfter(offering: "X", answeredSongId: "X", answeredIndex: 5)?.index == 5)
-        check("(1) an answer that names no entry stands for nothing — never a blanket swallow",
-              NavilitePressRules.answerAfter(offering: "X", answeredSongId: nil, answeredIndex: -1) == nil
-              && NavilitePressRules.answerAfter(offering: "X", answeredSongId: "", answeredIndex: 7) == nil)
-        check("(1) ...and it expires for the second occurrence of one song in the same queue too",
-              NavilitePressRules.answerAfter(offering: "Y", answeredSongId: "X", answeredIndex: 7) == nil)
 
         print("\n\(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)

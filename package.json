@@ -11,8 +11,6 @@
   "scripts": {
     "dev": "vite",
     "mock": "node tools/mock-subsonic.mjs",
-    "patch:native": "node tools/patch-native-audio.mjs",
-    "postinstall": "node tools/patch-native-audio.mjs",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
@@ -20,18 +18,17 @@
     "test:layout": "node --test test/layout-393.test.ts",
     "test:pager": "node --test test/pager.test.ts",
     "icons": "node tools/make-icons.mjs",
-    "cap:sync": "npm run patch:native && npm run build && cap sync",
-    "apk": "npm run patch:native && npm run build && cap sync android && bash tools/build-apk.sh debug",
-    "apk:release": "npm run patch:native && npm run build && cap sync android && bash tools/build-apk.sh release",
-    "ipa:unsigned": "npm run patch:native && npm run build && cap sync ios && bash tools/build-ios-ipa.sh",
-    "ipa:simulator": "npm run patch:native && npm run build && cap sync ios && bash tools/build-ios-ipa.sh --simulator"
+    "cap:sync": "npm run build && cap sync",
+    "apk": "npm run build && cap sync android && bash tools/build-apk.sh debug",
+    "apk:release": "npm run build && cap sync android && bash tools/build-apk.sh release",
+    "ipa:unsigned": "npm run build && cap sync ios && bash tools/build-ios-ipa.sh",
+    "ipa:simulator": "npm run build && cap sync ios && bash tools/build-ios-ipa.sh --simulator"
   },
   "dependencies": {
     "@aparajita/capacitor-secure-storage": "^8.0.1",
     "@capacitor/android": "^8.5.3",
     "@capacitor/core": "^8.5.3",
-    "@capacitor/ios": "^8.5.3",
-    "@capgo/capacitor-native-audio": "^8.4.32"
+    "@capacitor/ios": "^8.5.3"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.3",

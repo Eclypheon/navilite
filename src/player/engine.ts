@@ -52,8 +52,8 @@ import { WarmPool } from './warm-pool.ts';
 /**
  * How long a `resume()` is given to turn into actual playback before the engine stops believing it.
  *
- * `NativeAudio.resume()` is a request, not a fact: AVPlayer can decline to come back after an
- * interruption or a route change, and the plugin answers the *call*, not the state. Asking the
+ * A resume on the queue's own transport is a request, not a fact: AVPlayer can decline to come back
+ * after an interruption or a route change, and the plugin answers the *call*, not the state. Asking the
  * player 300 ms later is what separates "it is playing" from "the promise resolved".
  */
 const RESUME_CONFIRM_MS = 300;

@@ -125,40 +125,22 @@ enum NavilitePressRules {
         return "a playPause was answered \(Int((age * 1000).rounded())) ms ago, inside the \(Int((window * 1000).rounded())) ms window, so this is that press delivered again and the audio state is not toggled a second time"
     }
 
-    /// How far the app's own player may be from the queue before a take is refused, in ms.
+    /// How far a player may be from the queue before a take is refused, in ms.
     ///
-    /// The take hands the sound from a player that is making it to one that is already making it at
-    /// the same place, so the two positions have to *be* the same place. The owner's log takes one at
-    /// `appPositionMs:2000` against `queuePositionMs:2886` — `driftMs:886` — which is not a handover,
-    /// it is a second player starting late. The refusal makes the app seek and ask again, bounded by
-    /// `handoverMaxRefusals`.
+    /// The number and the sentence that states it live in one place (`maxDriftMs` / `driftRefusal`):
+    /// a position that is not the same place is refused, and the caller seeks and asks again rather
+    /// than taking a jump nobody asked for.
     static let maxDriftMs = 250
 
-    /// Why a take at this drift is refused, or `nil` when the two players really are at one position.
+    /// Why a take at this drift is refused, or `nil` when the position really is the same place.
     static func driftRefusal(driftMs: Int, maxDrift: Int = maxDriftMs) -> String? {
         let drift = abs(driftMs)
         guard drift > maxDrift else { return nil }
-        return "the app's own player is \(drift) ms from the queue, beyond the \(maxDrift) ms a take allows, so the queue keeps the sound and the app moves its player there"
-    }
-
-    /// **The drift gate, including the case where it used to fail open (v2.0.0-beta.30).**
-    ///
-    /// `handoverRefusals < handoverMaxRefusals` used to be the guard *on the refusal itself*, so on the
-    /// third ask the block was skipped, nothing refused the take, and it went ahead at any drift — the
-    /// 886 ms and the 2886 ms the bound exists to refuse. The count says how many times the app is
-    /// told to seek and ask again; when it is spent, **the answer is a refusal, not a permission**. A
-    /// refusal that leaves the queue sounding is the correct outcome; a take that rewinds 2.9 s is not.
-    /// `exhausted` says the bound was reached, so the caller says so on the log and stops counting.
-    static func handoverDriftRefusal(driftMs: Int, refusals: Int,
-                                     maxRefusals: Int) -> (why: String, exhausted: Bool)? {
-        guard let why = driftRefusal(driftMs: driftMs) else { return nil }
-        guard refusals >= maxRefusals else { return (why, false) }
-        return (why + " — and the app has been refused \(refusals) times already (\(maxRefusals) allowed), so the bound is spent and the queue keeps the sound rather than taking this handover", true)
+        return "the player is \(drift) ms from the queue, beyond the \(maxDrift) ms a take allows, so the queue keeps the sound and the position is sought again"
     }
 
     /* ---------------------------------------------------- the take is proved, never assumed */
 
-    /// The position a handover may be taken at — and `nil` unless the take is **proved**.
     ///
     /// The old guard failed open: `queueSoundingEntry()?.songId ?? ""` then
     /// `guard soundingSongId.isEmpty || soundingSongId == reading.songId`. An item the side could not
@@ -169,20 +151,12 @@ enum NavilitePressRules {
     /// So: the queue's own `currentItem` must map to the entry being started, **strictly**, and the
     /// reading must name that same entry. Missing, unmappable and different are all refusals, and a
     /// queue at 0 has no position to adopt.
-    static func handoverTake(soundingSongId: String?, entrySongId: String, readingSongId: String?,
-                             liveMs: Int) -> Int? {
-        guard let soundingSongId, !soundingSongId.isEmpty,
-              let readingSongId, !readingSongId.isEmpty else { return nil }
-        guard soundingSongId == entrySongId, readingSongId == entrySongId else { return nil }
-        return liveMs > 0 ? liveMs : nil
-    }
 
     /* ------------------------------- the release: the take is the players' own answer (beta.31) */
 
     /// **What a release must do, decided from the two players (v2.0.0-beta.31).**
     ///
     /// The return was leaving two players sounding on build 83, and the reason was this decision:
-    /// the app's own start on the way back does not pass through `playSlot` — it is the audio
     /// plugin's `play(assetId:time:)`, issued by the web layer — so the *release* is the only place
     /// the queue can learn that the sound has changed hands, and the release was refusing whenever
     /// the app stated no position (`appPositionMs:-1` → "no position reported", the queue keeps
@@ -248,12 +222,9 @@ enum NavilitePressRules {
     /* --------------------------------------------- the reading names the sound, not the statement */
 
     /// The index a reading must carry: the entry the queue is **sounding**, looked up in the published
-    /// order — never the app's own statement (`index`), which is the number that drifts.
-    ///
-    /// `queue-handover-jump` (the app stated 5 while the queue was sounding 25) is this number taken
-    /// from the wrong place: the app adopts by index, so the reading sent it to a track nothing was
-    /// playing. A songId this side cannot find in the order answers the statement's index, which is
-    /// the one case where no better answer exists — and `handoverTake` above still refuses the take.
+    /// order — never a statement's own index, which is the number that drifts. A songId this side
+    /// cannot find in the order answers the statement's index, which is the one case where no better
+    /// answer exists.
     static func readingIndex(soundingSongId: String, order: [String], statementIndex: Int) -> Int {
         if let at = order.firstIndex(of: soundingSongId) { return at }
         return statementIndex
@@ -262,7 +233,6 @@ enum NavilitePressRules {
     /// The entry an attached item is, by the **item's identity** — the queue object is the whole
     /// precondition, and no flag is consulted.
     ///
-    /// `queueSoundingEntry()` used to start `guard awayOwnsAudible`: when the flag had drifted false
     /// while the queue was playing, every reading returned nil and fell back to `audible?.songId` —
     /// the same two-sources-of-truth lie, one layer down. The reading is the fact; the flag is
     /// corrected from it by the caller.
@@ -313,7 +283,6 @@ enum NavilitePressRules {
     /// (`awayItems.firstIndex { $0 === item }`) answers nothing the moment the item array and the
     /// entry array stop describing one list — a rebuild that cleared one and not the other, a prune
     /// that took an item out twice, a top-up appended to the names and not to the items. Every return
-    /// then logged `queue-handover-unmapped` and offered **no reading at all**, and the app started
     /// its own player over a queue that was still sounding (the owner's 15:20:21 → 15:26:12 burst:
     /// thirty lines, one per return, none of them a reading).
     ///
@@ -355,7 +324,6 @@ enum NavilitePressRules {
     /// never a queue index. The published order is what the app publishes, adopts by, and compares a
     /// statement against, so any index handed to the web layer has to be looked up in it. Both the
     /// adopt and the offer path already did this lookup; the refusal path copied the cursor instead
-    /// and stated entry 8 of 269 as `index 0` (`handover-refused index:7` → `handover-displayed
     /// index:0`), which is the pair the app then adopts by.
     ///
     /// `fallback` is the last resort, kept only for an entry the order cannot name: the caller's own
@@ -383,7 +351,6 @@ enum NavilitePressRules {
     /// **A return ends in a reading or in a decision — never in neither (v2.0.0-beta.19).**
     ///
     /// `nil` is the one case with nothing to decide: the queue is not a sound of this side's, so
-    /// `releaseHandover` writes the "nothing was offered" line instead.
     ///
     /// **And never in a wait** (unreleased): when a player is sounding, the answer carries its entry
     /// *and a position*, so the row has something to render. `appSoundingSongId` is the entry the
@@ -444,8 +411,6 @@ enum NavilitePressRules {
     /// How many times a release is re-asked when the app's own start has not reached the speakers yet.
     static let releaseAttempts = 4
     /// How long an offer stands with no release at all before it is settled here. The app's own
-    /// `releaseHandover` only arrives when its start **commits**; a start that never commits used to
-    /// leave the return silent — three `queue-handover` offers at 15:39:40, nothing after them, the UI
     /// on the row in its loading state while the queue was audible.
     static let offerSettle: TimeInterval = 3.0
 
@@ -487,8 +452,6 @@ enum NavilitePressRules {
 
     /// May a start be issued while `queueSounding` is true?
     ///
-    /// This is the rule `silenceOthers` used to *write down* after the fact (`one-owner-violated`) and
-    /// let the caller play anyway, and that `spendHandover` named after the overlap had begun
     /// (`queue-still-sounding`). The queue is the one source that cannot be stopped in the turn a
     /// start is issued — `pause()` is a request, the sound is already on the wire — so a queue still
     /// sounding after the sweep is a refusal, not a note.
@@ -608,7 +571,6 @@ enum NavilitePressRules {
 
     /// **What the app renders when a refusal names the entry the queue is sounding (unreleased).**
     ///
-    /// The owner's log is four `handover-refused` lines three seconds apart, each one carrying the
     /// entry the queue is sounding and where it is (`q 17769`, `20810`, `23853`, `26890`) — and a
     /// spinner on the row until he picked a track himself. A refusal that names the entry is not a
     /// "no": it is the answer to *what is sounding*. So the app displays it, keeps its own player
@@ -624,7 +586,6 @@ enum NavilitePressRules {
 
     /// **The label is written from the reading, never from the app's own statement (unreleased).**
     ///
-    /// `queue-handover-jump` corrected the same pair three times (`statedIdx 5 / 0jGX` against
     /// `queueIdx 7 / 0DHk`) and the app stated the stale entry again. That is the shape of the
     /// defect: the statement is generated *before* the question is asked, so it cannot be the
     /// answer. This answers the reading's own facts, and says which statement it overwrote.
@@ -649,37 +610,22 @@ enum NavilitePressRules {
     /// entry again — a refusal that is re-asked is indistinguishable from a spinner.
     ///
     /// This used to call the identity "**the entry and its index**", and that is the defect the poll
-    /// survived on: the index is the number that drifts. `handOverAwayQueue` records the offer's
     /// `soundingIndex` looked up in `queue` as it stands at the offer, and the guard re-derives
     /// `soundingIndex` with a second lookup in `queue` — but the statement that asks a second time
     /// has already replaced `queue` with the web layer's own published list (`self.queue = entries…`,
     /// at the top of the statement, before the guard is reached). Two lookups over two arrays is not
     /// an invariant, and the app's order is not index-compatible with this side's: the same log's
-    /// `queue-handover-jump` puts `0jGX…` at index 5 where the queue has `0DHk…` at 7. So a statement
     /// that named exactly the entry the refusal had just answered, at an index the statement itself
     /// re-based, came out as a *new* question and started another three-second deadline — the loop.
     ///
     /// The identity is therefore the entry alone. The position moves on while the queue plays and the
     /// index is re-based by the statement, so neither is the request. A different entry (the queue
     /// advanced, or the owner picked a track) is a new question, and the app asking on a new return is
-    /// `handover()`'s own path, which clears the answer before it asks.
-    static func answeredOffer(offeredSongId: String, offeredIndex: Int,
-                              answeredSongId: String, answeredIndex: Int) -> String? {
-        guard !answeredSongId.isEmpty, answeredSongId == offeredSongId else { return nil }
-        guard answeredIndex != offeredIndex else {
-            return "\(offeredSongId) at index \(offeredIndex) was already offered and answered, so this statement does not ask again — one return, one answer, and the app has the entry and the position to render"
-        }
-        return "\(offeredSongId) was already offered at index \(offeredIndex) and answered at index \(answeredIndex), so this statement does not ask again — the entry is the request, and the index is the number the statement re-bases"
-    }
 
     /// **An answer is about one ask, not one song for the session (unreleased).**
     ///
-    /// This is the other half of `answeredOffer`: that one says a statement for the entry just
     /// answered does not ask again, and this one says which answer still stands when a *different*
-    /// entry is asked about. The remote kept `answeredOffer` from the refusal until an abandon or a
-    /// fresh `handover()`, so an entry refused once stayed answered for the rest of the session — and
     /// when the queue came back to it (repeat-all wrapping, or the same song twice in the queue) its
-    /// statement was swallowed as `queue-handover-answered` with no offer and no deadline, while the
     /// queue was audibly playing it and the row held the reading of the entry in between. Any ask
     /// about another entry expires the answer; the answer that stands is the one about the entry
     /// being asked about now.
