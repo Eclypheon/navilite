@@ -182,7 +182,15 @@ test('a foreground return is one read: exactly one bridge call, and the bars are
 
     const status = engine.status();
     assert.equal(status.state, 'playing', 'the transport word is the player’s own');
-    assert.equal(Math.round(status.positionMs), 42_000, 'and so is the clock');
+    /*
+     * And so is the clock — `player.currentTime()`, re-anchored on this read. The engine counts wall
+     * clock since that anchor while the player is playing, so the claim is the reading itself within
+     * one poll, not an equality on a ticking clock (which failed about 1 run in 3).
+     */
+    assert.ok(
+      Math.abs(status.positionMs - 42_000) <= 50,
+      `and so is the clock (${Math.round(status.positionMs)} ms against the player's own 42000 ms)`,
+    );
     assert.equal(status.tap.entryKey, `item:${TRACK.url}`, 'the row is the item the player is holding');
     assert.equal(status.tap.itemKey, status.tap.entryKey, 'the bars are dated to that same item');
 

@@ -2243,7 +2243,13 @@ export class AudioEngine {
       }
       this.modeReason = `the return read ${snap.entry.songId || 'nothing'} at ${Math.round(snap.positionMs / 1000)} s, ${snap.state} — one snapshot, nothing loaded, started, paused or seeked`;
       if (snap.state === 'playing') {
-        if (this.state !== 'playing') this.applyState('playing');
+        /*
+         * **The row is the reading, and the machine is the row** (unreleased, design §5). `applyState`
+         * alone only re-anchors the clock: the state word belongs to the machine, and a return over a
+         * player the lock screen had restarted left `paused` on the row for the 33 ms until the poll's
+         * next answer — the same read, said twice, disagreeing. This is the poll's own idiom.
+         */
+        if (this.state !== 'playing') this.dispatch({ type: 'engine-state', playing: true });
       } else if (this.state === 'playing') {
         /*
          * **The sound stopped and nobody here asked** (unreleased, design §5). This was a silent
