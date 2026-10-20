@@ -606,6 +606,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         let statedIndex = call.getInt("index") ?? -1
         let mode = call.getString("repeat") ?? "off"
         let isAwake = call.getBool("awake") ?? true
+        let isAdopting = call.getBool("adopting") ?? false
         let audibleAssetId = call.getString("audibleAssetId")
         let audibleSongId = call.getString("audibleSongId")
         let statedGeneration = call.getInt("generation") ?? 0
@@ -757,7 +758,10 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                     }
                 }
             }
-            if self.awake, self.awayOwnsAudible {
+            if isAdopting {
+                self.awayResume = nil
+                self.answeredOffer = nil
+            } else if self.awake, self.awayOwnsAudible {
                 _ = self.handOverAwayQueue(why: "the app came back and stated the queue, so its own player takes the sound from the position the queue reached")
             }
             self.armAwayQueue(token: self.generation)

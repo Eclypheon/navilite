@@ -102,6 +102,7 @@ interface NaviliteRemotePlugin {
     index: number;
     repeat: 'off' | 'all' | 'one';
     awake: boolean;
+    adopting?: boolean;
     audibleAssetId?: string;
     audibleSongId?: string;
     generation?: number;
@@ -451,6 +452,8 @@ export interface NativeQueueStatement {
   repeat: 'off' | 'all' | 'one';
   /** Whether the web layer is running. Only `false` lets the native side take a boundary. */
   awake: boolean;
+  /** Whether the web layer is directly adopting the away queue (keeps sound on the away queue). */
+  adopting?: boolean;
 }
 
 export interface NativeBridge {
@@ -574,6 +577,7 @@ export interface NativeBridge {
     index: number;
     resume?: NativeHandover | null;
     reading?: NativeReturnReading | null;
+    measuredAt?: number;
   } | null>;
   /** What the native boundary has done, as numbers and a sentence — for the reason line (v1.9.8). */
   nativeAdvance?(): {
@@ -1677,6 +1681,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           index: statement.index,
           repeat: statement.repeat,
           awake: statement.awake,
+          adopting: statement.adopting,
           audibleAssetId: audibleId,
           audibleSongId: audibleSongId ?? undefined,
           generation: statementGeneration,
@@ -2007,6 +2012,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           index: Number.isFinite(next.index) ? Number(next.index) : -1,
           repeat: next.repeat,
           awake: next.awake,
+          adopting: next.adopting,
         };
         return stateQueue();
       },
@@ -2065,6 +2071,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       },
       async reconcile() {
         if (!remote?.now) return null;
+        const measuredAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
         const state = await bounded(remote.now(), null, 'reconcile');
         if (!state) {
           boundaryReason = 'the native boundary plugin did not answer, so the app cannot ask it which entry it is playing';
@@ -2109,7 +2116,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         const movedIndex = nativeIndex >= 0 && nativeIndex !== statement.index;
         const reading = returnReadingOf(state.return);
         if (slot === null || (slot === audibleId && !movedIndex)) {
-          return { changed: false, songId: state.songId ?? null, index: nativeIndex, resume: handoverOf(state.resume), reading };
+          return { changed: false, songId: state.songId ?? null, index: nativeIndex, resume: handoverOf(state.resume), reading, measuredAt };
         }
         /*
          * The native player is on another entry than the app believed. That is a track the app
@@ -2123,7 +2130,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         audibleSongId = typeof state.songId === 'string' && state.songId ? state.songId : null;
         // The load that moves the app onto this entry is an adoption, not a new clock (v2.0-beta.15).
         adoptingNextLoad = true;
-        return { changed: true, songId: audibleSongId, index: nativeIndex, resume: handoverOf(state.resume), reading: returnReadingOf(state.return) };
+        return { changed: true, songId: audibleSongId, index: nativeIndex, resume: handoverOf(state.resume), reading: returnReadingOf(state.return), measuredAt };
       },
       nativeAdvance() {
         return {

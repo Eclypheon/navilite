@@ -438,3 +438,10 @@ Plain language, user-visible changes only. The app shows this same list under
 
 - The visualiser stays live when you return to the app while the phone's background queue is playing: it now taps the background player directly, instead of showing a flat row or falling back to album-art colours.
 - Coming back from the background seamlessly continues audio playback without pauses, restarts or duplicate tracks sounding together.
+
+## 2.0-beta.22 — 2026-10-21
+
+- Returning to the app while music is playing no longer causes an audio stutter or glitch.
+- The seek bar is exactly in sync with the Lock Screen and Dynamic Island player from the moment you return, without lagging behind or snapping back after a few seconds.
+- Play, pause, and seek controls respond immediately on return without jumping back or changing states unexpectedly.
+- The audio visualiser attaches cleanly and stays live across background transitions.

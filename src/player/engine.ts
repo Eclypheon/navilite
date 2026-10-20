@@ -717,7 +717,7 @@ export class AudioEngine {
    * the handler is awaited where the answer matters (the return to the foreground reads the player's
    * record and hands it over before anything else is read).
    */
-  onAdvancedNatively: ((songId: string, index: number, positionMs?: number) => void | Promise<void>) | null = null;
+  onAdvancedNatively: ((songId: string, index: number, positionMs?: number, measuredAt?: number) => void | Promise<void>) | null = null;
 
   constructor(options: EngineOptions = {}) {
     const info = options.platform ?? platformInfo();
@@ -1070,9 +1070,9 @@ export class AudioEngine {
    * — rather than one the player told us about. Only a real report clears {@link positionReported},
    * so the clock cannot start counting before there is a sound for it to be counting.
    */
-  private setNativePosition(ms: number, reported = true): void {
+  private setNativePosition(ms: number, reported = true, measuredAt?: number): void {
     this.nativePositionMs = Number.isFinite(ms) ? Math.max(0, ms) : 0;
-    this.nativePositionAt = this.clockNow();
+    this.nativePositionAt = measuredAt ?? this.clockNow();
     if (reported) this.positionReported = true;
   }
 
@@ -1998,6 +1998,7 @@ export class AudioEngine {
       index: this.statement.index,
       repeat: this.statement.repeat,
       awake: this.foreground,
+      adopting: this.queueOwnsSound(),
     });
     this.boundaryArmed = armed === true;
   }
@@ -2076,7 +2077,7 @@ export class AudioEngine {
    * asset on the player was fetched under, which is what keeps the spectrum's own URL check and the
    * next adoption consistent.
    */
-  adoptNativeAdvance(track: TrackRequest, positionMs?: number): void {
+  adoptNativeAdvance(track: TrackRequest, positionMs?: number, measuredAt?: number): void {
     if (this.backend !== 'native') return;
     /*
      * **A position that rode with the adoption is the reading, and it is reported (unreleased).**
@@ -2115,7 +2116,7 @@ export class AudioEngine {
     this.identicalNativeFrames = 0;
     this.orphanReattachedFor = null;
     this.positionReported = answered !== null;
-    this.setNativePosition(answered ?? 0, answered !== null);
+    this.setNativePosition(answered ?? 0, answered !== null, measuredAt);
     this.modeReason = answered !== null
       ? `the away queue is sounding ${track.id} at ${Math.round(answered / 1000)} s and the app has been told so — the row renders that reading, the app's own player stays silent, and nothing is started, paused or seeked`
       : 'the native player took the track boundary itself while the app was not listening — the audio never stopped, and this is the app catching up with it';
@@ -2134,10 +2135,10 @@ export class AudioEngine {
    * `playing`, and starts nothing. The app's own player stays silent, and the reading the queue
    * offered is still held (`this.handover`), so one tap takes that entry at that position.
    */
-  renderReading(positionMs: number): void {
+  renderReading(positionMs: number, measuredAt?: number): void {
     if (this.backend !== 'native') return;
     const at = Number.isFinite(positionMs) ? Math.max(0, Math.round(positionMs)) : 0;
-    this.setNativePosition(at, true);
+    this.setNativePosition(at, true, measuredAt);
     this.loadInFlight = null;
     this.concludeStart('player');
     /*
@@ -2575,12 +2576,14 @@ export class AudioEngine {
     /* **This return's own start count (unreleased).** Everything below is one return, and a start
      * issued from here on is that return's start — the fact the `return` record carries. */
     const startsBefore = this.startsIssued;
+    const t0 = this.clockNow();
     const moved = await this.native?.reconcile?.();
+    const measuredAt = moved?.measuredAt ?? t0;
     if (moved?.changed && moved.songId) {
       this.modeReason = `the native player moved to another track while the app was away (${moved.songId}) — the app is adopting the track that is already playing`;
       // The index travels with the track (v1.9.9): the queue adopts by position in the order it
       // published, which is the only thing that is right when that order is shuffled.
-      await this.onAdvancedNatively?.(moved.songId, moved.index, moved.reading?.positionMs);
+      await this.onAdvancedNatively?.(moved.songId, moved.index, moved.reading?.positionMs, measuredAt);
     }
     /*
      * **The return is an ADOPTION when the player already holds the entry the queue is on
@@ -2638,7 +2641,7 @@ export class AudioEngine {
       this.returnPath = 'adopt';
       this.returnAdoptions += 1;
       this.modeReason = `the return adopted ${this.track?.id ?? 'the visible entry'} — the player is already sounding it at ${Math.round((held?.positionMs ?? 0) / 1000)} s (${held?.path ?? 'plugin'}), so nothing was loaded, started, paused or seeked`;
-      await this.readReturn('adopt', queueSounding, held);
+      await this.readReturn('adopt', queueSounding, held, measuredAt);
       /*
        * The boundary goes back to the web layer here exactly as it does on the handover below — the
        * same statement, made in both directions, so no flag can stick (v1.9.8).
@@ -2774,10 +2777,13 @@ export class AudioEngine {
     path: 'adopt' | 'handover',
     queueSounding = false,
     held: NativeReturnReading | null = null,
+    measuredAt?: number,
   ): Promise<void> {
     const startsBefore = this.startsIssued;
-    await this.native?.activateSession();
-    const truth = await this.native?.sync();
+    if (!queueSounding) {
+      await this.native?.activateSession();
+    }
+    const truth = queueSounding ? null : await this.native?.sync();
     /*
      * **THE GATE (unreleased, `t_05775526`).** `sync()` reads the app's own player. That reading is
      * the row's truth only when that player is the one making the sound — and on the owner's return
@@ -2849,7 +2855,7 @@ export class AudioEngine {
         this.claimSound('none');
       } else this.dispatch({ type: 'engine-state', playing: false });
     } else if (held && held.path === 'queue' && held.songId === this.track?.id) {
-      this.setNativePosition(held.positionMs, true);
+      this.setNativePosition(held.positionMs, true, measuredAt);
       this.concludeStart('player');
       this.claimSound('queue', held.songId);
       if (held.sounding !== false) {

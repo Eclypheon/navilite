@@ -657,4 +657,14 @@ export const CHANGELOG: ChangelogRelease[] = [
         'Coming back from the background seamlessly continues audio playback without pauses, restarts or duplicate tracks sounding together.',
       ],
     },
+    {
+      version: '2.0-beta.22',
+      date: '2026-10-21',
+      items: [
+        'Returning to the app while music is playing no longer causes an audio stutter or glitch.',
+        'The seek bar is exactly in sync with the Lock Screen and Dynamic Island player from the moment you return, without lagging behind or snapping back after a few seconds.',
+        'Play, pause, and seek controls respond immediately on return without jumping back or changing states unexpectedly.',
+        'The audio visualiser attaches cleanly and stays live across background transitions.',
+      ],
+    },
   ];

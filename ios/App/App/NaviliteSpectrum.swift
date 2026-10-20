@@ -989,6 +989,13 @@ public class NaviliteSpectrum: CAPPlugin, CAPBridgedPlugin {
                 return
             }
             let named = requestedAssetId.flatMap { $0.isEmpty ? nil : $0 }
+            if named == NaviliteRemote.awaySlotName {
+                if let remote = self.bridge?.plugin(withName: "NaviliteRemote") as? NaviliteRemote,
+                   let queue = remote.currentAwayQueue {
+                    self.begin(call: call, player: queue, assetId: NaviliteRemote.awaySlotName, requested: requested)
+                    return
+                }
+            }
             if let named {
                 guard let found = AudibleBridgePlayer.player(named, from: self.bridge) else {
                     call.reject("the player this app is playing (\(named)) is not loaded on the bridge, so there is nothing to tap — the bars stay on the album-art theme")
