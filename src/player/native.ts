@@ -196,7 +196,7 @@ interface NaviliteRemotePlugin {
    * has committed, so the paused items can go.
    */
   handover?(): Promise<{ songId?: string; index?: number; positionMs?: number }>;
-  releaseHandover?(): Promise<{ released?: boolean }>;
+  releaseHandover?(next?: { songId?: string; positionMs?: number }): Promise<{ released?: boolean }>;
   /**
    * The persisted boundary log (v2.0-beta.16): every look-ahead and every boundary, one JSON object
    * per line, so the phone's own numbers can leave the phone instead of being read off a row.
@@ -497,7 +497,7 @@ export interface NativeBridge {
    * **The app's own player has started that entry** (v2.0-beta.18) — so the queue stops holding a
    * reading about items that are no longer the sound. Called only after the start has committed.
    */
-  releaseHandover?(): Promise<boolean>;
+  releaseHandover?(next?: { songId?: string; positionMs?: number }): Promise<boolean>;
   /**
    * Ask the native side which entry it is playing now, and adopt its answer (v1.9.8, by index since
    * v1.9.9).
@@ -1819,9 +1819,13 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         const answer = await bounded(remote.handover(), null, 'handover');
         return handoverOf(answer) ?? { songId: '', index: -1, positionMs: 0 };
       },
-      async releaseHandover() {
+      async releaseHandover(next) {
         if (!remote?.releaseHandover) return false;
-        const answer = await bounded(remote.releaseHandover(), null, 'releaseHandover');
+        const answer = await bounded(
+          remote.releaseHandover({ songId: next?.songId ?? '', positionMs: next?.positionMs ?? -1 }),
+          null,
+          'releaseHandover',
+        );
         return answer?.released === true;
       },
       async reconcile() {

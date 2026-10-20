@@ -274,6 +274,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// How many times a take may be refused before the queue takes it anyway (v2.0-beta.19): two
     /// players sounding the same track is a worse defect than a small jump in the position.
     private static let handoverMaxRefusals = 2
+    /// How many times a release is re-asked when the app's own start has not reached the speakers yet
+    /// (v2.0.0-beta.31), and how long between those asks. A start crosses to the speakers a turn or
+    /// two after the plugin answers, and a release that gave up in that gap is the second song.
+    private static let releaseAttempts = 4
+    private static let releaseRetry: TimeInterval = 0.2
     /// How often a fetched slot is asked whether it can start yet (50ms for responsive background handoff).
     private static let fetchStep = 0.05
     /// How long a prime may keep asking whether its item has resolved: 50 ms steps, 10 s.
@@ -2621,7 +2626,17 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      */
     @objc func releaseHandover(_ call: CAPPluginCall) {
         let appSongId = call.getString("songId") ?? ""
-        let appPositionMs = call.getInt("positionMs") ?? -1
+        /*
+         * **The app's position is a *statement*; the players are the fact (v2.0.0-beta.31).**
+         *
+         * This used to be `?? -1` and then *required*: `src/player/native.ts`'s bridge calls
+         * `releaseHandover()` with no arguments at all, so every return arrived here as
+         * `appPositionMs:-1`, was refused as "no position reported", and left the queue sounding
+         * under the app's own player — two songs, one of them uncontrollable, and nothing that ever
+         * asked again. The stated number is used when it is there; when it is not, the app's own
+         * player is read (`resolveRelease`), which is the one answer that cannot be a statement.
+         */
+        let statedPositionMs = call.getInt("positionMs") ?? -1
         DispatchQueue.main.async { [weak self] in
             guard let self else {
                 call.reject("plugin deallocated")
@@ -2647,17 +2662,13 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                               "why": "no handover was offered, so there was nothing to take"])
                 return
             }
-            if !appSongId.isEmpty, appSongId != reading.songId {
-                self.record("handover-refused", [
-                    "songId": reading.songId, "started": appSongId, "positionMs": reading.positionMs,
-                    "why": "the app released a start of another entry, so the queue keeps the sound and the reading"
-                ])
-                call.resolve(["taken": false, "released": false, "songId": reading.songId,
-                              "positionMs": reading.positionMs, "driftMs": 0,
-                              "why": "the release named another entry than the one the reading describes"])
-                return
-            }
-            guard self.awayOwnsAudible, let queuePlayer = self.awayQueue else {
+            /*
+             * A release naming another entry is not refused here any more (v2.0.0-beta.31): refusing
+             * it kept the queue sounding under the app's own player, which is two players — the defect
+             * this release closes. It is answered by `NavilitePressRules.releaseTake` with `.abandon`,
+             * which stops the queue in the same turn the decision is made.
+             */
+            guard self.awayOwnsAudible, self.awayQueue != nil else {
                 /*
                  * **The app is already the sound: the reading is spent, not dropped (v2.0.0-beta.21).**
                  *
@@ -2670,21 +2681,21 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                  *
                  * A release that names the reading's entry is the app saying it is playing it. Taken.
                  */
-                if appPositionMs >= 0 || !appSongId.isEmpty {
+                if statedPositionMs >= 0 || !appSongId.isEmpty {
                     self.awayResume = nil
                     self.handoverRefusals = 0
-                    self.lastAdoption = (reading.songId, appPositionMs >= 0 ? appPositionMs : reading.positionMs, Date())
+                    self.lastAdoption = (reading.songId, statedPositionMs >= 0 ? statedPositionMs : reading.positionMs, Date())
                     self.record("return-adopted", [
                         "songId": reading.songId,
                         "index": reading.index,
-                        "positionMs": appPositionMs >= 0 ? appPositionMs : reading.positionMs,
+                        "positionMs": statedPositionMs >= 0 ? statedPositionMs : reading.positionMs,
                         "path": "plugin",
                         "sounding": false,
                         "kept": "the app's own player",
                         "why": "the app released the entry the reading names while the queue was no longer the sound, so the position it handed back was already the app's"
                     ])
                     call.resolve(["taken": true, "released": true, "songId": reading.songId,
-                                  "positionMs": appPositionMs >= 0 ? appPositionMs : reading.positionMs, "driftMs": 0])
+                                  "positionMs": statedPositionMs >= 0 ? statedPositionMs : reading.positionMs, "driftMs": 0])
                     return
                 }
                 self.awayResume = nil
@@ -2698,125 +2709,218 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                               "why": "the queue no longer owns the sound"])
                 return
             }
-            let liveMs = self.queuePositionMs(queuePlayer)
             /*
-             * **What the queue is *sounding* is compared by songId (v2.0.0-beta.22), read at the
-             * player (v2.0.0-beta.29).** The reading was built from the entry the queue had reached,
-             * but a statement in between can move `index` (the app's own number) while the queue keeps
-             * holding the same item — and an index is the one thing the two sides do not agree on.
-             * `awayEntries[awayCursor]` was called "the platform's own answer", but it is this file's
-             * bookkeeping: when a press moved the cursor without moving the sound, this comparison
-             * agreed with the stale reading and took the handover over a queue that was still playing
-             * the other track. The player's own item is the answer, so that is what is read.
+             * **The take is decided from the players, and it always ends in one owner
+             * (v2.0.0-beta.31).** Everything this used to do here — compare a *stated* app position,
+             * refuse the take when there was none, and leave the queue sounding under the app's own
+             * player — is in `resolveRelease` below, because that decision is now a rule with cases
+             * rather than a ladder of guards that could each end in two players.
              */
-            let soundingSongId = self.queueSoundingEntry()?.songId ?? ""
-            /*
-             * **An unmappable item is not a match (v2.0.0-beta.30).** This used to fall back to
-             * `self.audible?.songId`, so a queue whose item this side could not map was compared
-             * against *another player's* songId — and when that was also empty the comparison below
-             * was skipped and the take went ahead. Nothing here can prove the app is playing the same
-             * entry, so the queue keeps the sound.
-             */
-            guard !soundingSongId.isEmpty else {
-                self.record("handover-refused", [
-                    "songId": reading.songId, "queuePositionMs": liveMs, "appPositionMs": appPositionMs,
-                    "why": "the queue's own item is not an entry this side attached, so nothing here can prove the app is playing the same track and the queue keeps the sound"
-                ])
-                call.resolve(["taken": false, "released": false, "songId": reading.songId,
-                              "positionMs": liveMs, "driftMs": 0,
-                              "why": "the queue's item is not one this side can name"])
-                return
-            }
-            if soundingSongId != reading.songId {
-                self.record("handover-refused", [
-                    "songId": reading.songId, "soundingSongId": soundingSongId,
-                    "queuePositionMs": liveMs, "appPositionMs": appPositionMs,
-                    "why": "the queue is sounding \(soundingSongId) while the reading names \(reading.songId), so the reading is the stale one and the queue keeps the sound"
-                ])
-                call.resolve(["taken": false, "released": false, "songId": soundingSongId,
-                              "positionMs": liveMs, "driftMs": 0,
-                              "why": "the reading names another entry than the one the queue is sounding"])
-                return
-            }
-            /*
-             * **`-1` is an unknown, not a match (v2.0.0-beta.22).**
-             *
-             * The owner's beta.21 log took a handover with `appPositionMs:-1` against a queue at
-             * `queuePositionMs:14158` and `driftMs:0`, then stopped the queue — the sound moved to a
-             * player at 0:00. The condition that did it was the refusal itself: `driftMs` was computed
-             * as `appPositionMs >= 0 ? liveMs - appPositionMs : 0`, so an app that reported *nothing*
-             * had a drift of exactly 0 and the only gate the take had could never fire. A position has
-             * to have been reported for there to be anything to compare, so this is refused by name —
-             * the queue keeps sounding and the app may ask again once its own player knows where it is.
-             */
-            guard appPositionMs >= 0 else {
-                self.record("handover-refused", [
-                    "songId": reading.songId, "soundingSongId": soundingSongId,
-                    "queuePositionMs": liveMs, "appPositionMs": appPositionMs,
-                    "offeredPositionMs": reading.positionMs, "driftMs": 0,
-                    "why": "no position reported: the app's own player did not say where it is, so the queue keeps the sound"
-                ])
-                call.resolve(["taken": false, "released": false, "songId": reading.songId,
-                              "positionMs": liveMs, "driftMs": 0,
-                              "why": "no position reported"])
-                return
-            }
-            let driftMs = liveMs - appPositionMs
-            /*
-             * **A take at 886 ms is not a take (v2.0.0-beta.30).** The owner's log has one taken at
-             * `appPositionMs:2000` against `queuePositionMs:2886` — `driftMs:886` — which is a second
-             * player starting late, not a handover. The threshold is `NavilitePressRules.maxDriftMs`
-             * (250 ms), and a refusal makes the app seek to the queue's live position and ask again,
-             * bounded by `handoverMaxRefusals`.
-             *
-             * **The bound refuses; it does not expire into a take (beta.30).** The count used to be the
-             * guard *on the refusal* (`handoverRefusals < handoverMaxRefusals`), so on the third ask
-             * the block was skipped and the take went ahead at any drift — the 886 ms and the 2886 ms
-             * this bound exists to refuse. A spend bound answers the last ask with the same refusal and
-             * says on the log that it was reached; a refusal that leaves the queue sounding is the
-             * right outcome, a take that rewinds 2.9 s is not.
-             */
-            if let drift = NavilitePressRules.handoverDriftRefusal(driftMs: driftMs,
-                                                                   refusals: self.handoverRefusals,
-                                                                   maxRefusals: Self.handoverMaxRefusals) {
-                if !drift.exhausted { self.handoverRefusals += 1 }
-                self.record("handover-refused", [
-                    "songId": reading.songId, "queuePositionMs": liveMs, "appPositionMs": appPositionMs,
-                    "offeredPositionMs": reading.positionMs, "driftMs": driftMs,
-                    "attempt": self.handoverRefusals,
-                    "boundReached": drift.exhausted,
-                    "maxRefusals": Self.handoverMaxRefusals,
-                    "why": drift.why
-                ])
-                call.resolve(["taken": false, "released": false, "songId": reading.songId,
-                              "positionMs": liveMs, "driftMs": driftMs,
-                              "why": drift.why])
-                return
-            }
-            /*
-             * The take. The app's own player is playing this entry at the position the queue has
-             * reached, so the queue stops — the first and only moment in the return at which the sound
-             * changes hands, and it changes to a player that is already making it.
-             */
-            self.handoverRefusals = 0
-            self.record("handover-taken", [
-                "songId": reading.songId, "soundingSongId": soundingSongId,
-                "queuePositionMs": liveMs, "appPositionMs": appPositionMs,
-                "offeredPositionMs": reading.positionMs, "driftMs": driftMs,
-                "attached": self.awayEntries.count,
-                "why": "the app's own player is playing this entry at the position the queue reached, so the queue stops and the sound is never interrupted"
-            ])
-            self.awayResume = nil
-            self.lastAdoption = (reading.songId, liveMs, Date())
-            self.record("return-adopted", [
-                "songId": reading.songId, "index": reading.index, "positionMs": liveMs,
-                "path": "queue", "sounding": false, "kept": "the app's own player",
-                "why": "the app's player was at the queue's live position, so the queue stops here and the sound stays with the app"
-            ])
-            self.stopAwayQueue(why: "the handover was taken: the app's own player is sounding this entry at the queue's position")
-            call.resolve(["taken": true, "released": true, "songId": reading.songId,
-                          "positionMs": liveMs, "driftMs": driftMs])
+            self.resolveRelease(call, reading: reading, appSongId: appSongId,
+                                statedPositionMs: statedPositionMs, attempt: 0)
         }
+    }
+
+    /// **The app's own player, as the plugin itself names it (v2.0.0-beta.31).**
+    ///
+    /// The return's start is the audio plugin's `play(assetId:time:)` — the web layer issues it
+    /// straight through `NativeAudio`, so `playSlot` (and its `handoverTakeMs`) never sees it. The
+    /// app's own player therefore has to be *found*, not inferred: `AudibleBridgePlayer.find` reads
+    /// the plugin's own `currentlyPlayingAssetId` and answers the `AVPlayer` it sent to the speakers.
+    /// The stated slot is the fallback, for a build whose plugin cannot be read reflectively.
+    private func appSoundingPlayer() -> (player: AVPlayer, assetId: String)? {
+        if let found = AudibleBridgePlayer.find(from: bridge) { return found }
+        guard let audible, audible.assetId != Self.awaySlotName, !audible.assetId.isEmpty else { return nil }
+        return AudibleBridgePlayer.player(audible.assetId, from: bridge)
+    }
+
+    /// Is the player this side found actually making a sound? The same reading `queueIsSounding` makes
+    /// of the queue, so the two players are judged by one rule.
+    private static func isSounding(_ player: AVPlayer?) -> Bool {
+        guard let player else { return false }
+        let status = player.timeControlStatus
+        return status == .playing || status == .waitingToPlayAtSpecifiedRate || player.rate > 0
+    }
+
+    /// **Resolve a release (v2.0.0-beta.31)** — one decision, from `NavilitePressRules.releaseTake`,
+    /// answered from the two players.
+    ///
+    /// The contract this exists for: **at every instant exactly one player can be heard.** Every
+    /// branch below ends in exactly one sounding player, and the branch that cannot prove which one
+    /// it is keeps the queue — the player that was already making the sound.
+    ///
+    ///  - `.take` — the app's player is the reading's entry, sounding, at the queue's position: the
+    ///    queue stops in the same turn and `return-adopted` names the player that kept the sound.
+    ///  - `.seekThenTake` — the app's player is sounding the same entry at another position (its start
+    ///    was issued while the queue ran on during its load). Refusing here is what left **two songs
+    ///    playing with one uncontrollable** on build 83: the app never asks again, so the refusal was
+    ///    permanent. The app's player is moved to the queue's live position — read, not stated — and
+    ///    the queue stops in the same turn, so the sound the listener keeps is the one that was
+    ///    already being heard, from the position it was already at.
+    ///  - `.abandon` — the app is sounding a **different** entry: the queue stops rather than playing
+    ///    underneath it. Two tracks is the defect; the listener's press wins, and the queue goes.
+    ///  - `.wait` — the app's own start has not reached the speakers yet (or nothing could be read):
+    ///    asked again every `releaseRetry` for `releaseAttempts` rungs, then refused. A 200 ms wait is
+    ///    better than a second song.
+    ///  - `.refuse` — nothing here can prove the app is playing the queue's entry, so the queue keeps
+    ///    the sound. That is still exactly one owner.
+    private func resolveRelease(_ call: CAPPluginCall,
+                                reading: (songId: String, index: Int, positionMs: Int),
+                                appSongId: String,
+                                statedPositionMs: Int,
+                                attempt: Int) {
+        guard awayOwnsAudible, let queuePlayer = awayQueue else {
+            call.resolve(["taken": false, "released": false, "songId": reading.songId,
+                          "positionMs": reading.positionMs, "driftMs": 0,
+                          "why": "the queue no longer owns the sound, so there is nothing here to take"])
+            return
+        }
+        let liveMs = queuePositionMs(queuePlayer)
+        let soundingSongId = queueSoundingEntry()?.songId
+        let appFound = appSoundingPlayer()
+        let appSounding = Self.isSounding(appFound?.player)
+        /*
+         * The stated position when the app gave one, and otherwise the app's **own player's** live
+         * position. This is the half that was missing: `releaseHandover()` from the ported bridge
+         * names no numbers at all, so every return took the `-1` path and the queue never let go.
+         */
+        var appMs: Int? = statedPositionMs >= 0 ? statedPositionMs : nil
+        if appMs == nil, let player = appFound?.player {
+            let seconds = player.currentTime().seconds
+            if seconds.isFinite, seconds >= 0 { appMs = Int((seconds * 1000).rounded()) }
+        }
+        let appEntry = !appSongId.isEmpty ? appSongId : (audible?.songId ?? "")
+        let verdict = NavilitePressRules.releaseTake(
+            readingSongId: reading.songId,
+            appSongId: appEntry,
+            appSounding: appSounding,
+            queueSongId: soundingSongId,
+            appMs: appMs,
+            queueMs: liveMs
+        )
+        switch verdict {
+        case .wait(let why):
+            guard attempt < Self.releaseAttempts else {
+                /*
+                 * **The wait is spent, and the answer still leaves one owner (v2.0.0-beta.31).** If
+                 * the app's own player is making a sound this side could not name (the rare case the
+                 * wait was for), then two players are sounding and the queue is the one no control
+                 * reaches — so the queue stops. If it is not sounding, the queue is the only sound
+                 * and keeps it, which is why the refusal below is not a second owner.
+                 */
+                if appSounding {
+                    record("handover-abandoned", [
+                        "songId": reading.songId, "appSongId": appEntry, "queuePositionMs": liveMs,
+                        "appPositionMs": appMs ?? -1, "attempt": attempt,
+                        "slot": appFound?.assetId ?? "", "kept": "the app's own player",
+                        "why": why + " — and the wait is spent while the app's own player is sounding, so the queue stops rather than playing under it"
+                    ])
+                    awayResume = nil
+                    handoverRefusals = 0
+                    stopAwayQueue(why: "the wait for the app's own reading is spent and its player is sounding, so the queue stops rather than playing under it")
+                    call.resolve(["taken": false, "released": true, "songId": appEntry,
+                                  "positionMs": liveMs, "driftMs": 0, "why": why])
+                    return
+                }
+                record("handover-refused", [
+                    "songId": reading.songId, "soundingSongId": soundingSongId ?? "",
+                    "appSongId": appEntry, "queuePositionMs": liveMs, "appPositionMs": appMs ?? -1,
+                    "attempt": attempt, "slot": appFound?.assetId ?? "",
+                    "why": why + " — and the wait is spent with nothing of the app's sounding, so the queue keeps the sound rather than a second player being started"
+                ])
+                call.resolve(["taken": false, "released": false, "songId": reading.songId,
+                              "positionMs": liveMs, "driftMs": 0,
+                              "why": why + " — the wait is spent and the queue keeps the sound"])
+                return
+            }
+            after(Self.releaseRetry) { [weak self] in
+                guard let self else {
+                    call.reject("plugin deallocated")
+                    return
+                }
+                self.resolveRelease(call, reading: reading, appSongId: appSongId,
+                                    statedPositionMs: statedPositionMs, attempt: attempt + 1)
+            }
+        case .refuse(let why):
+            record("handover-refused", [
+                "songId": reading.songId, "soundingSongId": soundingSongId ?? "",
+                "appSongId": appEntry, "queuePositionMs": liveMs, "appPositionMs": appMs ?? -1,
+                "why": why
+            ])
+            call.resolve(["taken": false, "released": false, "songId": reading.songId,
+                          "positionMs": liveMs, "driftMs": 0, "why": why])
+        case .abandon(let why):
+            /*
+             * The app is sounding another entry. The queue stops — one owner — and the reading is
+             * spent, because it describes a sound the app has already replaced.
+             */
+            record("handover-abandoned", [
+                "songId": reading.songId, "soundingSongId": soundingSongId ?? "",
+                "appSongId": appEntry, "queuePositionMs": liveMs, "appPositionMs": appMs ?? -1,
+                "kept": "the app's own player", "why": why
+            ])
+            awayResume = nil
+            handoverRefusals = 0
+            stopAwayQueue(why: "the app's own player is sounding \(appEntry), so the queue stops rather than playing under it")
+            call.resolve(["taken": false, "released": true, "songId": appEntry,
+                          "positionMs": liveMs, "driftMs": 0, "why": why])
+        case .take(let appMs, let driftMs):
+            finishRelease(call, reading: reading, soundingSongId: soundingSongId,
+                          liveMs: liveMs, appMs: appMs, driftMs: driftMs,
+                          sought: false, queuePlayer: queuePlayer)
+        case .seekThenTake(let appMs, let driftMs):
+            /*
+             * One turn: the app's player is moved to the position the queue is at, and the queue
+             * stops. The listener hears the app's player from the queue's position — the same place
+             * the sound already was — and there is never a moment with two owners.
+             */
+            if let player = appFound?.player {
+                player.seek(to: CMTime(value: CMTimeValue(liveMs), timescale: 1000),
+                            toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+            record("handover-seek", [
+                "songId": reading.songId, "soundingSongId": soundingSongId ?? "",
+                "slot": appFound?.assetId ?? "", "queuePositionMs": liveMs,
+                "appPositionMs": appMs, "driftMs": driftMs,
+                "why": "the app's own player is sounding this entry \(appMs) ms in while the queue was at \(liveMs) ms, so its player was moved to the queue's position and the queue stopped — a refusal here is the permanent two-player state the owner reported"
+            ])
+            finishRelease(call, reading: reading, soundingSongId: soundingSongId,
+                          liveMs: liveMs, appMs: liveMs, driftMs: driftMs,
+                          sought: true, queuePlayer: queuePlayer)
+        }
+    }
+
+    /// The take itself, once the two players agree: the queue stops in the same turn the app's own
+    /// player is confirmed to be sounding this entry, and the log names which player kept the sound.
+    private func finishRelease(_ call: CAPPluginCall,
+                               reading: (songId: String, index: Int, positionMs: Int),
+                               soundingSongId: String?,
+                               liveMs: Int,
+                               appMs: Int,
+                               driftMs: Int,
+                               sought: Bool,
+                               queuePlayer: AVPlayer) {
+        handoverRefusals = 0
+        record("handover-taken", [
+            "songId": reading.songId, "soundingSongId": soundingSongId ?? "",
+            "queuePositionMs": liveMs, "appPositionMs": appMs, "driftMs": driftMs,
+            "slot": appSoundingPlayer()?.assetId ?? "",
+            "attached": awayEntries.count,
+            "sought": sought,
+            "why": sought
+                ? "the app's player was moved to the queue's position in the same turn the queue stopped, so exactly one player is sounding this entry"
+                : "the app's own player is playing this entry at the position the queue reached, so the queue stops and the sound is never interrupted"
+        ])
+        awayResume = nil
+        lastAdoption = (reading.songId, liveMs, Date())
+        record("return-adopted", [
+            "songId": reading.songId, "index": reading.index, "positionMs": liveMs,
+            "path": "queue", "sounding": false, "kept": "the app's own player",
+            "why": "the queue stopped in the turn the app's own player was proved to be sounding this entry at its position"
+        ])
+        stopAwayQueue(why: "the handover was taken: the app's own player is sounding this entry at the queue's position")
+        call.resolve(["taken": true, "released": true, "songId": reading.songId,
+                      "positionMs": liveMs, "driftMs": driftMs])
     }
 
     /**

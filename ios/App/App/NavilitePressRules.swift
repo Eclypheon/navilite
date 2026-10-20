@@ -177,6 +177,74 @@ enum NavilitePressRules {
         return liveMs > 0 ? liveMs : nil
     }
 
+    /* ------------------------------- the release: the take is the players' own answer (beta.31) */
+
+    /// **What a release must do, decided from the two players (v2.0.0-beta.31).**
+    ///
+    /// The return was leaving two players sounding on build 83, and the reason was this decision:
+    /// the app's own start on the way back does not pass through `playSlot` — it is the audio
+    /// plugin's `play(assetId:time:)`, issued by the web layer — so the *release* is the only place
+    /// the queue can learn that the sound has changed hands, and the release was refusing whenever
+    /// the app stated no position (`appPositionMs:-1` → "no position reported", the queue keeps
+    /// sounding) while nothing ever asked again. One song from the app, one from the queue, and the
+    /// queue is the one no control reaches — the owner's report exactly.
+    ///
+    /// So the release no longer refuses for want of a number: the app's own player is **read**
+    /// (`AudibleBridgePlayer.find`, the plugin's own `currentlyPlayingAssetId`) and its live
+    /// position is what the take is proved on. Four answers, and none of them leaves two owners:
+    ///
+    ///  - `.take` — the app's player is the reading's entry, sounding, within `maxDriftMs`: take;
+    ///  - `.seekThenTake` — same entry and sounding, but at another position: the app's player is
+    ///    **moved** to the queue's live position and the queue stops in the same turn. Refusing here
+    ///    is what left the double standing, and a refusal that keeps two sounds up is worse than a
+    ///    seek of the one that survives;
+    ///  - `.wait` — the app's player is not sounding yet (its start is still crossing to the
+    ///    speakers): ask again in a moment, bounded — a 200 ms wait is better than a second song;
+    ///  - `.abandon` — the app is sounding a **different** entry: the queue stops rather than
+    ///    playing under it (one owner, and the reader hears the app's decision either way);
+    ///  - `.refuse` — nothing here can prove the app is playing the queue's entry: the queue keeps
+    ///    the sound, which is still exactly one owner.
+    enum Release: Equatable {
+        case take(appMs: Int, driftMs: Int)
+        case seekThenTake(appMs: Int, driftMs: Int)
+        case wait(String)
+        case abandon(String)
+        case refuse(String)
+    }
+
+    /// The release decision (v2.0.0-beta.31) — see `Release`. `appSongId` is the entry the app says
+    /// it started (empty when it said nothing), `appMs` its own player's live position (`nil` when
+    /// the player could not be read), `queueSongId` the queue's own `currentItem` mapped to an
+    /// attached entry (`nil` when it cannot be mapped).
+    static func releaseTake(readingSongId: String, appSongId: String, appSounding: Bool,
+                            queueSongId: String?, appMs: Int?, queueMs: Int,
+                            maxDrift: Int = maxDriftMs) -> Release {
+        guard !readingSongId.isEmpty else {
+            return .refuse("the reading names no entry, so there is nothing to hand over")
+        }
+        guard let queueSongId, !queueSongId.isEmpty else {
+            return .refuse("the queue's own item is not an entry this side attached, so nothing here can prove the app is playing the same track and the queue keeps the sound")
+        }
+        guard queueSongId == readingSongId else {
+            return .refuse("the queue is sounding \(queueSongId) while the reading names \(readingSongId), so the reading is the stale one and the queue keeps the sound")
+        }
+        guard !appSongId.isEmpty else {
+            return .wait("the app has not named the entry its own player is starting, so there is nothing yet to prove the take against")
+        }
+        guard appSongId == readingSongId else {
+            return .abandon("the app's own player is on \(appSongId) while the queue sounds \(readingSongId) — the app took the sound somewhere else, so the queue stops rather than sounding under it")
+        }
+        guard appSounding else {
+            return .wait("the app's own player is on \(readingSongId) but is not sounding yet, so the queue keeps the sound until it is")
+        }
+        guard let appMs, appMs >= 0 else {
+            return .wait("the app's own player named \(readingSongId) but no position could be read from it, so the take is not proved yet")
+        }
+        let drift = queueMs - appMs
+        if abs(drift) <= maxDrift { return .take(appMs: appMs, driftMs: drift) }
+        return .seekThenTake(appMs: appMs, driftMs: drift)
+    }
+
     /* --------------------------------------------- the reading names the sound, not the statement */
 
     /// The index a reading must carry: the entry the queue is **sounding**, looked up in the published

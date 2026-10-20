@@ -2030,7 +2030,18 @@ export class AudioEngine {
   private async releaseHandover(songId: string): Promise<void> {
     if (this.handover?.songId !== songId) return;
     this.handover = null;
-    await this.native?.releaseHandover?.();
+    /*
+     * **The entry is named, and the position is not (v2.0.0-beta.31).**
+     *
+     * This call used to carry nothing at all: the ported bridge's `releaseHandover()` passes no
+     * options, `NaviliteRemote.releaseHandover` read `positionMs` as `-1`, refused the take as "no
+     * position reported", and the away queue went on sounding under the app's own player — two
+     * songs, one of them beyond any control, until the app was force-quit. The entry is named here
+     * because that is the app's fact (`this.handover.songId === songId` above); the *position* is
+     * read by the native side off the app's own player, which is the only answer that cannot be a
+     * stale statement — `nativePositionMs` here can be a clock from before the load.
+     */
+    await this.native?.releaseHandover?.({ songId });
   }
 
   async toggle(): Promise<void> {

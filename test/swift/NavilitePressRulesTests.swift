@@ -36,6 +36,32 @@ struct PressRulesTests {
 
     static func cleared(_ sweep: NavilitePressRules.Sweep) -> Bool { sweep == .clear }
 
+    /// The release's own four answers, as booleans, so each case is asserted by name (beta.31).
+    static func refuseAnswer(_ release: NavilitePressRules.Release) -> Bool {
+        if case .refuse = release { return true }
+        return false
+    }
+
+    static func abandonAnswer(_ release: NavilitePressRules.Release) -> Bool {
+        if case .abandon = release { return true }
+        return false
+    }
+
+    static func waitAnswer(_ release: NavilitePressRules.Release) -> Bool {
+        if case .wait = release { return true }
+        return false
+    }
+
+    /// Either the sound changes hands to a player that is already making it (`.take`) or the app's
+    /// player is moved to the queue's position in the same turn (`.seekThenTake`) — the two answers
+    /// that end a release with exactly one sounding player and nothing else to do.
+    static func takesOrMoves(_ release: NavilitePressRules.Release) -> Bool {
+        switch release {
+        case .take, .seekThenTake: return true
+        case .wait, .abandon, .refuse: return false
+        }
+    }
+
     static func main() {
         let t0 = Date(timeIntervalSince1970: 1792442577)
         let order = (0..<30).map { "track-\($0)" }
@@ -240,6 +266,67 @@ struct PressRulesTests {
         isRefusal("a slot still sounding after the sweep refuses the start",
                   NavilitePressRules.survivors(["slot-1"], target: "slot-0", awaySlot: "away").refusal,
                   expect: true)
+
+        print("\n# the release: the take is the players' answer, and it never leaves two owners (beta.31)")
+
+        /* The owner's build-83 case, in one call: the app's own start on the way back named the
+         * entry (or named nothing at all), the queue was still sounding it, and the release had to
+         * end with one player — not with a refusal that left the queue playing underneath. */
+        check("the app's player is the reading's entry, sounding, at the queue's position — take",
+              NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "0DHk", appSounding: true,
+                                             queueSongId: "0DHk", appMs: 14158, queueMs: 14200)
+              == .take(appMs: 14158, driftMs: 42))
+        check("within the 250 ms the take allows, either direction",
+              NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "0DHk", appSounding: true,
+                                             queueSongId: "0DHk", appMs: 14400, queueMs: 14200)
+              == .take(appMs: 14400, driftMs: -200))
+        check("the app's start is behind the queue the whole load — the player is moved and the queue stops, never a refusal that keeps both",
+              NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "0DHk", appSounding: true,
+                                             queueSongId: "0DHk", appMs: 2000, queueMs: 14158)
+              == .seekThenTake(appMs: 2000, driftMs: 12158))
+        check("the queue's own item is not an entry this side attached — refuse, the queue keeps the sound",
+              NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "0DHk", appSounding: true,
+                                             queueSongId: nil, appMs: 14158, queueMs: 14158) != nil
+              && refuseAnswer(NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "0DHk",
+                                                             appSounding: true, queueSongId: nil,
+                                                             appMs: 14158, queueMs: 14158)))
+        check("the queue is sounding another entry than the reading — refuse, never a take",
+              refuseAnswer(NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "0DHk",
+                                                         appSounding: true, queueSongId: "Yama",
+                                                         appMs: 14158, queueMs: 14158)))
+        check("no reading — refuse",
+              refuseAnswer(NavilitePressRules.releaseTake(readingSongId: "", appSongId: "0DHk",
+                                                         appSounding: true, queueSongId: "0DHk",
+                                                         appMs: 14158, queueMs: 14158)))
+        check("the app's own player is on ANOTHER entry — the queue stops rather than sounding under it",
+              abandonAnswer(NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "Yama",
+                                                          appSounding: true, queueSongId: "0DHk",
+                                                          appMs: 14158, queueMs: 14158)))
+        check("the app named no entry and its player names none — wait, do not refuse and do not take",
+              waitAnswer(NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "",
+                                                       appSounding: true, queueSongId: "0DHk",
+                                                       appMs: 14158, queueMs: 14158)))
+        check("the app's start has not reached the speakers yet — wait (a 200 ms wait, not a second song)",
+              waitAnswer(NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "0DHk",
+                                                       appSounding: false, queueSongId: "0DHk",
+                                                       appMs: 14158, queueMs: 14158)))
+        check("the app's position could not be read — wait, not a refusal built on a missing number",
+              waitAnswer(NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "0DHk",
+                                                       appSounding: true, queueSongId: "0DHk",
+                                                       appMs: nil, queueMs: 14158)))
+        check("the ported bridge's release — no songId, an app player that IS the entry and is sounding — waits rather than refusing the take forever",
+              waitAnswer(NavilitePressRules.releaseTake(readingSongId: "0DHk", appSongId: "",
+                                                       appSounding: true, queueSongId: "0DHk",
+                                                       appMs: nil, queueMs: 14158)))
+        check("every verdict either takes, moves the app's player to the queue, abandons the queue, or keeps the queue sounding — none leaves two owners",
+              takesOrMoves(NavilitePressRules.releaseTake(readingSongId: "a", appSongId: "a", appSounding: true,
+                                                         queueSongId: "a", appMs: 1000, queueMs: 1000))
+              && takesOrMoves(NavilitePressRules.releaseTake(readingSongId: "a", appSongId: "a", appSounding: true,
+                                                            queueSongId: "a", appMs: 1, queueMs: 9000))
+              && abandonAnswer(NavilitePressRules.releaseTake(readingSongId: "a", appSongId: "b", appSounding: true,
+                                                             queueSongId: "a", appMs: 1, queueMs: 1000))
+              && refuseAnswer(NavilitePressRules.releaseTake(readingSongId: "a", appSongId: "b", appSounding: true,
+                                                            queueSongId: "c", appMs: 1, queueMs: 1000)))
 
         print("\n\(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
