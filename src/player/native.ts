@@ -136,6 +136,17 @@ interface NaviliteRemotePlugin {
      * Empty (`{}`) once the app's own player has taken it.
      */
     resume?: { songId?: string; index?: number; positionMs?: number };
+    /**
+     * **What is sounding, said by the player (unreleased)** — `NaviliteRemote.returnReading()`: the
+     * entry the owning route is on, its live position, which route that is (`queue` / `fetch` /
+     * `plugin`) and whether that route is the away queue.
+     *
+     * The return reads this **before** it decides anything. It is the difference between the two
+     * returns the app has: the player already holds the visible entry (read it, write nothing) and
+     * the player does not (something has to be handed over). It arrives on this call rather than on a
+     * call of its own, so asking costs nothing.
+     */
+    return?: { songId?: string; index?: number; positionMs?: number; path?: string; sounding?: boolean };
     reason?: string;
     /**
      * The last away boundary's five moments, in milliseconds from the item end (v2.0-beta.14): the
@@ -507,8 +518,19 @@ export interface NativeBridge {
    * compares what the native side says with what it believes is audible, and reports the **index**
    * as well as the track — an index is what a shuffled play order needs, and the id lookup it used
    * to do was the hole once shuffle was on.
+   *
+   * **`reading` is the same answer as the player's own reading of what is sounding** (unreleased):
+   * the entry the route that owns the sound is on, its live position, and which route that is. It is
+   * what the return decides `adopt` versus `handover` from — the player's fact first, never a flag —
+   * and it costs nothing extra, because it comes back on the `now()` call this method already makes.
    */
-  reconcile?(): Promise<{ changed: boolean; songId: string | null; index: number; resume?: NativeHandover | null } | null>;
+  reconcile?(): Promise<{
+    changed: boolean;
+    songId: string | null;
+    index: number;
+    resume?: NativeHandover | null;
+    reading?: NativeReturnReading | null;
+  } | null>;
   /** What the native boundary has done, as numbers and a sentence — for the reason line (v1.9.8). */
   nativeAdvance?(): {
     armed: number;
@@ -623,6 +645,34 @@ export interface NativeHandover {
   songId: string;
   index: number;
   positionMs: number;
+}
+
+/**
+ * **What the native player is sounding, read and never written (unreleased).**
+ *
+ * The plugin's `now()` answer carries `return` — one reading of the entry the *route that owns the
+ * sound* is on, its live position and which route that is. The three routes are the ones this app has
+ * had since the native boundary: the away queue (`queue`), the app's own fetch player (`fetch`), and
+ * the plugin's own player (`plugin`).
+ *
+ * It exists because the return used to be decided by *shape* rather than by *fact*: every foreground
+ * return ran `adoptHandover`, which starts the app's own player at the away queue's reading — so a
+ * return to a phone that was already sounding the visible track (the ordinary background→foreground,
+ * three times a minute) re-loaded and re-started the very song the listener could hear, dispatching
+ * `loading` under the bar until the start committed. This reading is how the return tells "the player
+ * already holds this entry" from "something has to be started", before it writes anything.
+ */
+export interface NativeReturnReading {
+  /** The entry the route that owns the sound is on; empty when nothing this side can name is sounding. */
+  songId: string;
+  /** Its index in the order the app published, derived from the entry (`NavilitePressRules.readingIndex`). */
+  index: number;
+  /** Its live position, ms — read off the owning player, not off the app's clock. */
+  positionMs: number;
+  /** Which route owns the sound. */
+  path: 'queue' | 'fetch' | 'plugin';
+  /** Whether the away queue is the owner. `path === 'queue'` is the same fact, said as a boolean. */
+  sounding: boolean;
 }
 
 export interface NativePlaybackFacts {
@@ -1445,6 +1495,25 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       const positionMs = Number.isFinite(asked) && asked > 0 ? Math.round(asked) : 0;
       return { songId, index, positionMs };
     };
+    /*
+     * The player's own reading of what is sounding (unreleased). Unlike `handoverOf` this keeps an
+     * **empty** `songId`: "nothing this side can name is sounding" is an answer the return has to be
+     * able to read (it is the one that sends the return to the handover branch), and dropping it here
+     * would turn it into "the plugin did not answer", which is a different fact.
+     */
+    const returnReadingOf = (raw: unknown): NativeReturnReading | null => {
+      if (!raw || typeof raw !== 'object') return null;
+      const record = raw as { songId?: unknown; index?: unknown; positionMs?: unknown; path?: unknown };
+      const path = record.path === 'queue' || record.path === 'fetch' ? record.path : 'plugin';
+      const asked = Number(record.positionMs);
+      return {
+        songId: typeof record.songId === 'string' ? record.songId : '',
+        index: Number.isFinite(Number(record.index)) ? Number(record.index) : -1,
+        positionMs: Number.isFinite(asked) && asked > 0 ? Math.round(asked) : 0,
+        path,
+        sounding: path === 'queue',
+      };
+    };
 
     const stateQueue = async (): Promise<boolean> => {
       if (!remote?.setQueue) {
@@ -1872,8 +1941,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          * to come out of the slot the app expected.
          */
         const movedIndex = nativeIndex >= 0 && nativeIndex !== statement.index;
+        const reading = returnReadingOf(state.return);
         if (slot === null || (slot === audibleId && !movedIndex)) {
-          return { changed: false, songId: state.songId ?? null, index: nativeIndex, resume: handoverOf(state.resume) };
+          return { changed: false, songId: state.songId ?? null, index: nativeIndex, resume: handoverOf(state.resume), reading };
         }
         /*
          * The native player is on another entry than the app believed. That is a track the app
@@ -1887,7 +1957,7 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         audibleSongId = typeof state.songId === 'string' && state.songId ? state.songId : null;
         // The load that moves the app onto this entry is an adoption, not a new clock (v2.0-beta.15).
         adoptingNextLoad = true;
-        return { changed: true, songId: audibleSongId, index: nativeIndex, resume: handoverOf(state.resume) };
+        return { changed: true, songId: audibleSongId, index: nativeIndex, resume: handoverOf(state.resume), reading: returnReadingOf(state.return) };
       },
       nativeAdvance() {
         return {

@@ -43,7 +43,7 @@
  * says so in one line and draws the album-art theme rather than animating a lie.
  */
 import { platformInfo, type OsName } from '../platform.ts';
-import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativeHandover, type NativePlaybackFacts, type NativeSpectrumFrame } from './native.ts';
+import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativeHandover, type NativePlaybackFacts, type NativeReturnReading, type NativeSpectrumFrame } from './native.ts';
 import { STOPPED_WORD, reduce } from './engine-contract.ts';
 import type { EngineOptions, EngineState, EngineStatus, PlaybackBackend, PlayerEvent, QueueStatement, TrackRequest, VisualiserTone, VisualiserWord } from './engine-contract.ts';
 import { askedRate, measuredDurationIsBelievable, spectrumChecksum, withDeadline } from './engine-helpers.ts';
@@ -339,6 +339,23 @@ export class AudioEngine {
    */
   private tapVerdictForItem = false;
   private modeReason = 'nothing playing yet';
+  /**
+   * **Which branch the last foreground return took (unreleased)** — `adopt` (the player was already
+   * sounding the entry the queue is on, so the return read it and wrote nothing) or `handover` (it was
+   * not, so something had to be started). Written here so the next capture proves which of the two ran
+   * rather than asking anyone to trust it; read-only from {@link status}.
+   */
+  private returnPath: 'none' | 'adopt' | 'handover' = 'none';
+  /** How many returns have adopted a player that was already sounding the visible entry. */
+  private returnAdoptions = 0;
+  /**
+   * Starts issued through {@link play} since this engine was built.
+   *
+   * The one number a return that adopted must leave alone: `play` is the only door that dispatches
+   * `engine-state: 'loading'`, so "the counter did not move" and "the state never became loading" are
+   * the same claim, and it is checkable on the phone as well as in the test.
+   */
+  private startsIssued = 0;
   private nativeBands: Uint8Array | null = null;
   private spectrumPoll: ReturnType<typeof setInterval> | null = null;
   /**
@@ -1105,6 +1122,20 @@ export class AudioEngine {
       visualiser: this.visualiser(arming),
       modeReason: this.modeReason,
       /*
+       * **Which branch the last foreground return took (unreleased)**, in the engine's own words.
+       *
+       * `path` is the fact the next capture needs: `adopt` means the player was already sounding the
+       * visible entry and the return read it, `handover` means something had to be started. `adoptions`
+       * counts the first kind for the session, and `starts` is every start `play` has issued — a
+       * return that adopted must not move it, which is the same claim as "the state never became
+       * `loading`" (see `readReturn`).
+       */
+      returnPath: {
+        path: this.returnPath,
+        adoptions: this.returnAdoptions,
+        starts: this.startsIssued,
+      },
+      /*
        * The phone's own account, as a line (v1.9.5): what it said, why it said it, and where the
        * item it said it about was — the three facts that were dropped at the bridge until this
        * release, and the reason a failure on the device could not be told from a failure in the
@@ -1697,6 +1728,11 @@ export class AudioEngine {
     // Each start owns its own ending (v1.9.8) — see `startOutcome`.
     this.startOutcome = null;
     this.generation += 1;
+    /*
+     * The counter a return that ADOPTS must leave alone (unreleased). Counted here, past the two
+     * early returns above, because those issue nothing: this is the point past which a start is real.
+     */
+    this.startsIssued += 1;
     this.track = track;
     this.error = null;
     this.dispatch({ type: 'select', trackId: track.id });
@@ -2340,34 +2376,92 @@ export class AudioEngine {
       await this.onAdvancedNatively?.(moved.songId, moved.index);
     }
     /*
-     * **And the sound the queue was making comes back to the app, at the QUEUE's position
-     * (v2.0-beta.18).**
+     * **The return is an ADOPTION when the player already holds the entry the queue is on
+     * (unreleased).**
      *
-     * `handOverAwayQueue` is a pause: the queue stopped on the item it was sounding and took the
-     * position down, so what the app has on this return is a paused player, a reading nothing had ever
-     * consumed, and its own clock standing at where it left. `adoptHandover` takes that reading, starts
-     * the app's own player at it (the entry the queue reached is the entry the queue just adopted
-     * above), and releases the queue only once that start has committed — see `play`'s tail and
-     * `releaseHandover`.
+     * `reconcile` above has already asked the player what it is sounding, and the answer carries the
+     * route that owns the sound as well as the entry. Three facts decide this, in this order, and not
+     * one of them is a flag:
+     *
+     *   - the entry it names is the entry the queue's cursor is on (`this.track.id`);
+     *   - the owner is the app's own player — `plugin` or `fetch` — never the away queue, which is a
+     *     player of its own: it can only give the sound back by the app starting that entry over;
+     *   - something is sounding at all. An empty `songId` is "nothing this side can name", which is
+     *     the handover's business, not the adoption's.
+     *
+     * When all three hold, the return is a **pure read**: position, duration, playing state, the
+     * clock, the spectrum. Nothing is loaded, started, paused or seeked, so `loading` is not merely
+     * avoided on this path — it is unreachable, because `play` is the only door that dispatches it and
+     * `play` is not on this path. This is the owner's ordinary return: he leaves the app while a track
+     * is playing and comes back to it, and it must be invisible to the music.
+     */
+    const held = moved?.reading ?? null;
+    if (this.returnIsAdoption(held)) {
+      this.returnPath = 'adopt';
+      this.returnAdoptions += 1;
+      this.modeReason = `the return adopted ${this.track?.id ?? 'the visible entry'} — the player is already sounding it at ${Math.round((held?.positionMs ?? 0) / 1000)} s (${held?.path ?? 'plugin'}), so nothing was loaded, started, paused or seeked`;
+      await this.readReturn('adopt');
+      return;
+    }
+    this.returnPath = 'handover';
+    /*
+     * **The other half: the player does not hold the entry, so the sound comes back to the app.**
+     *
+     * `adoptHandover` takes the away queue's reading, starts the app's own player at it (the entry the
+     * queue reached is the entry the queue just adopted above), and releases the queue only once that
+     * start has committed — see `play`'s tail and `releaseHandover`. This branch runs only when the
+     * player is NOT already sounding the visible entry (a track that stopped, an entry `reconcile`
+     * moved to, nothing sounding), because a start over a player that already holds the sound is the
+     * restart this release takes off the screen.
      */
     await this.adoptHandover();
     // And with the web layer running again, the boundary goes back to it (v1.9.8).
     await this.syncQueue();
+    await this.readReturn('handover');
+  }
+
+  /**
+   * **Is the player already sounding the entry the queue is on? (unreleased)**
+   *
+   * The return's whole decision, as one question asked of the player's own reading rather than of a
+   * remembered flag. `reading.songId` is the entry the *owning route* is on — read on the phone from
+   * the player's own `currentItem`, not from a cursor this side moved — and `path` is that route:
+   * the away queue (`queue`), the app's fetch player (`fetch`) or the plugin's own player (`plugin`).
+   *
+   * The away queue is excluded even when it names the same entry: it is a second player, and the only
+   * way the app can come to own a sound the queue is making is to start that entry itself (the
+   * handover). What this answers `true` for is the case the owner reports: the plugin is playing the
+   * track, the queue's cursor is on the same track, and there is nothing to hand over at all.
+   */
+  private returnIsAdoption(reading: NativeReturnReading | null): boolean {
+    const track = this.track;
+    if (!track || !track.id || !reading || !reading.songId) return false;
+    if (reading.path === 'queue') return false;
+    return reading.songId === track.id;
+  }
+
+  /**
+   * **The return's own tail: read the player, adopt what it says, write nothing** (v2.0-beta.18 for
+   * the handover, and both branches since the unreleased adoption).
+   *
+   * The player is the authority, in both directions, and this path **never writes to it**.
+   *
+   * That is the third invariant of this release and it is the one that "completely breaks playback":
+   * if the owner pauses from the lock screen or the control centre while the app is away, coming back
+   * must adopt that pause — not send a resume over the top of a decision he made, which is what trying
+   * to be helpful here produces. v1.7.1's reconciliation did exactly that (and worse, wrote a *pause*
+   * into a player it could not read, because the deleted web copy was holding the audio session under
+   * it). So: read, adopt, and leave the writing to the taps. A track that the platform stopped is
+   * `interrupted`, which is one tap from playing again; a track the user stopped is `paused`, which is
+   * also one tap.
+   *
+   * @param path which of the two returns this is — `adopt` is asserts reads-only at the end of it.
+   */
+  private async readReturn(path: 'adopt' | 'handover'): Promise<void> {
+    const startsBefore = this.startsIssued;
     const stateBefore = this.state;
     await this.native?.activateSession();
     const truth = await this.native?.sync();
-    /*
-     * The player is the authority, in both directions, and this path **never writes to it**.
-     *
-     * That is the third invariant of this release and it is the one that "completely breaks
-     * playback": if the owner pauses from the lock screen or the control centre while the app is
-     * away, coming back must adopt that pause — not send a resume over the top of a decision he
-     * made, which is what trying to be helpful here produces. v1.7.1's reconciliation did exactly
-     * that (and worse, wrote a *pause* into a player it could not read, because the deleted web
-     * copy was holding the audio session under it). So: read, adopt, and leave the writing to the
-     * taps. A track that the platform stopped is `interrupted`, which is one tap from playing
-     * again; a track the user stopped is `paused`, which is also one tap.
-     */
     if (truth) {
       this.setNativePosition(truth.positionMs);
       if (truth.durationMs > 0) this.nativeDurationMs = truth.durationMs;
@@ -2396,6 +2490,18 @@ export class AudioEngine {
        */
       this.startClockTick();
       if (truth?.playing && stateBefore === 'playing' && this.backend === 'native') this.verifySpectrum();
+    }
+    /*
+     * **The guard, where the return decides (unreleased).** An adoption that started a player, or
+     * that ended with the bar drawing `loading`, is the defect this branch exists to remove — so it is
+     * named here rather than left to a test on the other side of the build. `startsIssued` is the
+     * counter `play` increments past its own early returns; `loading` is the state only `play`
+     * dispatches. Neither moves when the branch is what it says it is; if either does, this line says
+     * so on the phone's log and in the reason line.
+     */
+    if (path === 'adopt' && (this.startsIssued !== startsBefore || this.state === 'loading')) {
+      console.warn('[navilite] the adoption branch of the return wrote to the player');
+      this.modeReason = `a return that adopted ${this.track?.id ?? 'the visible entry'} started a player instead of reading one (${this.startsIssued - startsBefore} start(s), state ${this.state}) — the adoption branch must never write`;
     }
     this.emit();
     this.onProgress?.(this.nativePositionMs, this.durationMs());

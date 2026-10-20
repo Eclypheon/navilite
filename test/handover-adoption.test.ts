@@ -28,7 +28,7 @@ import test from 'node:test';
 
 import { AudioEngine } from '../src/player/engine.ts';
 import type { EngineOptions } from '../src/player/engine-contract.ts';
-import type { NativeBridge, NativeBridgeEvents, NativeHandover, NativeTrackInfo } from '../src/player/native.ts';
+import type { NativeBridge, NativeBridgeEvents, NativeHandover, NativeReturnReading, NativeTrackInfo } from '../src/player/native.ts';
 
 (globalThis as unknown as { location: { origin: string } }).location = { origin: 'https://navilite.example' };
 
@@ -56,11 +56,26 @@ interface Record {
   order: string[];
   /** What the plugin answers `handover()` with — the queue's own reading. */
   reading: NativeHandover | null;
+  /** What the plugin puts in `now().return` — the player's own reading of what is sounding. */
+  sounding: NativeReturnReading | null;
+  /** What the player answers `sync()` with. */
+  playing: boolean;
+  syncPositionMs: number;
   released: number;
   songNow: string;
 }
 
-const blank = (): Record => ({ events: null, plays: [], order: [], reading: null, released: 0, songNow: '' });
+const blank = (): Record => ({
+  events: null,
+  plays: [],
+  order: [],
+  reading: null,
+  sounding: null,
+  playing: true,
+  syncPositionMs: 42_000,
+  released: 0,
+  songNow: '',
+});
 
 const track = (id: string) => ({
   id,
@@ -122,9 +137,10 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
       },
       async reconcile() {
         record.order.push('reconcile');
+        const reading = record.sounding;
         return record.songNow
-          ? { changed: true, songId: record.songNow, index: 1, resume: null }
-          : { changed: false, songId: null, index: 0, resume: null };
+          ? { changed: true, songId: record.songNow, index: 1, resume: null, reading }
+          : { changed: false, songId: null, index: 0, resume: null, reading };
       },
       nativeAdvance() {
         return { armed: 1, advances: 0, failures: 0, ignored: 0, reason: 'test', timeline: '', identity: '', startedAt: 0, foregroundTimeline: '', foregroundStartedAt: 0 } as unknown as ReturnType<NonNullable<NativeBridge['nativeAdvance']>>;
@@ -137,7 +153,7 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
       stop: async () => undefined,
       seek: async () => undefined,
       positionMs: () => 0,
-      sync: async () => ({ playing: true, positionMs: 42_000, durationMs: 180_000 }),
+      sync: async () => ({ playing: record.playing, positionMs: record.syncPositionMs, durationMs: 180_000 }),
       activateSession: async () => true,
       listenRemoteCommands: () => () => undefined,
       hasNativeSpectrum: false,
@@ -220,6 +236,104 @@ test('a reading about an entry nobody is starting is kept, and spent by the next
     const playAt = record.order.indexOf('play:61');
     const releaseAt = record.order.indexOf('release');
     assert.ok(releaseAt > playAt, `released after the commit (${record.order.join(' → ')})`);
+  } finally {
+    await engine.stop();
+    await settle();
+  }
+});
+
+/* ------------------------------ the return as an ADOPTION (unreleased) */
+
+test('a player already sounding the visible entry is READ on every return — never started, never loading', async () => {
+  const record = blank();
+  const engine = engineFor(record);
+  const states: string[] = [];
+  const unsubscribe = engine.subscribe((status) => states.push(status.state));
+  try {
+    await engine.play(track('a'));
+    await settle();
+    const startsAfterTheOnePlay = engine.status().returnPath.starts;
+    assert.equal(startsAfterTheOnePlay, 1, 'the session has issued exactly one start so far');
+
+    /*
+     * The owner goes out and comes back three times with nothing else happening — his own words: "to
+     * and fro should not affect the music". The player reports itself sounding the entry the queue is
+     * on (`path: 'plugin'` is the plugin's own player, which is what an ordinary background/foreground
+     * leaves sounding), at a position that keeps advancing because the sound never stopped.
+     */
+    for (let cycle = 1; cycle <= 3; cycle += 1) {
+      await engine.handleVisibility(true);
+      record.plays = [];
+      record.order = [];
+      states.length = 0;
+      record.syncPositionMs = 42_000 + cycle * 5_000;
+      record.sounding = { songId: 'a', index: 0, positionMs: record.syncPositionMs, path: 'plugin', sounding: true };
+      /*
+       * And the queue's own offer names the same entry at the same position — which is what the plugin
+       * really answers: `handover()` resolves `returnReading()`, so a phone whose own player is sounding
+       * the track offers *that* track back. This is the reading the old return took and then
+       * `play(track, position, force: true)`-ed, restarting the song the listener was hearing.
+       */
+      record.reading = { songId: 'a', index: 0, positionMs: record.syncPositionMs };
+
+      await engine.handleVisibility(false);
+      await settle();
+
+      const status = engine.status();
+      assert.deepEqual(record.plays, [], `cycle ${cycle}: the return starts nothing`);
+      assert.ok(!record.order.includes('handover'), `cycle ${cycle}: the queue is never asked to hand over (${record.order.join(' → ')})`);
+      assert.ok(!record.order.includes('release'), `cycle ${cycle}: and nothing is released`);
+      assert.ok(!states.includes('loading'), `cycle ${cycle}: the return never draws loading (${states.join(' → ')})`);
+      assert.equal(status.returnPath.path, 'adopt', `cycle ${cycle}: the return took the adoption branch`);
+      assert.equal(status.state, 'playing', `cycle ${cycle}: the music is still playing`);
+      assert.ok(
+        Math.abs(status.positionMs - record.syncPositionMs) < 1_500,
+        `cycle ${cycle}: the position is adopted from the player (${status.positionMs} vs ${record.syncPositionMs})`,
+      );
+    }
+
+    const final = engine.status();
+    assert.equal(final.returnPath.adoptions, 3, 'three returns, three adoptions');
+    assert.equal(final.returnPath.starts, startsAfterTheOnePlay, 'and the whole session still has exactly ONE start');
+  } finally {
+    unsubscribe();
+    await engine.stop();
+    await settle();
+  }
+});
+
+test('a player that is not on the visible entry still reaches the handover, and still ends in a decision', async () => {
+  const record = blank();
+  const engine = engineFor(record);
+  try {
+    await engine.play(track('a'));
+    await settle();
+    await engine.handleVisibility(true);
+
+    /*
+     * The app's own player is sounding another entry ('b'), and the queue handed the visible one back
+     * at 30 s. The reading is not the visible entry, so this return is NOT an adoption: it hands the
+     * sound back and starts what it was given — the half of the return the adoption must not swallow.
+     */
+    record.sounding = { songId: 'b', index: 1, positionMs: 61_000, path: 'plugin', sounding: true };
+    record.reading = { songId: 'a', index: 0, positionMs: 30_000 };
+    record.plays = [];
+    record.order = [];
+    await engine.handleVisibility(false);
+    await settle();
+
+    assert.equal(engine.status().returnPath.path, 'handover', 'the other half is still the handover');
+    assert.deepEqual(record.plays, ['30'], 'the queue’s reading is started at the queue’s own position');
+    assert.ok(
+      record.order.indexOf('handover') < record.order.indexOf('play:30'),
+      `the queue is asked before the start (${record.order.join(' → ')})`,
+    );
+    assert.ok(
+      record.order.indexOf('release') > record.order.indexOf('play:30'),
+      `and released only after it commits (${record.order.join(' → ')})`,
+    );
+    assert.equal(record.released, 1, 'released exactly once');
+    assert.equal(engine.status().state, 'playing', 'and the return ends in a decision, never in a stuck phase');
   } finally {
     await engine.stop();
     await settle();

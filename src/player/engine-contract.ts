@@ -354,6 +354,27 @@ export interface EngineStatus {
     } | null;
   };
   /**
+   * **Which branch the last return to the foreground took, and the number that proves it read rather
+   * than wrote (unreleased).**
+   *
+   * `path: 'adopt'` is a return whose first question — asked of the player — was answered "I am
+   * already sounding the entry the queue is on", so the return read the position, the duration and the
+   * playing state and wrote nothing. `path: 'handover'` is the other half: the player was not holding
+   * that entry, so the away queue's reading was taken and the app's own player started at it.
+   * `'none'` is an engine that has not returned yet.
+   *
+   * `starts` is every start `play` has issued in the session. A return that adopts must not move it,
+   * and `loading` is the state only `play` dispatches — so the two facts are the same claim, readable
+   * from the row without a screen recording.
+   */
+  returnPath: {
+    path: 'none' | 'adopt' | 'handover';
+    /** Returns that adopted a player already sounding the visible entry. */
+    adoptions: number;
+    /** Starts issued through `play` since this engine was built. */
+    starts: number;
+  };
+  /**
    * The tap's own numbers, for the reason line (v1.9.25).
    *
    * This defect has been diagnosed from source three times and reproduced on the owner's phone every
