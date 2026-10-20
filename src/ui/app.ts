@@ -231,26 +231,10 @@ export async function boot(root: HTMLElement): Promise<void> {
    * wired because `@capacitor/app` is not a dependency of this app, and adding one for an event
    * `visibilitychange` already delivers on both platforms would be a new moving part, not a fix.
    */
-  /*
-   * **The app's one teardown (unreleased, S3).** `pagehide` with `persisted === false` is the only
-   * signal here that the document is going away for good — a bfcache save is `persisted === true`
-   * and comes back through `pageshow`. Everything the player started is given back through
-   * `dispose()`, the canvas' frame and these three listeners included (registered through `own`).
-   */
-  const lifecycleListeners: Array<[EventTarget, string, EventListener]> = [
-    [document, 'visibilitychange', () => onLifecycle(document.hidden)],
-    [window, 'pageshow', () => onLifecycle(document.hidden)],
-    [window, 'focus', () => onLifecycle(false)],
-  ];
-  for (const [target, type, handler] of lifecycleListeners) target.addEventListener(type, handler);
-  engine.own(() => {
-    for (const [target, type, handler] of lifecycleListeners) target.removeEventListener(type, handler);
-    visualizer.stop();
-  });
-  window.addEventListener('pagehide', (event: PageTransitionEvent) => {
-    onLifecycle(true);
-    if (!event.persisted) engine.dispose();
-  });
+  document.addEventListener('visibilitychange', () => onLifecycle(document.hidden));
+  window.addEventListener('pagehide', () => onLifecycle(true));
+  window.addEventListener('pageshow', () => onLifecycle(document.hidden));
+  window.addEventListener('focus', () => onLifecycle(false));
   window.addEventListener('keydown', (event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
     if (event.key === ' ') {
@@ -317,7 +301,7 @@ export async function boot(root: HTMLElement): Promise<void> {
       return data ? Array.from(data) : null;
     },
     /** The last native tap frame, straight from the plugin: bands plus the tap's own counters. */
-    nativeSpectrum: () => engine.currentSnapshot(),
+    nativeSpectrum: () => engine.readNativeFrame(),
 
     /** The track the player is on, and the track the lyrics panel loaded for. */
     tracks: () => ({

@@ -272,7 +272,7 @@ export function attachVisualizer(canvas: HTMLCanvasElement, engine: AudioEngine,
       if (Math.abs(target - next) < SNAP) next = target;
       levels[band] = next < FLOOR ? 0 : next;
       const barHeight = Math.max(1, levels[band] * ceiling);
-      // One flat colour per band, drawn from the palette the rest of the UI is wearing. Set once
+      // One flat colour per band, taken from the palette the rest of the UI is wearing. Set once
       // per bar and never composited with anything: a bar has no second segment.
       c.fillStyle = bandFills[band] ?? palette.primary;
       c.fillRect(band * (bandWidth + gap), baseline - barHeight, bandWidth, barHeight);

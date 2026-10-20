@@ -42,9 +42,11 @@ export const BITRATE_LADDER = [64, 96, 128, 160, 192, 256, 320] as const;
  * it doesn't affect the user experience"*.
  *
  * A `maxBitRate` is not a preference — it is a request for Navidrome to **spawn a transcode**, and
- * that transcode sits between his tap and the first note. So nothing is capped at all: since the
- * warm look-ahead went (unreleased) no URL the app asks for carries a `maxBitRate`, and the ladder
- * is a readout of the measurement (`PlaybackQueue.streamKbps`) rather than a request.
+ * that transcode sits between his tap and the first note. So the app caps nothing until it has
+ * *measured* this link as slow, and even then the cap is never applied to the track he is waiting
+ * for: it decides only what is prepared **in the background** for the track after it
+ * (`PlaybackQueue.warmNeighbours`). A slow link therefore costs the next boundary a little quality
+ * and never costs the track being tapped its start.
  */
 export const STARTING_KBPS: number | null = null;
 

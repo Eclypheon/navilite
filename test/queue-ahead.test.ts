@@ -1,24 +1,18 @@
 /**
- * v1.9.0 — the tap, and the queue it leaves behind.
+ * v1.9.0 — the tap, and the track after it.
  *
- * Four things are asserted here, and they are the four the owner's reports are about:
+ * Three things are asserted here, and they are the three the owner's report is about:
  *
  *   1. **The tap paints before any network work.** `select()` is the synchronous half of a tap —
  *      the row highlight, the title, the artist, the artwork and the loading state — and it must
  *      reach the screen with the engine having been asked for *nothing*. The engine's `play` in
  *      this file does not resolve until the test lets it, so "before the request resolves" is not
  *      a race that happens to be won: it is the state of the world the assertions run in.
- *   2. **A selection states the whole queue to the engine** (v1.9.9) — the resolved play order, the
- *      entry the listener is on, the repeat mode — and asks it for no other track. That statement
- *      is the queue's whole outward contract now: the native side walks it and fetches what it
- *      holds no slot for. **There is no warm look-ahead any more** (unreleased): the app used to
- *      hand the engine the previous song and the next two to prepare, and both halves of that (the
- *      queue's ask and the engine's pool) are gone, so a selection that asks the engine for a
- *      second track is a regression this file can see.
- *   3. **A start is the original file, even on a demoted link.** The ladder measures starts; since
- *      the look-ahead went it decides a readout and nothing else, and a `maxBitRate` in a URL the
- *      app asks for would be a transcode in front of the first note.
- *   4. **A rapid change leaves exactly one fetch in flight, for the item he chose.** Two taps in
+ *   2. **The next track's bytes are requested before the current one ends.** Nothing in this file
+ *      ever ends a track; the prefetch has to have happened anyway, because on the link the owner
+ *      has (a phone on mobile data, reaching the house through a relay) a track change that starts
+ *      with a cold fetch is a track change that stalls.
+ *   3. **A rapid change leaves exactly one fetch in flight, for the item he chose.** Two taps in
  *      quick succession must not leave the abandoned track's stream downloading in the background,
  *      must not re-order the queue, and must not change what is playing.
  *
@@ -29,7 +23,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PlaybackQueue } from '../src/state/queue.ts';
 import type { AudioEngine } from '../src/player/engine.ts';
-import type { QueueStatement, TrackRequest } from '../src/player/engine-contract.ts';
+import type { TrackRequest } from '../src/player/engine-contract.ts';
 import type { Library } from '../src/state/library.ts';
 import type { QueueContext, Song } from '../src/api/types.ts';
 
@@ -39,20 +33,44 @@ const queueOf = (...ids: string[]) => ids.map((id) => ({ song: song(id), context
 const urlOf = (id: string): string => `http://127.0.0.1:4599/rest/stream?id=${id}`;
 
 /**
+ * The URL these tests expect for a **warm** track: the same stream, asked for at the rate the app
+ * has decided to prepare with.
+ *
+ * v1.9.8 — an unmeasured link is asked for **nothing at all**, so the plain URL is what both a tap
+ * and its neighbourhood use: the ladder only ever decides what is *prepared*, and a `maxBitRate` is
+ * a request for Navidrome to spawn a transcode, which is not something a tap may wait for. The
+ * helper stays because the assertions are about which URLs the two paths agree on, and that has to
+ * keep working the moment the ladder does move.
+ */
+const cappedUrlOf = (id: string, kbps: number | null = null): string => (kbps == null ? urlOf(id) : `${urlOf(id)}&maxBitRate=${kbps}`);
+
+interface Prefetch {
+  url: string;
+  signal: AbortSignal;
+  /** Resolved by the test, so "in flight" is a state this file controls. */
+  finish: (bytes?: number, ms?: number) => void;
+}
+
+/**
  * The engine, reduced to what the queue uses. `play` returns a promise the test holds, which is
  * how a slow link is represented without a network: nothing resolves until the test says so.
  */
 function stubEngine(): {
   engine: AudioEngine;
   plays: TrackRequest[];
-  /** Every statement of the queue the engine was given (v1.9.9) — the queue's outward contract. */
-  statements: QueueStatement[];
+  /** Every URL the queue asked the engine to get ready while this one plays (v1.9.1). */
+  prepares: TrackRequest[];
+  /** How many times the queue threw the prepared track away. */
+  discards: number;
   /** Make the next start report no sound at all, which is what demotes the ladder (v1.9.9). */
   failNextStart: () => void;
   releasePlay: () => void;
 } {
   const plays: TrackRequest[] = [];
-  const statements: QueueStatement[] = [];
+  const prepares: TrackRequest[] = [];
+  /** The engine's warm pool, `songId -> the URL it was warmed under`, as `AudioEngine.warmedUrl` reports it. */
+  const warmed = new Map<string, string>();
+  let discards = 0;
   let engineState: 'idle' | 'playing' = 'idle';
   let release: (() => void) | null = null;
   /** Whether the next start ends without sound — one rung down the ladder (v1.9.9). */
@@ -74,6 +92,14 @@ function stubEngine(): {
     }),
     play: (track: TrackRequest) => {
       plays.push(track);
+      /*
+       * The engine's own rule for what a start does to the warm pool (v1.9.5), modelled here because
+       * the queue's warming is built on it: a track the engine is holding warm under exactly this URL
+       * is *adopted* and only that claim goes; a track it is not holding is a cold load, which throws
+       * the whole pool away (`load` clears it in `src/player/native.ts` and in the engine).
+       */
+      if (warmed.get(track.id) === track.url) warmed.delete(track.id);
+      else warmed.clear();
       return new Promise<void>((resolve) => {
         release = () => {
           engineState = 'playing';
@@ -81,14 +107,16 @@ function stubEngine(): {
         };
       });
     },
-    /** The queue's statement, recorded whole: it is what the native side would be told to walk. */
-    setQueue: (statement: QueueStatement) => {
-      statements.push({ list: [...statement.list], index: statement.index, repeat: statement.repeat });
+    prepareNext: async (track: TrackRequest) => {
+      prepares.push(track);
+      // Claimed by the engine before it asks the player, exactly as the real one does.
+      warmed.set(track.id, track.url);
+      return true;
     },
     /**
      * The engine's own answer to "did that start produce sound" (v1.9.2), and the one measurement
-     * the ladder is allowed to be fed. `failNextStart` below is how a start that produced nothing is
-     * modelled — the case that demotes the ladder one rung.
+     * the ladder is allowed to be fed (v1.9.8). `failNextStart` below is how a start that produced
+     * nothing is modelled — the case that demotes the ladder one rung (v1.9.9).
      */
     startDidFail: () => fails,
     lastStartOutcome: () => (fails ? ('timeout' as const) : ('player' as const)),
@@ -96,6 +124,17 @@ function stubEngine(): {
       // The retry is the same item asked again: it produces sound, so the start is not a failure.
       fails = false;
       return true;
+    },
+    /** The engine's pool, read back (v1.9.5) — the queue's only source of truth about warmth. */
+    warmedUrl: (songId: string) => warmed.get(songId) ?? null,
+    pruneWarmed: (keep: readonly string[]) => {
+      for (const songId of [...warmed.keys()]) if (!keep.includes(songId)) warmed.delete(songId);
+    },
+    discardPrepared: async () => {
+      // `discardPrepared` throws the pool away and tells the player; the pool half is what the queue
+      // can observe here, and the round trip is what `discards` counts.
+      warmed.clear();
+      discards += 1;
     },
     pause: async () => {},
     seek: async () => {},
@@ -106,7 +145,10 @@ function stubEngine(): {
   return {
     engine: engine as unknown as AudioEngine,
     plays,
-    statements,
+    prepares,
+    get discards() {
+      return discards;
+    },
     failNextStart: () => {
       fails = true;
     },
@@ -114,23 +156,28 @@ function stubEngine(): {
   };
 }
 
-/** The library, reduced to what the queue uses. `streamUrl` honours a cap, so a cap would show. */
-function stubLibrary(): { library: Library } {
+/** The library, reduced to what the queue uses — with a stub prefetch that the test can settle. */
+function stubLibrary(): { library: Library; prefetches: Prefetch[] } {
+  const prefetches: Prefetch[] = [];
   const library = {
     crossOrigin: false,
     coverUrl: () => null,
     streamUrl: (track: Song, maxBitRate?: number | null) =>
       maxBitRate == null ? urlOf(track.id) : `${urlOf(track.id)}&maxBitRate=${maxBitRate}`,
+    prefetch: (url: string, signal: AbortSignal) =>
+      new Promise<void>((resolve) => {
+        prefetches.push({ url, signal, finish: () => resolve() });
+      }),
     client: { scrobble: async () => undefined, savePlayQueue: async () => undefined },
   };
-  return { library: library as unknown as Library };
+  return { library: library as unknown as Library, prefetches };
 }
 
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 test('a tap paints the selection and the loading state before anything is requested', async () => {
   const { engine, plays, releasePlay } = stubEngine();
-  const { library } = stubLibrary();
+  const { library, prefetches } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
   let paints = 0;
   queue.onChanged = () => {
@@ -144,6 +191,7 @@ test('a tap paints the selection and the loading state before anything is reques
   assert.equal(queue.isLoading, true, 'and it is drawn in its loading state');
   assert.ok(paints > 0, 'the screen was redrawn by the tap itself');
   assert.equal(plays.length, 0, 'and nothing had been asked of the engine yet — no fetch, no I/O');
+  assert.equal(prefetches.length, 0, 'nothing is being pulled for a track that is not even playing');
 
   void queue.start();
   await tick();
@@ -158,8 +206,8 @@ test('a tap paints the selection and the loading state before anything is reques
   assert.equal(queue.isLoading, false, 'the loading state comes off when the engine has the stream');
 });
 
-test('a selection states the whole queue to the engine, and asks it for no other track', async () => {
-  const { engine, releasePlay, plays, statements } = stubEngine();
+test('the next track is requested before the current one ends', async () => {
+  const { engine, releasePlay, prepares } = stubEngine();
   const { library } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
 
@@ -169,36 +217,42 @@ test('a selection states the whole queue to the engine, and asks it for no other
   await tick();
   await tick();
 
-  /*
-   * The statement is the queue's whole outward contract now: every entry of the resolved order, in
-   * the order it will be played, the entry the listener is on, and the rules. No entry carries a
-   * `maxBitRate` — an entry is only ever a URL the native side could fetch as it sits on the server.
-   */
-  const last = statements.at(-1)!;
-  assert.deepEqual(last.list.map((entry) => entry.songId), ['song-1', 'song-2', 'song-3'], 'the resolved order, whole');
-  assert.deepEqual(last.list.map((entry) => entry.url), ['song-1', 'song-2', 'song-3'].map(urlOf), 'each entry as the file sits on the server');
-  assert.equal(last.index, 0, 'and the entry he is on');
-  assert.equal(last.repeat, 'off', 'with the repeat mode the queue is actually in');
-  assert.equal(last.list[0]!.title, 'Track song-1', 'with the metadata the lock-screen card will need');
-
-  /*
-   * v1.9.5's warm look-ahead is gone (unreleased), both halves: the queue no longer asks the engine
-   * to prepare anything, and the engine no longer holds a pool. One play, then, is one request —
-   * three tracks in the queue and the engine asked for exactly the one that is playing.
-   */
-  assert.equal(plays.length, 1, 'the engine was asked for the track playing, and for nothing around it');
+  // No track has ended, and the neighbourhood of the current one is already warm on the engine.
   assert.equal(queue.currentSong?.id, 'song-1', 'and none of this changed what is playing');
+  /*
+   * v1.9.1/v1.9.2 — the track is prepared on the player: the engine holds the next track buffered
+   * and silent, which is what makes the track boundary instant.
+   *
+   * v1.9.5 — and it is the **neighbourhood** (the owner's rule: *"the previous song and the NEXT TWO
+   * songs, so stepping back or forward is instant"*). Track 1 of three has no previous, so the two
+   * warms here are the next two — and this list is asserted whole, url by url, rather than by count:
+   * what has to be true of every entry is that it was asked for under the exact URL the play path
+   * will use, which is the pair of expressions the boundary's adoption depends on.
+   */
+  const kbps = queue.streamKbps ?? null;
+  assert.deepEqual(
+    prepares.map((prepare) => prepare.url),
+    [cappedUrlOf('song-2', kbps), cappedUrlOf('song-3', kbps)],
+    'the next two tracks were handed to the engine to get ready, under the URLs they will be played with',
+  );
+  assert.equal(prepares[0]!.title, 'Track song-2', 'with the metadata the lock-screen card will need');
 });
 
-test('a start on a demoted link is still the original file', async () => {
+test('only the track beyond a single press may be prepared as a lower-bitrate variant', async () => {
   /*
    * The owner's rule, in his words: *"transcoding is slow heavy work if possible avoid it if it leads
    * to delays there should be no need to transcode the songs unless it's being done while another
-   * song is playing so it doesn't affect the user experience"*. The ladder is driven one rung down
-   * here by a start that produced no sound, and what is asserted is that the rung reaches no URL: the
-   * lookup a tap makes is the track's own file, and so is every entry of the published statement.
+   * song is playing so it doesn't affect the user experience"* — and the tap path carries no
+   * `maxBitRate` at all (asserted above). But a tap **adopts the warmed URL**, so a cap on the warm
+   * path reaches the start path anyway: that is finding 6 of the 1.9.9 design note, and it is what
+   * this test pins down.
+   *
+   * The ladder is driven one rung down here by a start that produced no sound (the demote path), and
+   * what is asserted is which URLs the look-ahead then asks for: the **next** entry — the boundary,
+   * and the next button — is the original file, and only the entry beyond it carries the cap, because
+   * that one is behind two presses and nobody is waiting for it.
    */
-  const { engine, releasePlay, plays, failNextStart, statements } = stubEngine();
+  const { engine, releasePlay, prepares, failNextStart } = stubEngine();
   const { library } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
 
@@ -209,14 +263,14 @@ test('a start on a demoted link is still the original file', async () => {
   await tick();
   await tick();
 
-  assert.ok(queue.streamKbps !== null, 'the start that produced no sound demoted the ladder');
-  assert.equal(plays.length, 1, 'the retry is in place, so the rejected track was not fetched again');
-  assert.equal(plays[0]!.url, urlOf('song-1'), 'and the track he is waiting for was asked for as the original file');
+  const kbps = queue.streamKbps;
+  assert.ok(kbps !== null, 'the start that produced no sound demoted the ladder, so a cap is in force');
   assert.deepEqual(
-    statements.at(-1)!.list.map((entry) => entry.url),
-    ['song-1', 'song-2', 'song-3'].map(urlOf),
-    'nor does the rung reach the queue the native side would walk',
+    prepares.map((prepare) => prepare.url),
+    [urlOf('song-2'), cappedUrlOf('song-3', kbps)],
+    'the next entry is prepared as the file sits on the server; only the one beyond it is capped',
   );
+  assert.equal(prepares[0]!.url.includes('maxBitRate'), false, 'and the entry a track end will play carries no transcode request at all');
 });
 
 test('ten taps in a row each paint the row he touched, and the waiting state never clears itself', async () => {
@@ -251,7 +305,7 @@ test('ten taps in a row each paint the row he touched, and the waiting state nev
 });
 
 test('a second tap on the row whose load is still in flight is not a missed tap', async () => {
-  const { engine, releasePlay, plays, statements } = stubEngine();
+  const { engine, releasePlay, plays, prepares } = stubEngine();
   const { library } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
   const items = queueOf('song-1', 'song-2');
@@ -260,7 +314,6 @@ test('a second tap on the row whose load is still in flight is not a missed tap'
   void queue.start();
   await tick();
   assert.equal(plays.length, 1, 'the first tap asked the engine for the stream');
-  const publishedByTheTap = statements.length;
 
   // …and he taps the same row again, while that load has not answered.
   queue.select(items, 0, CONTEXT);
@@ -268,29 +321,33 @@ test('a second tap on the row whose load is still in flight is not a missed tap'
   await tick();
   assert.equal(plays.length, 1, 'the second tap is the same request, not a second one');
   assert.equal(queue.isLoading, true, 'and the row stays drawn as waiting rather than settling on the instant');
-  assert.equal(statements.at(-1)!.index, 0, 'the queue is still stated on the row he touched');
 
   releasePlay();
   await tick();
   await tick();
   assert.equal(queue.isLoading, false, 'the state comes off when the load it was waiting for answers');
   assert.equal(queue.currentSong?.id, 'song-1', 'and what is playing is the row he touched');
-  assert.ok(statements.length >= publishedByTheTap, 'the statement was never left on a different row');
+  assert.equal(prepares.length, 1, 'the look-ahead ran once, for the track that follows it');
 });
 
-test('a rapid double tap re-states the queue on the row he chose, and asks for nothing else', async () => {
-  const { engine, releasePlay, plays, statements } = stubEngine();
+test('a rapid double tap prepares the track after the one he chose', async () => {
+  const { engine, releasePlay, prepares } = stubEngine();
   const { library } = stubLibrary();
   const queue = new PlaybackQueue(engine, library);
 
-  // He taps track 1: its stream starts, and the queue is stated as being on track 1.
+  // He taps track 1: its stream starts, and the next two begin warming (v1.9.5: the neighbourhood).
   queue.select(queueOf('song-1', 'song-2', 'song-3'), 0, CONTEXT);
   void queue.start();
   await tick();
   releasePlay();
   await tick();
   await tick();
-  assert.equal(statements.at(-1)!.index, 0, 'the queue is stated on the track he chose');
+  const kbps = queue.streamKbps ?? null;
+  assert.deepEqual(
+    prepares.map((prepare) => prepare.url),
+    [cappedUrlOf('song-2', kbps), cappedUrlOf('song-3', kbps)],
+    'his tap warmed the two tracks after the one he chose',
+  );
 
   // …and immediately taps track 2, before anything resolved.
   queue.select(queueOf('song-1', 'song-2', 'song-3'), 1, CONTEXT);
@@ -301,14 +358,17 @@ test('a rapid double tap re-states the queue on the row he chose, and asks for n
   await tick();
 
   /*
-   * The second selection re-states the same list at the new position — one statement per move, and
-   * a whole list every time, so the native side never holds a picture of a queue the listener has
-   * left. Two taps are two requests for sound; there is no warm ask left to make a third.
+   * The second tap warms what is around the track he chose, and the queue does not ask twice for what
+   * is already warm under the same URL: song-3 was warmed by the first tap and is still the next one,
+   * so the one new warm is song-1 — the track he just left, which is what makes a step *back* instant.
+   * (v1.9.5: the list is asserted whole, so "asked for something, and only one thing" is now "asked
+   * for exactly the neighbour it did not already have".)
    */
-  const last = statements.at(-1)!;
-  assert.deepEqual(last.list.map((entry) => entry.songId), ['song-1', 'song-2', 'song-3'], 'the same queue, whole');
-  assert.equal(last.index, 1, 'stated on the track he is on now');
-  assert.equal(plays.length, 2, 'and the engine was asked for the two tracks he tapped — nothing around them');
+  assert.deepEqual(
+    prepares.map((prepare) => prepare.url),
+    [cappedUrlOf('song-2', kbps), cappedUrlOf('song-3', kbps), cappedUrlOf('song-1', kbps)],
+    'and it asked for the one neighbour it did not already hold',
+  );
   assert.equal(queue.currentSong?.id, 'song-2', 'what is playing is what he chose');
   assert.equal(queue.position, 1, 'and the queue is in the order he left it in');
 });

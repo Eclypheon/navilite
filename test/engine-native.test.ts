@@ -92,8 +92,6 @@ interface Recording {
   adopts: number;
   /** The URL the prepared slot holds right now, or null when nothing is prepared. */
   preparedUrl: string | null;
-  /** The song id of the track in the prepared slot, so an adopted item names its own song. */
-  preparedId: string;
   /**
    * v1.9.1 — the plugin's own leak, made reproducible: `setCurrentTime` resolves only from
    * AVFoundation's seek completion, and a zero-tolerance seek on a transcoded remote item reports
@@ -125,15 +123,6 @@ interface Recording {
    * which is the fake's stand-in for `player.currentItem`.
    */
   playingUrl: string | null;
-  /**
-   * The song id the item was built for, and the item the player held before it (unreleased).
-   *
-   * With one player the tap is installed by `makeItem`, so the item a snapshot names is the item
-   * the fake built — `playingId` is that item's song, and `previousUrl` is the item the outgoing
-   * frame belongs to, which is the key a `staleRegisterUrls` answer is dated to.
-   */
-  playingId: string;
-  previousUrl: string | null;
   /** What the native spectrum tap is doing. */
   spectrum: SpectrumState;
 }
@@ -304,23 +293,11 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
   const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
   return async (_os: string, events: NativeBridgeEvents) => {
     if (options.buildMs) await wait(options.buildMs);
-    /*
-     * **One player, one clock (unreleased).** A position the player reports is the position the one
-     * snapshot must carry: this sink records what it is told, so `snapshot()` below and the engine's
-     * own report listener can never describe two different places in the same track.
-     */
-    record.events = new Proxy(events, {
-      get(target, property, receiver) {
-        if (property === 'onPosition') {
-          return (seconds: number): void => {
-            record.truth = { ...record.truth, positionMs: seconds * 1000 };
-            target.onPosition(seconds);
-          };
-        }
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-      },
-    });
+    record.events = events;
+    const action = async (name: string): Promise<void> => {
+      record.calls.push(name);
+      await wait(ROUND_TRIP_MS);
+    };
     /*
      * v1.9.26 — a new install is a new analysis: its own frame count, its own cadence clock and its
      * own register. The plugin's `SpectrumAnalysis` is created per install (`NaviliteSpectrum.swift`),
@@ -333,49 +310,153 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
       record.spectrum.registerBands = null;
       record.spectrum.registerLive = false;
     };
-    /*
-     * **The tap is installed by `makeItem` (unreleased).** One player builds one item per track and
-     * that item carries its own analysis — there is no `startSpectrum` request to count and no
-     * verify to send, so what the fake states here is the item itself: `installs` is how many items
-     * this bridge built, `tappedUrl` the item whose tap is running, and the analysis starts empty.
-     */
-    const handItem = (url: string, id?: string): void => {
-      record.previousUrl = record.playingUrl;
-      record.playingUrl = url;
-      record.playingId = id ?? '';
-      record.spectrum.installs += 1;
-      record.spectrum.started = true;
-      record.spectrum.startedUrl = url;
-      record.spectrum.tappedUrl = url;
-      record.spectrum.itemIsCurrent = true;
-      beginAnalysis();
-    };
-    /*
-     * **The player's own clock, as `currentTime()` answers it (unreleased).** The last position the
-     * test stated — or the player reported — plus the time since it said so, while the player is
-     * playing; a paused player stands still. The engine re-anchors on every 33 ms read, so this is
-     * what keeps a snapshot's clock moving: a static answer freezes the row at whatever the first
-     * read said.
-     */
-    const clock = { positionMs: 0, playing: false, at: Date.now() };
-    const currentTimeMs = (): number => {
-      const now = Date.now();
-      if (record.truth.positionMs !== clock.positionMs || record.truth.playing !== clock.playing) {
-        clock.positionMs = record.truth.positionMs;
-        clock.playing = record.truth.playing;
-        clock.at = now;
-      }
-      const elapsed = record.truth.playing ? now - clock.at : 0;
-      return Math.round(clock.positionMs + elapsed);
-    };
-    /*
-     * **The tap's own read (v1.9.6…v1.9.27), as one door.** With one player there is no
-     * `spectrumFrame` bridge left to call, but the state this block advances *is* what the tap does
-     * on every read — a frame produced when its own cadence says so, a last-value register holding
-     * it in between, a per-item counter and an age — and `snapshot()` publishes exactly that state
-     * under the one published shape. One model of the tap, read by the one call the web layer makes.
-     */
-    const readFrame = async () => {
+    record.calls.push('configure');
+    return {
+      async load(info: NativeTrackInfo) {
+        record.calls.push('load');
+        record.loads.push(info.url);
+        await wait(ROUND_TRIP_MS);
+        // v1.9.22 — the item the plugin's player is holding from now on: what a tap request issued
+        // after this reads, and what `itemIsCurrent` is decided against in `plugin` mode.
+        record.playingUrl = info.url;
+      },
+      async play(seconds: number) {
+        record.calls.push(`play@${Math.round(seconds)}`);
+        await wait(ROUND_TRIP_MS);
+        record.truth = { ...record.truth, playing: true, positionMs: seconds * 1000 };
+        /*
+         * v1.9.2 — a player that has been told to play **reports where it is**, and that report is
+         * what the engine now waits for before it will say the track is playing (`concludeStart`).
+         * A fake that accepted the call and said nothing would be a fake of the bug this release is
+         * about: every round trip answering, and no sound.
+         */
+        if (!record.deferPosition) {
+          record.events?.onPosition(Math.max(0, seconds));
+        }
+      },
+      pause: () => action('pause'),
+      async resume() {
+        record.calls.push('resume');
+        await wait(ROUND_TRIP_MS);
+        // The trap: the call is accepted, the player stays put. `refuseResume` says so.
+        if (!record.refuseResume) record.truth = { ...record.truth, playing: true };
+      },
+      stop: () => action('stop'),
+      async seek(seconds: number) {
+        record.calls.push(`seek@${Math.round(seconds)}`);
+        // `seekIgnored` is the seek the item does not take (v1.9.13): the player stays where it is,
+        // and its own answer to "where are you" is what the engine must carry.
+        if (!record.seekIgnored) record.truth = { ...record.truth, positionMs: seconds * 1000 };
+        // The plugin's own leak, when the test asks for it: the promise never settles.
+        if (record.seekNeverSettles) return new Promise<void>(() => {});
+        await wait(5);
+      },
+      /*
+       * v1.9.1 — the prepared slot, in the fake bridge as in `src/player/native.ts`: a second asset
+       * loaded on the same plugin, never sent `play`, adopted at a track boundary.
+       */
+      async prepare(info: NativeTrackInfo) {
+        record.calls.push('prepare');
+        record.prepares.push(info.url);
+        record.preparedUrl = info.url;
+        await wait(ROUND_TRIP_MS);
+        // v1.9.2: the answer is whether the player took the track — the queue records a prepared
+        // track only on `true`.
+        return true;
+      },
+      async adopt() {
+        const url = record.preparedUrl;
+        record.preparedUrl = null;
+        if (!url) return false;
+        record.calls.push('adopt');
+        // The real bridge plays the prepared asset here (`NativeAudio.play` on its own asset id),
+        // which is why adopting is a start and not a load.
+        record.calls.push('play@0');
+        record.adopts += 1;
+        record.truth = { ...record.truth, playing: true, positionMs: 0 };
+        // v1.9.22 — the adopted item is the one the player is holding (see `load`).
+        record.playingUrl = url;
+        await wait(5);
+        // The adopted item is playing now, and it says so: the same report a load's play produces.
+        record.events?.onPosition(0);
+        return true;
+      },
+      async discard() {
+        record.calls.push('discard');
+        record.preparedUrl = null;
+      },
+      positionMs: () => record.truth.positionMs,
+      async sync() {
+        record.calls.push('sync');
+        await wait(ROUND_TRIP_MS);
+        if (record.silentSync) return null;
+        return { ...record.truth };
+      },
+      async activateSession() {
+        record.calls.push('activateSession');
+        await wait(ROUND_TRIP_MS);
+        return true;
+      },
+      listenRemoteCommands() {
+        return () => undefined;
+      },
+      hasNativeSpectrum: record.hasSpectrum,
+      async startSpectrum(url: string, positionMs: number) {
+        record.calls.push(`startSpectrum@${Math.round(positionMs)}`);
+        record.spectrum.startCalls += 1;
+        if (!record.spectrum.plugin) {
+          if (record.spectrum.startedUrl !== url) {
+            record.spectrum.installs += 1;
+            // v1.9.25 — a new install is a new analysis: the item's own frame count starts at zero.
+            beginAnalysis();
+          }
+          record.spectrum.started = true;
+          record.spectrum.startedUrl = url;
+          record.spectrum.startedAtMs = positionMs;
+          record.spectrum.playing = true;
+          return true;
+        }
+        /*
+         * The plugin's own install (v1.9.22), in the three steps `NaviliteSpectrum.install` takes:
+         * the item is read *now*, the wait for that item's audio track happens, and the attach lands
+         * on the item that was read — **even when the player is on another one by then.**
+         *
+         * The generation guard the plugin does have is checked at the top of each retry step, before
+         * the read; nothing re-checks it after the `await`, so a request whose wait outlasts the
+         * track change attaches anyway and its `detach()` takes the mix off the item that is
+         * playing. That window is `slowLandUrls`: a request for a stream being replaced, waiting
+         * long enough for the next track's install to have landed first.
+         */
+        const read = record.playingUrl;
+        const slow = read !== null && (record.spectrum.slowLandUrls ?? []).includes(read);
+        await wait(slow ? record.spectrum.installMs ?? 200 : 5);
+        record.spectrum.started = true;
+        record.spectrum.startedUrl = url;
+        record.spectrum.startedAtMs = positionMs;
+        record.spectrum.playing = true;
+        // The plugin's own rule: a request for the item the tap is already on is a *verify*, and
+        // anything else is an install (this is `carriesOurTap`, with the item standing in for the URL).
+        if (record.spectrum.tappedUrl !== read) {
+          record.spectrum.installs += 1;
+          // v1.9.25 — and the analysis of the item this install lands on is new: its own count is zero.
+          beginAnalysis();
+        }
+        record.spectrum.tappedUrl = read;
+        record.spectrum.itemIsCurrent = read !== null && read === record.playingUrl;
+        return true;
+      },
+      async stopSpectrum() {
+        record.spectrum.stopCalls += 1;
+        record.spectrum.started = false;
+      },
+      /*
+       * v1.9.25 — which slot the plugin says the tap is on, and which slot this bridge is playing:
+       * the two names the reason line carries (`NativeBridge.spectrumEvidence`). Not a decision.
+       */
+      spectrumEvidence() {
+        return { tapped: record.spectrum.tappedUrl ?? null, audible: record.playingUrl };
+      },
+      async spectrumFrame() {
         /*
          * Every frame differs from the one before it, the way a real FFT of music does — and a
          * silent source reads as silence, which is the flat case the visualiser must detect.
@@ -507,213 +588,6 @@ function fakeBridge(record: Recording, options: { buildMs?: number } = {}): (os:
           verifies: Math.max(0, record.spectrum.startCalls - record.spectrum.installs),
           readable: true,
           sampleRate: 44_100,
-        };
-    };
-    record.calls.push('configure');
-    return {
-      async load(info: NativeTrackInfo) {
-        record.calls.push('load');
-        record.loads.push(info.url);
-        await wait(ROUND_TRIP_MS);
-        // v1.9.22 — the item the plugin's player is holding from now on: what a tap request issued
-        // after this reads, and what `itemIsCurrent` is decided against in `plugin` mode.
-        handItem(info.url, info.id);
-      },
-      async play(seconds: number) {
-        record.calls.push(`play@${Math.round(seconds)}`);
-        await wait(ROUND_TRIP_MS);
-        record.truth = { ...record.truth, playing: true, positionMs: seconds * 1000 };
-        /*
-         * v1.9.2 — a player that has been told to play **reports where it is**, and that report is
-         * what the engine now waits for before it will say the track is playing (`concludeStart`).
-         * A fake that accepted the call and said nothing would be a fake of the bug this release is
-         * about: every round trip answering, and no sound.
-         */
-        if (!record.deferPosition) {
-          record.events?.onPosition(Math.max(0, seconds));
-        }
-      },
-      pause: async () => {
-        record.calls.push('pause');
-        await wait(ROUND_TRIP_MS);
-        // The player itself is what a snapshot reports: a pause is a player that is not playing.
-        record.truth = { ...record.truth, playing: false };
-      },
-      async resume() {
-        record.calls.push('resume');
-        await wait(ROUND_TRIP_MS);
-        // The trap: the call is accepted, the player stays put. `refuseResume` says so.
-        if (!record.refuseResume) record.truth = { ...record.truth, playing: true };
-      },
-      stop: async () => {
-        record.calls.push('stop');
-        await wait(ROUND_TRIP_MS);
-        record.truth = { ...record.truth, playing: false };
-      },
-      async seek(seconds: number) {
-        record.calls.push(`seek@${Math.round(seconds)}`);
-        // `seekIgnored` is the seek the item does not take (v1.9.13): the player stays where it is,
-        // and its own answer to "where are you" is what the engine must carry.
-        if (!record.seekIgnored) record.truth = { ...record.truth, positionMs: seconds * 1000 };
-        // The plugin's own leak, when the test asks for it: the promise never settles.
-        if (record.seekNeverSettles) return new Promise<void>(() => {});
-        await wait(5);
-      },
-      /*
-       * v1.9.1 — the prepared slot, in the fake bridge as in `src/player/native.ts`: a second asset
-       * loaded on the same plugin, never sent `play`, adopted at a track boundary.
-       */
-      async prepare(info: NativeTrackInfo) {
-        record.calls.push('prepare');
-        record.prepares.push(info.url);
-        record.preparedUrl = info.url;
-        record.preparedId = info.id ?? '';
-        await wait(ROUND_TRIP_MS);
-        // v1.9.2: the answer is whether the player took the track — the queue records a prepared
-        // track only on `true`.
-        return true;
-      },
-      async adopt() {
-        const url = record.preparedUrl;
-        record.preparedUrl = null;
-        if (!url) return false;
-        record.calls.push('adopt');
-        // The real bridge plays the prepared asset here (`NativeAudio.play` on its own asset id),
-        // which is why adopting is a start and not a load.
-        record.calls.push('play@0');
-        record.adopts += 1;
-        record.truth = { ...record.truth, playing: true, positionMs: 0 };
-        // v1.9.22 — the adopted item is the one the player is holding (see `load`).
-        handItem(url, record.preparedId);
-        await wait(5);
-        // The adopted item is playing now, and it says so: the same report a load's play produces.
-        record.events?.onPosition(0);
-        return true;
-      },
-      async discard() {
-        record.calls.push('discard');
-        record.preparedUrl = null;
-      },
-      positionMs: () => record.truth.positionMs,
-      async sync() {
-        record.calls.push('sync');
-        await wait(ROUND_TRIP_MS);
-        if (record.silentSync) return null;
-        return { ...record.truth };
-      },
-      async activateSession() {
-        record.calls.push('activateSession');
-        await wait(ROUND_TRIP_MS);
-        return true;
-      },
-      listenRemoteCommands() {
-        return () => undefined;
-      },
-      hasNativeSpectrum: record.hasSpectrum,
-      async startSpectrum(url: string, positionMs: number) {
-        record.calls.push(`startSpectrum@${Math.round(positionMs)}`);
-        record.spectrum.startCalls += 1;
-        if (!record.spectrum.plugin) {
-          if (record.spectrum.startedUrl !== url) {
-            record.spectrum.installs += 1;
-            // v1.9.25 — a new install is a new analysis: the item's own frame count starts at zero.
-            beginAnalysis();
-          }
-          record.spectrum.started = true;
-          record.spectrum.startedUrl = url;
-          record.spectrum.startedAtMs = positionMs;
-          record.spectrum.playing = true;
-          return true;
-        }
-        /*
-         * The plugin's own install (v1.9.22), in the three steps `NaviliteSpectrum.install` takes:
-         * the item is read *now*, the wait for that item's audio track happens, and the attach lands
-         * on the item that was read — **even when the player is on another one by then.**
-         *
-         * The generation guard the plugin does have is checked at the top of each retry step, before
-         * the read; nothing re-checks it after the `await`, so a request whose wait outlasts the
-         * track change attaches anyway and its `detach()` takes the mix off the item that is
-         * playing. That window is `slowLandUrls`: a request for a stream being replaced, waiting
-         * long enough for the next track's install to have landed first.
-         */
-        const read = record.playingUrl;
-        const slow = read !== null && (record.spectrum.slowLandUrls ?? []).includes(read);
-        await wait(slow ? record.spectrum.installMs ?? 200 : 5);
-        record.spectrum.started = true;
-        record.spectrum.startedUrl = url;
-        record.spectrum.startedAtMs = positionMs;
-        record.spectrum.playing = true;
-        // The plugin's own rule: a request for the item the tap is already on is a *verify*, and
-        // anything else is an install (this is `carriesOurTap`, with the item standing in for the URL).
-        if (record.spectrum.tappedUrl !== read) {
-          record.spectrum.installs += 1;
-          // v1.9.25 — and the analysis of the item this install lands on is new: its own count is zero.
-          beginAnalysis();
-        }
-        record.spectrum.tappedUrl = read;
-        record.spectrum.itemIsCurrent = read !== null && read === record.playingUrl;
-        return true;
-      },
-      async stopSpectrum() {
-        record.spectrum.stopCalls += 1;
-        record.spectrum.started = false;
-      },
-      /*
-       * v1.9.25 — which slot the plugin says the tap is on, and which slot this bridge is playing:
-       * the two names the reason line carries (`NativeBridge.spectrumEvidence`). Not a decision.
-       */
-      spectrumEvidence() {
-        return { tapped: record.spectrum.tappedUrl ?? null, audible: record.playingUrl };
-      },
-      /** The old per-read door onto the tap, answered by the one model of it (`readFrame`). */
-      async spectrumFrame() {
-        return readFrame();
-      },
-      /**
-       * **The one read (unreleased)** — `NaviliteRemote.snapshot()`'s own shape, built from the state
-       * this fake already keeps.
-       *
-       * One answer carries the entry, the clock, the transport's word and that item's own frame, all
-       * dated to the same item: `entry.key` and `spectrum.itemKey` are minted per item, so a frame
-       * from a tap that is still holding the outgoing item's register is dated to *that* item and the
-       * web layer withholds it rather than drawing the previous song under this one's row.
-       *
-       * The position is the player's own `currentTime()` and it **advances while the track plays**:
-       * the engine re-anchors its clock on every 33 ms read, so a static answer would freeze the row.
-       */
-      async snapshot() {
-        record.calls.push('snapshot');
-        // A player that will not answer answers nothing: the read fails, and the return writes no
-        // state from a reading nobody made. Named, not `null` — design §5's `unavailable`.
-        if (record.silentSync) return { unavailable: 'no_answer' as const };
-        const frame = await readFrame();
-        const url = record.playingUrl ?? '';
-        const key = url === '' ? '' : `item:${url}`;
-        /*
-         * v1.9.25 — the register that is not this item's measurement. `staleRegisterUrls` hands over
-         * the outgoing item's last frame, and the key on the answer is the outgoing item's: the frame
-         * is real, and it belongs to a different item.
-         */
-        const stale = url !== '' && (record.spectrum.staleRegisterUrls ?? []).includes(url);
-        const itemKey = stale ? `item:${record.previousUrl ?? 'the-item-before'}` : key;
-        const frames = stale ? Math.max(1, frame.itemFrames) : frame.itemFrames;
-        return {
-          generation: 0,
-          entry: { songId: record.playingId, index: 0, url, assetId: 'slot-0', key },
-          positionMs: currentTimeMs(),
-          durationMs: record.truth.durationMs,
-          rate: record.truth.playing ? 1 : 0,
-          state: record.truth.playing ? 'playing' : 'paused',
-          queue: { index: 0, count: 1, repeat: 'off' },
-          spectrum: {
-            // A build with no tap (Android here) publishes no tap state: nothing is attached.
-            bands: record.hasSpectrum ? frame.bands : [],
-            itemKey,
-            frames: record.hasSpectrum ? frames : 0,
-            lastAnalysisAt: frame.itemFrameAgeMs >= 0 ? Date.now() - frame.itemFrameAgeMs : 0,
-            framePeriodMs: frame.itemFramePeriodMs,
-            attached: record.hasSpectrum ? frame.attached : false,
-          },
         };
       },
     };
@@ -888,7 +762,6 @@ function recording(overrides: Partial<Recording> = {}): Recording {
     hasSpectrum: true,
     adopts: 0,
     preparedUrl: null,
-    preparedId: '',
     seekNeverSettles: false,
     deferPosition: false,
     events: null,
@@ -897,8 +770,6 @@ function recording(overrides: Partial<Recording> = {}): Recording {
     silentSync: false,
     frameValue: 128,
     playingUrl: null,
-    playingId: '',
-    previousUrl: null,
     spectrum: {
       started: false,
       startedUrl: null,
@@ -1029,14 +900,7 @@ test('the clock advances only while the engine is playing and the app is on scre
       atHide,
       `backgrounded: the clock stood still (${Math.round(atHide)} ms at the moment of hiding, ${Math.round(afterHide)} ms after 400 more ms of real time)`,
     );
-    /*
-     * The anchor is the last read and the count since it is wall clock, so the honest bound is the one
-     * the playing assertion above already uses (300 ms of real time), not one 33 ms poll.
-     */
-    assert.ok(
-      Math.abs(atHide - 12_500) <= 300,
-      `and what it shows is the player's own clock at the last read, not a guess (${Math.round(atHide)} ms against 12500 — wall clock since that read)`,
-    );
+    assert.equal(atHide, 12_500, 'and what it shows is the last position the player actually reported, not a guess');
 
     // Invariant 1, second half — **nothing is playing at all**. A pause freezes it exactly.
     record.truth = { playing: true, positionMs: 12_500, durationMs: 180_000 };
@@ -1098,21 +962,11 @@ test('the spectrum is fed by the engine that is playing: real, varying, proporti
     assert.ok(framesSeen.size >= 4, `consecutive frames must differ (${framesSeen.size} distinct frames of 6 reads)`);
     say(`invariant 5 — ${framesSeen.size} distinct frames over 6 reads, ${record.spectrum.frames} frames from the tap`);
 
-    /*
-     * Silence reads as silence, and it is **this item's own frame** (unreleased). The snapshot has
-     * no verdict about a quiet passage: the tap is measuring this item and every band is zero, which
-     * is a flat picture of what is being heard. The comparator that turned that into \"the spectrum
-     * cannot run on this item\" was deleted with the second reading, and drawing zeros is the
-     * truthful render — the chip keeps the spectrum's own word because the tap has answered.
-     */
+    // Silence reads as silence, and is reported as such rather than drawn.
     record.spectrum.bands = new Array(64).fill(0);
     await settle(500);
-    const silentFrame = engine.readSpectrum();
-    assert.ok(
-      silentFrame !== null && Array.from(silentFrame).every((value) => value === 0),
-      `a silent item is its own frame: 64 zeros, drawn as the silence it is (modeReason: ${engine.status().modeReason})`,
-    );
-    assert.equal(engine.status().spectrum, true, 'and the chip keeps the spectrum\'s word: the tap is measuring this item, quietly');
+    assert.equal(engine.status().spectrum, false, `a tap reading digital silence is not a live spectrum (modeReason: ${engine.status().modeReason})`);
+    assert.equal(engine.readSpectrum(), null, 'and nothing is handed to the canvas');
 
     // The invariant that outlives all of it: while the engine is playing, the feed is on.
     record.spectrum.bands = Array.from({ length: 64 }, (_, index) => 40 + ((index * 37) % 120));
@@ -1210,10 +1064,10 @@ test('background → foreground continues with no restart and no repeat, and a r
       `returning writes nothing at all to the player — calls: ${record.calls.join(', ')}`,
     );
     assert.ok(
-      record.calls.some((call) => call === 'snapshot'),
-      `and reads the one player on the way back in — the same item, whose tap never stopped — calls: ${record.calls.join(', ')}`,
+      record.calls.some((call) => call.startsWith('startSpectrum@')),
+      `and re-arms the visualiser, which cannot have been fed while the web view was suspended — calls: ${record.calls.join(', ')}`,
     );
-    assert.equal(record.spectrum.started, true, 'and the tap is still on the item it was on');
+    assert.equal(record.spectrum.started, true, 'and the visualiser is armed again on the way back in');
 
     /*
      * Invariant 3 — the owner paused it from the lock screen while the app was away, then came
@@ -1361,33 +1215,13 @@ test('a player that will not answer never leaves a "playing" no tap can act on',
     await engine.play(TRACK);
     await settle(60);
     await engine.handleVisibility(true);
-    const beforeReturn = engine.status().positionMs;
-    record.calls = [];
     await engine.handleVisibility(false);
-    /*
-     * **A read that never came is not a reading (unreleased).** The return asks the one player and
-     * gets nothing; nothing is written from it, so the row keeps the transport it already had rather
-     * than being re-stated from an answer nobody gave — and the clock is not invented across it.
-     */
-    /*
-     * Design §5 (S4, `noteSnapshotUnavailable`): a read that never came is not a reading and it is
-     * not silence — the refusal is a named state, and a `playing` machine may not sit over it. The
-     * row goes to `error` naming the step that refused.
-     */
-    const blind = engine.status();
-    assert.equal(blind.state, 'error', 'a read that never came does not leave a "playing" no tap can act on');
-    assert.match(blind.modeReason, /would not answer the one snapshot \(no_answer\)/, 'the reason names the step that refused');
-    assert.ok(
-      Math.abs(blind.positionMs - beforeReturn) < 400,
-      `and the clock is not invented from a read that never came (${Math.round(blind.positionMs)} ms against ${Math.round(beforeReturn)} at the hide)`,
-    );
+    assert.equal(engine.status().state, 'interrupted', 'an unreadable player is not reported as playing');
     // The one tap still fixes it, and it is the tap that sends the command.
     record.silentSync = false;
     record.truth = { playing: true, positionMs: 12_000, durationMs: 180_000 };
-    record.calls = [];
     await engine.toggle();
     assert.equal(engine.status().state, 'playing');
-    assert.ok(record.calls.includes('resume'), `and the tap is what sends the command — calls: ${record.calls.join(', ')}`);
   } finally {
     fakes.restore();
     await stopAll(engines);
@@ -1901,8 +1735,8 @@ test('the tap is installed once and outlives a pause and a trip to the backgroun
     assert.equal(record.spectrum.stopCalls, 0, `the resume detaches nothing — calls: ${record.calls.join(', ')}`);
     assert.equal(record.spectrum.installs, 1, 'the resume confirms the tap rather than building a second one');
     assert.ok(
-      record.calls.includes('snapshot'),
-      `and the confirmation is a read of the one snapshot, not a second install — calls: ${record.calls.join(', ')}`,
+      record.calls.some((call) => call.startsWith('startSpectrum@')),
+      `and the confirmation is what it sends — calls: ${record.calls.join(', ')}`,
     );
     assert.ok(backAfterPause !== null, 'the spectrum is live again inside 200 ms of the press');
     const afterPauseFrame = engine.readSpectrum();
@@ -1927,13 +1761,9 @@ test('the tap is installed once and outlives a pause and a trip to the backgroun
       1,
       `returning verifies the tap it already has, and never installs another — calls: ${record.calls.join(', ')}`,
     );
-    /*
-     * Unreleased — there is no verify request to count: the tap was installed by `makeItem` when the
-     * item was built, and a return reads the one snapshot rather than re-attaching anything.
-     */
     assert.ok(
-      record.calls.includes('snapshot'),
-      `and the return reads the one snapshot rather than re-attaching anything — calls: ${record.calls.join(', ')}`,
+      record.spectrum.startCalls > 1,
+      `and the verify is a request it does send — calls: ${record.calls.join(', ')}`,
     );
     assert.ok(backAfterBackground !== null, 'the spectrum is live again inside 200 ms of the return');
     const afterBackgroundFrame = engine.readSpectrum();
@@ -2003,8 +1833,8 @@ test('a change of track taps the new item, and the old item is never drawn', asy
       `the tap went onto the item the load put in place — calls: ${record.calls.join(', ')}`,
     );
     assert.ok(
-      record.calls.includes('snapshot'),
-      'and the new item is read from the one snapshot as part of the load, not from the transport transition',
+      record.calls.some((call) => call.startsWith('startSpectrum@')),
+      'and the install was asked for as part of the load, not from the transport transition',
     );
     assert.equal(engine.status().spectrum, true, 'the new song is fed from the start');
 
@@ -2012,24 +1842,16 @@ test('a change of track taps the new item, and the old item is never drawn', asy
     const startCallsBeforeOrphan = record.spectrum.startCalls;
     record.spectrum.itemIsCurrent = false;
     await settle(80);
-    /*
-     * Unreleased — with one snapshot there is no separate register to drain: the engine draws only a
-     * frame whose `itemKey` is the entry's own (`engine.ts:882`), so the claim is not "the register is
-     * empty" but "nothing drawn is the outgoing item's". The new item's tap may already have answered.
-     */
-    assert.ok(
-      engine.readSpectrum() === null || engine.status().tap.itemKey === engine.status().tap.entryKey,
-      'the previous song’s last frame is not a measurement of this one — anything drawn is dated to the new item',
+    assert.equal(
+      engine.readSpectrum(),
+      null,
+      'the previous song’s last frame is not a measurement of this one, so nothing is drawn from it',
     );
     // The re-attach is rate-limited to one a second (SPECTRUM_ORPHAN_RECHECK_MS), so the check waits
     // past that window before it insists the plugin was asked again.
     await settle(1_000);
     const reAttached = await until(() => record.spectrum.startCalls > startCallsBeforeOrphan, 400);
-    /*
-     * Unreleased — `SPECTRUM_ORPHAN_RECHECK_MS` is gone with the per-frame read path: an item's tap is
-     * installed once, by `makeItem`, and nothing re-attaches or re-checks it. The wait above is kept
-     * only so the assertions below still look at a settled engine.
-     */
+    assert.ok(reAttached !== null, 'a tap on the item the player has left is re-attached, on its own');
     record.spectrum.itemIsCurrent = true;
     const backAfterSwap = await until(() => engine.status().spectrum === true, 250);
     assert.ok(backAfterSwap !== null, 'and the bars are live again inside 250 ms of the new item');
@@ -2122,24 +1944,13 @@ test('a track that reaches its end starts the next one in the queue', async () =
      * song-2 was playing, the track *behind* it was warmed too, so a step back costs what a step
      * forward costs. Both warms are asserted here, in the order they happened.
      */
-    /*
-     * **Unreleased — the warm pool is gone** (t_f81b8998 deleted `warm-pool.ts`, t_605285fc the
-     * queue's look-ahead): there is no neighbour to warm and no prepared asset to adopt, so the
-     * advance is the player's own queue stepping to an entry it already holds. The load count below is
-     * the claim that survives — nothing is fetched at the boundary.
-     */
-    assert.deepEqual(record.prepares, [], 'nothing is warmed ahead of the track — the player holds the queue, not a pool');
-    // The pool this counted is gone (t_f81b8998/t_605285fc), so there is nothing to adopt: the
-    // advance is the player's own queue stepping, and `record.loads.length === 0` below is the claim.
-    /*
-     * Unreleased — the pool that made this an adoption is gone: the one player is given the next
-     * entry of its own queue and starts it, which is what `play@0` in `calls` is. The claim that
-     * survives is the one the owner sees: the next track is playing and the row is on it.
-     */
-    assert.ok(
-      plays.length > 0,
-      `the boundary starts the next entry rather than adopting a prepared asset — calls: ${record.calls.join(', ')}`,
+    assert.deepEqual(
+      record.prepares,
+      [TRACK_URL('song-2'), TRACK_URL('song-1')],
+      'the next track was warmed during song-1, and the one behind it once song-2 was playing',
     );
+    assert.equal(record.adopts, 1, 'and the boundary adopted the prepared asset rather than loading one');
+    assert.equal(record.loads.length, 0, `nothing was fetched at the boundary — calls: ${record.calls.join(', ')}`);
     assert.ok(plays.length > 0, `audio for it started — calls: ${record.calls.join(', ')}`);
     assert.equal(engine.status().state, 'playing', 'and the machine is playing, not stuck on the end of the last one');
   } finally {
@@ -2198,15 +2009,40 @@ test('the chip is never told "native audio" while the tap is being installed on 
   }
 });
 
-/*
- * Deleted (unreleased): `a tap that answers with silence ends the arming window, once, with the
- * sentence that names it`. Its subject was the `ZERO_POLLS_BEFORE_THEME` verdict — a deadline on the
- * frame counter that ended the arming window with a `digital silence` sentence. With one snapshot
- * there is no verdict to reach: `frames` is the *item's own* count, the tap publishes its key with 64
- * zeros until its analysis measures, and the window ends on that first dated frame (`engine.ts:882`),
- * silent audio included. Its survivors are asserted by 'the chip is never told "native audio" while
- * the tap is being installed on a track that is playing' above.
+/**
+ * v1.9.6 — **a tap that answers with silence is not left "still installing" for ever.**
+ *
+ * The verdict at {@link ZERO_POLLS_BEFORE_THEME} used to require `spectrumLive`, so a tap that *never*
+ * fed the bars — frames arriving, every band zero, a digitally silent stream — was never judged at all:
+ * nothing on the reason line, and a chip with two words for three states. It is judged now, once, and
+ * the counter that decides it is per item: a verdict written for the track that just ended must not
+ * decide the next one's first poll (which is how the chip could have said "native audio" at a boundary
+ * it was told to stay quiet through).
  */
+test('a tap that answers with silence ends the arming window, once, with the sentence that names it', async () => {
+  const fakes = installFakes();
+  const engines: AudioEngine[] = [];
+  try {
+    const record = recording();
+    // Frames arrive — so the tap has answered — and every band reads zero: the audio is silent.
+    record.spectrum.bands = record.spectrum.bands.map(() => 0);
+    const engine = nativeEngine(record);
+    engines.push(engine);
+    await engine.play(TRACK);
+    await settle(120);
+    assert.equal(engine.status().spectrumArming, true, 'nothing has been measured for this item yet');
+
+    await settle(600);
+    const status = engine.status();
+    say(`silent frames: spectrum ${status.spectrum}, arming ${status.spectrumArming} — ${status.modeReason}`);
+    assert.equal(status.spectrum, false, 'a tap reading silence feeds no bars');
+    assert.equal(status.spectrumArming, false, 'and the engine has answered, so the chip stops saying the spectrum is coming');
+    assert.match(status.modeReason, /digital silence/, 'with the sentence that names the case');
+  } finally {
+    fakes.restore();
+    await stopAll(engines);
+  }
+});
 
 /** A second downloaded track, so a *change* between two local files can be driven. */
 const LOCAL_TRACK_2: TrackRequest = {
@@ -2471,27 +2307,19 @@ test('a skip out of a loud passage never draws, or spends the chip, on a frame t
       );
     }
     assert.ok(staleReads >= 20, `the window was watched while playing (${staleReads} reads)`);
-    /*
-     * Unreleased — with one snapshot there is no stale-register verdict to write: the reason line
-     * stays the playing sentence, and the claim that matters is that no false verdict (silence, a
-     * frozen frame) was reached on a frame this item did not produce.
-     */
-    assert.doesNotMatch(
-      staleReason,
-      /digital silence|same frame/,
-      `and no verdict is spent on a frame this item did not produce (${staleReason})`,
-    );
+    assert.match(staleReason, /not produced by this item/, 'and the reason line names the state it is in');
     say(`2. the skip with no silence in it — ${staleReads} reads, never a frame drawn: ${staleReason}`);
-    const framesAtTheSkip = engine.status().tap.framesForItem;
+    const installsAtTheSkip = record.spectrum.installs;
 
     /* ---- 3. this item's own frames: what brings the bars up, with no new track and no re-attach ---- */
     record.spectrum.staleRegisterUrls = [];
     const live = await until(() => engine.status().spectrum === true, 500);
     assert.ok(live !== null, 'this item’s own first frame is what makes the bars live');
     const tap = engine.status().tap;
-    assert.equal(tap.itemKey, tap.entryKey, 'the frame is dated to the entry the row is rendering');
-    assert.ok(tap.framesForItem > 0, 'with this item’s own frames counted — what the reason line prints');
-    say(`3. this item's own frames: live ${live} ms later — ${tap.framesForItem} frames/item, item ${tap.itemKey} = row ${tap.entryKey}, ${framesAtTheSkip} at the skip`);
+    assert.ok(tap.installs !== null && tap.installs >= 2, `the tap has been installed for this track (${tap.installs})`);
+    assert.equal(tap.tapped, tap.audible, 'and the plugin says the tap is on the slot this bridge is playing');
+    assert.ok(tap.framesForItem > 0, 'with this item’s own frames counted — what the reason line now prints');
+    say(`3. this item's own frames: live ${live} ms later — installs ${tap.installs}/verifies ${tap.verifies}, tapped ${tap.tapped} (audible ${tap.audible}), ${tap.framesForItem} frames/item`);
 
     /* ---- 4. the teardown that lands *after* this item measured: the tap stops, and what it holds is
        flat — the whole-track state he reported, not a window. The last frame it produced *is* this
@@ -2544,24 +2372,17 @@ test('a skip out of a loud passage never draws, or spends the chip, on a frame t
     record.spectrum.framesQuietUrls = [];
     const back = await until(() => engine.status().spectrum === true, 500);
     assert.ok(back !== null, 'the same item’s frames bring the bars back');
-    const backTap = engine.status().tap;
-    /*
-     * The frame that brings them back is the tap's *next* one for this item — the counter stood still
-     * for the whole of step 4 (`measuredBefore`, asserted there) and moves again only when this item's
-     * own tap produces — so nothing was rebuilt on a poll in between, and the frame is dated to the
-     * item the row is rendering.
-     */
-    assert.ok(
-      backTap.framesForItem > measuredBefore,
-      `with this item's own next frame: ${measuredBefore} when the tap stopped, ${backTap.framesForItem} now`,
+    assert.equal(
+      record.spectrum.installs,
+      installsAtTheSkip,
+      'with nothing installed for it in between — the repair is the tap’s own, not a rebuild on a poll',
     );
-    assert.equal(backTap.itemKey, backTap.entryKey, 'dated to the item the row renders — not a register rebuilt by the engine');
-    say(`5. the same item's frames again: live ${back} ms later, ${backTap.framesForItem} frames for the item`);
+    say(`5. the same item's frames again: live ${back} ms later, installs still ${record.spectrum.installs}`);
 
     /* ---- 6. the boundary the native player takes by itself, entered the way the queue enters it ---- */
     record.spectrum.staleRegisterUrls = [LOCAL_TRACK_3.url];
     record.playingUrl = LOCAL_TRACK_3.url;
-    engine.nativeMovedTo(LOCAL_TRACK_3);
+    engine.adoptNativeAdvance(LOCAL_TRACK_3);
     await settle(120);
     const adopted = engine.status();
     assert.equal(adopted.state, 'playing', 'the adopted track is the one playing');
@@ -2666,7 +2487,7 @@ test('a healthy tap polled faster than it produces keeps the bars live and the c
       assert.notEqual(
         frame,
         null,
-        `read ${reads}: this item's tap has produced ${record.spectrum.itemFrames} frames for it and its last frame is dated ${status.tap.lastAnalysisAt ?? 'not published'} against a declared period of ${status.tap.framePeriodMs ?? 'not published'} ms — a tap between its own frames is not a reason to blank the bars, and that is the whole of the SEND BACK (${status.modeReason})`,
+        `read ${reads}: this item's tap has produced ${record.spectrum.itemFrames} frames for it and its register is ${status.tap.frameAgeMs ?? 'not published'} ms old against a declared period of ${status.tap.framePeriodMs ?? 'not published'} ms — a tap between its own frames is not a reason to blank the bars, and that is the whole of the SEND BACK (${status.modeReason})`,
       );
       assert.equal(
         status.spectrum,
@@ -2708,7 +2529,7 @@ test('a healthy tap polled faster than it produces keeps the bars live and the c
     /* ---- 2. the same cadence through the other entry point a transition has: the boundary's
        adoption, which resets the per-item state without passing through `startNative` ---- */
     record.playingUrl = LOCAL_TRACK_3.url;
-    engine.nativeMovedTo(LOCAL_TRACK_3);
+    engine.adoptNativeAdvance(LOCAL_TRACK_3);
     const adoptedAt = await until(() => engine.status().spectrum === true, 600);
     assert.ok(adoptedAt !== null, 'the adopted item’s own frames are what the bars are');
 
@@ -3110,7 +2931,7 @@ test('the web path wears the spectrum’s own word until its analyser has answer
  * `t_71dc787e` closed the web path's window (a browser's first frames arrive a moment after the
  * element plays, and the chip spent the amber `theme` for them). The native path has the same window
  * at the one transition no writer arms: **a resume.** `spectrumArming` is only ever set by a start
- * (`startNative`), an adoption (`nativeMovedTo`) and the polls that find the tap producing
+ * (`startNative`), an adoption (`adoptNativeAdvance`) and the polls that find the tap producing
  * nothing or sitting on another item; a resume is none of those, and `disarmConsumers` (the pause)
  * clears `spectrumLive` — so the instant the resume returns the transport to `playing`, the chip's
  * licence line (`state === 'playing'` and nothing being fed) paints **`native audio`** on an item
@@ -3189,7 +3010,6 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     await engine.play(TRACK);
     await settle(300);
     const a1 = engine.status();
-    console.log('     DEBUG a1:', record.calls.length, 'calls; last:', record.calls.slice(-4).join(','), 'snap', engine.currentSnapshot() ? JSON.stringify(engine.currentSnapshot()?.spectrum) : 'null');
     say(`probe A1 native playing: "${chipWord(a1)}" (spectrum ${a1.spectrum}, arming ${a1.spectrumArming})`);
     assert.equal(chipWord(a1), 'spectrum', 'the tap answered for this item and the bars are the measurement');
 
@@ -3268,13 +3088,6 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     await engine.pause();
     await settle(150);
     await engine.handleVisibility(true);
-    /*
-     * The player the app comes back to is a playing one, and that is what the one read says: he
-     * paused it in the app, the lock screen's own play started it again while the web layer was
-     * suspended, and the snapshot reports the player it finds rather than the transport the app
-     * last sent.
-     */
-    record.truth = { ...record.truth, playing: true };
     await engine.handleVisibility(false);
     watchFrom = Date.now();
     seen = [];
@@ -3288,17 +3101,7 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
       'spectrum',
       'the same window, through the other door: the tap has not answered for this item since the transport came back',
     );
-    /*
-     * Unreleased — the same window through the other door, stated as the invariant rather than as a
-     * fixed word: the chip wears the arming tone until this item's own frame has answered, and the
-     * spectrum's word from that frame on. (The item is unchanged here, so a tap that is still feeding
-     * its frames closes the window on the return's first read.)
-     */
-    assert.equal(
-      returned.visualiser.tone,
-      returned.spectrum ? 'live' : 'arming',
-      `the tone is the tap's own answer, whatever the door (spectrum ${returned.spectrum})`,
-    );
+    assert.equal(returned.visualiser.tone, 'arming', 'and it wears the arming tone, as the resume does');
     const backgroundHealed = await until(() => engine.status().spectrum === true, 500);
     assert.ok(backgroundHealed !== null, 'and it ends on the tap’s own frame here too');
     assert.equal(
@@ -3312,10 +3115,8 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     /*
      * The behaviour that must not regress (acceptance 2): this item's tap has given its own answer —
      * twelve polls of frames from a tap on it, every band zero — and that answer is about **the
-     * item**, so a pause and a resume may not take the bars away from it. Unreleased: with one
-     * snapshot there is no `digital silence` verdict to spend (design §3 deletes the silence
-     * comparators — a quiet passage is not evidence of absence), so the tap's own zeros *are* this
-     * item's frame: drawn flat, with the spectrum's word from that frame on, through the transition.
+     * item**, so a pause and a resume may not re-open the window over it. The card's whole reason for
+     * a third fact rather than `spectrumArming = true` in `startConsumers`.
      */
     const silentRecord = recording();
     silentRecord.spectrum.bands = silentRecord.spectrum.bands.map(() => 0);
@@ -3327,12 +3128,7 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     say(
       `3. a tap reading digital silence: spectrum ${silenced.spectrum}, arming ${silenced.spectrumArming} — the chip reads "${chipWord(silenced)}" (${silenced.modeReason})`,
     );
-    assert.equal(silenced.spectrum, true, 'the item’s own frames are its measurement, silent or not');
-    assert.ok(
-      (silent.readSpectrum() ?? []).every((value) => value === 0),
-      'drawn flat: the zeros are this item’s own frame, and a quiet passage is not absence',
-    );
-    assert.equal(chipWord(silenced), 'spectrum', 'so the word is the measurement’s, not a capability claim about the item');
+    assert.equal(chipWord(silenced), 'native audio', 'the tap has answered for this item: the spectrum cannot run on it');
     let silentSeen: Reading[] = [];
     watchFrom = Date.now();
     const unsubscribeSilent = silent.subscribe((status) => {
@@ -3354,58 +3150,59 @@ test('a native resume wears the spectrum’s own word, and a tap’s own verdict
     assert.equal(silentResumed.state, 'playing', 'it resumed');
     assert.equal(
       chipWord(silentResumed),
-      'spectrum',
-      'and the item wears the spectrum’s word again — a resume is not evidence about the samples',
+      'native audio',
+      'the verdict is about the item, not about the moment — a resume is not evidence about the samples',
     );
     assert.equal(
-      silentSeen.filter((reading) => reading.state === 'playing' && (reading.word === 'native audio' || reading.word === 'theme')).length,
+      silentSeen.filter((reading) => reading.state === 'playing' && reading.word !== 'native audio').length,
       0,
-      'no capability word was spent on the way back, over an item whose tap has answered',
+      'and the resume never re-opened the window over that verdict: no arming tone on an item the tap has ruled out',
     );
     unsubscribeSilent();
 
-    /* ============ 4. and a tap returning one frozen frame keeps it too ============ */
-    /*
-     * Unreleased — the frozen-frame comparator is the web path's now. Design §3 deletes the native
-     * `identicalNativeFrames`/`lastNativeChecksum` pair (there is no such rule left in
-     * `src/player/engine.ts` outside the web `sample()`), so on this path a tap returning the same
-     * frame on every read is a tap *producing* for this item: its counter moves and its frame is
-     * fresh against its own declared period, so the bars are that frame. What this card still
-     * requires is the word through the transition — a resume may not spend a capability claim over
-     * an item the tap has been answering for all along.
-     */
+    /* ============ 4. and a tap that answered with one frozen frame keeps it too ============ */
     const frozenRecord = recording();
     frozenRecord.spectrum.frozenUrls = [TRACK.url];
     const frozen = nativeEngine(frozenRecord);
     engines.push(frozen);
     await frozen.play(TRACK);
-    await settle(700);
+    const frozeAt = await until(() => /same frame/.test(frozen.status().modeReason), 1500);
+    assert.ok(frozeAt !== null, 'the frozen-frame rule is reachable on this harness and this item reached it');
     const frozenVerdict = frozen.status();
     say(
       `4. a tap returning one frozen frame: spectrum ${frozenVerdict.spectrum}, arming ${frozenVerdict.spectrumArming} — the chip reads "${chipWord(frozenVerdict)}" (${frozenVerdict.modeReason})`,
     );
-    assert.equal(frozenVerdict.spectrum, true, 'the tap keeps producing for this item — the frame is fresh against its own period');
-    assert.equal(chipWord(frozenVerdict), 'spectrum', 'so the word is the spectrum’s, not a capability claim about a tap that is answering');
-    let frozenSeen: Reading[] = [];
-    watchFrom = Date.now();
-    const unsubscribeFrozen = frozen.subscribe((status) => {
-      frozenSeen.push({ at: Date.now() - watchFrom, state: status.state, spectrum: status.spectrum, arming: status.spectrumArming, word: chipWord(status), tone: status.visualiser.tone });
-    });
+    assert.equal(chipWord(frozenVerdict), 'native audio', 'the tap’s own frozen-frame verdict is the capability word');
     await frozen.pause();
     await settle(150);
     assert.equal(chipWord(frozen.status()), 'paused', 'paused, as everywhere');
-    frozenSeen = [];
+    /*
+     * Read *before* the await, which is the instant the transport flips (the same reading as A3): the
+     * verdict is in hand, so the word is the verdict's — an arming tone here would be the engine saying
+     * *the spectrum is coming* over an item its own tap has ruled out.
+     */
     const frozenResuming = frozen.resume();
     const frozenAtTheInstant = frozen.status();
     say(`   at the resume: spectrum ${frozenAtTheInstant.spectrum}, arming ${frozenAtTheInstant.spectrumArming} — the chip reads "${chipWord(frozenAtTheInstant)}"`);
-    await frozenResuming;
-    await settle(200);
     assert.equal(
-      frozenSeen.filter((reading) => reading.state === 'playing' && (reading.word === 'native audio' || reading.word === 'theme')).length,
-      0,
-      'and the resume spends no capability word over the item the tap has been answering for',
+      chipWord(frozenAtTheInstant),
+      'native audio',
+      'the frozen verdict is about the item too — a resume does not re-open the window over it',
     );
-    unsubscribeFrozen();
+    await frozenResuming;
+    /*
+     * And then the tap's register starts moving again (the resumed poll re-opens the per-item register
+     * `startConsumers` keeps, so the frozen run is counted from the resume), which the engine admits
+     * until its own `FROZEN_FRAMES_BEFORE_THEME` run is complete — ~0.4 s — and then the verdict is
+     * reached again on the tap's own evidence, still without a clock. Named here rather than asserted
+     * away: it is the frozen rule's own latency, restarted by a transition, and it is *not* what this
+     * card changes (the bars are drawn from frames this item's tap really produced).
+     */
+    const refrozen = await until(() => /same frame/.test(frozen.status().modeReason), 1500);
+    assert.ok(refrozen !== null, 'the frozen tap’s verdict is reached again on its own evidence after the resume');
+    const frozenAgain = frozen.status();
+    say(`   and ${refrozen} ms after the resume the tap’s own verdict is back: "${chipWord(frozenAgain)}" (${frozenAgain.modeReason})`);
+    assert.equal(chipWord(frozenAgain), 'native audio', 'a frozen tap is still the capability word, and still by its own evidence');
 
     unsubscribe();
   } finally {
@@ -3663,5 +3460,4 @@ test('a browser that reads the container exactly keeps its own number — the ga
     await stopAll(engines);
   }
 });
-
 

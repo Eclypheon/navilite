@@ -45,13 +45,8 @@ export async function paletteFromArtwork(url: string | null): Promise<Palette> {
     image.close();
     const { data } = ctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
     return paletteFromPixels(data) ?? DEFAULT_PALETTE;
-  } catch (cause) {
-    /*
-     * No art, no CORS, or no `createImageBitmap`: the palette falls back to its defaults and says so
-     * (`Palette.labelled`), which is the rendered state this absence already has. Bound rather than
-     * dropped (design §5).
-     */
-    void cause;
+  } catch {
+    // No art, no CORS, or no createImageBitmap. Defaults, labelled as such.
     return DEFAULT_PALETTE;
   }
 }

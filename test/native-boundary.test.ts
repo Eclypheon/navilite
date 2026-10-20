@@ -25,6 +25,9 @@
  * fake library: no DOM, no network, no phone.
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { AudioEngine } from '../src/player/engine.ts';
@@ -87,12 +90,16 @@ interface Boundary {
   stated: Stated[];
   /** The track the native player moved to by itself, as the app was told. */
   advanced: string[];
+  /** Slots the bridge asked the plugin to make warm, and what the plugin answered. */
+  warmed: string[];
   /** Every `load` the bridge was asked for — a boundary must not produce one. */
   loads: string[];
   plays: string[];
   /** What the app asked the player to do when it retried a start that produced no sound. */
   retries: number;
   events: NativeBridgeEvents | null;
+  /** False models a slot whose item exists and holds nothing (the defect this release fixes). */
+  warmHoldsBytes: boolean;
 }
 
 /**
@@ -103,6 +110,9 @@ function fakeBridge(record: Boundary): (os: string, events: NativeBridgeEvents) 
   return async (_os: string, events: NativeBridgeEvents) => {
     record.events = events;
     const wait = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 5));
+    /** The slots the bridge believes hold warm tracks: `songId -> slot`. */
+    const slots = new Map<string, string>();
+    let nextSlot = 1;
     return {
       async load(info: NativeTrackInfo) {
         record.loads.push(info.url);
@@ -118,14 +128,34 @@ function fakeBridge(record: Boundary): (os: string, events: NativeBridgeEvents) 
          */
         setTimeout(() => events.onPosition(Math.max(0, seconds)), 5);
       },
+      async prepare(info: NativeTrackInfo) {
+        const slot = `navilite-slot-${nextSlot++}`;
+        slots.set(info.id ?? info.url, slot);
+        record.warmed.push(slot);
+        await wait();
+        // The plugin's own answer: whether the slot holds the media it was asked for.
+        return record.warmHoldsBytes;
+      },
+      async adopt(songId?: string) {
+        if (typeof songId !== 'string') return false;
+        const slot = slots.get(songId);
+        if (slot === undefined) return false;
+        slots.delete(songId);
+        record.plays.push('play@0');
+        await wait();
+        setTimeout(() => events.onPosition(0), 5);
+        return true;
+      },
       async discard() {
-        // Nothing is held warm by either side any more (unreleased — the look-ahead is gone).
+        slots.clear();
       },
       async setQueue(statement: NativeQueueStatement) {
         const songs = statement.list.map((entry) => entry.songId);
-        // No entry carries a slot (unreleased): the engine holds nothing warm, so every entry is
-        // one the native side fetches or already has in the queue it is walking.
-        record.stated.push({ songs, slots: songs.map(() => null), index: statement.index, repeat: statement.repeat, awake: statement.awake });
+        const statedSlots = statement.list.map((entry) => {
+          if (entry.warmUrl == null) return null;
+          return slots.get(entry.songId) ?? `missing:${entry.songId}`;
+        });
+        record.stated.push({ songs, slots: statedSlots, index: statement.index, repeat: statement.repeat, awake: statement.awake });
         // The native side can walk this queue: it holds the order and the index, and it fetches
         // whatever it was given no slot for.
         return songs.length > 0 && statement.index >= 0;
@@ -165,7 +195,7 @@ function stubLibrary(): Library {
 }
 
 function blank(): Boundary {
-  return { stated: [], advanced: [], loads: [], plays: [], retries: 0, events: null };
+  return { stated: [], advanced: [], warmed: [], loads: [], plays: [], retries: 0, events: null, warmHoldsBytes: true };
 }
 
 /** The engine and the queue, wired to each other exactly as `src/ui/app.ts` wires them. */
@@ -212,8 +242,8 @@ test('the native side is given the whole queue — every entry, in the order it 
   assert.equal(stated.awake, false, 'stated as "the app is away", which is the only state in which the native side may act');
   assert.deepEqual(
     stated.slots,
-    [null, null, null],
-    'no entry is published with a slot: the app holds nothing warm, so the native side fetches what it does not already have',
+    [null, 'navilite-slot-1', 'navilite-slot-2'],
+    'the entries the app holds warm carry their slot; everything else is published without one, which is the instruction to fetch it',
   );
   assert.equal(engine.status().nativeBoundary.armed, 3, 'the native side says it is holding all three entries');
 
@@ -323,27 +353,23 @@ test('a boundary the native side refuses comes back to the app, and the track st
   await stopAll([engine]);
 });
 
-test('the published statement hands the native side no slots, and the queue is still the boundary', async () => {
+test('a warm slot that holds no media is not warm, and the entry is published without a slot', async () => {
   const record = blank();
+  record.warmHoldsBytes = false;
   const { engine, queue } = pair(record);
   await engine.handleVisibility(true);
 
   void queue.play(queueOf('song-1', 'song-2', 'song-3'), 0, CONTEXT);
   await settle();
 
-  /*
-   * There is no warm pool to hand over any more (unreleased — the look-ahead and the engine's claim
-   * map are both gone), so the statement is the whole of the boundary: three entries, none of them
-   * carrying a slot, and the native side fetches each one itself. The engine claims nothing warm,
-   * which is now true by construction rather than by a slot answering "no media".
-   */
-  assert.deepEqual(engine.status().warmedIds, [], 'the engine claims nothing warm');
+  assert.ok(record.warmed.length > 0, 'the app asked the player for the media a warm slot needs');
+  assert.deepEqual(engine.status().warmedIds, [], 'a slot that answered "no media" is not claimed as warm by the engine');
   assert.deepEqual(
     lastStated(record).slots,
     [null, null, null],
-    'and no entry is published with a slot — the native side fetches each one itself',
+    'so no entry is published with a slot — the native side fetches each one itself rather than being handed an asset that cannot start',
   );
-  assert.equal(engine.status().nativeBoundary.armed, 3, 'the queue is still the boundary: totality is the list, not the warmth');
+  assert.equal(engine.status().nativeBoundary.armed, 3, 'and the queue is still the boundary: totality is the list, not the warmth');
   await stopAll([engine]);
 });
 
@@ -408,7 +434,11 @@ test('a start that failed is retried in place by the queue — no second cold lo
       retries.push('retry');
       return true;
     },
+    warmedUrl: () => null,
+    pruneWarmed: () => undefined,
+    prepareNext: async () => true,
     setQueue: () => undefined,
+    discardPrepared: async () => undefined,
     adoptNativeAdvance: () => undefined,
     status: () => ({ state: 'idle' as const, positionMs: 0 }),
     seek: async () => undefined,
@@ -504,6 +534,52 @@ test('warm work yields while a start is in flight, and issues nothing when it ca
  * place this behaviour lives and there is no device in the suite: the JS side cannot see it, and a
  * green JS test would say nothing about it.
  */
+test('a handover arms the first boundary: the native side preloads ahead when it is given the queue', () => {
+  const native = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'ios', 'App', 'App', 'NaviliteRemote.swift'), 'utf8');
+  const setQueue = native.slice(native.indexOf('@objc func setQueue('), native.indexOf('@objc func setQueue(') + 6000);
+  assert.ok(setQueue.includes('self.installEndObserver()'), 'the handover no longer installs the end observer');
+  assert.match(
+    setQueue,
+    /if !self\.awake \{ self\.preloadAhead\(token: self\.generation\) \}/,
+    'the handover does not arm the next entry — the first boundary after the app goes away would be a fetch again',
+  );
+  assert.ok(
+    setQueue.indexOf('preloadAhead') > setQueue.indexOf('self.installEndObserver()'),
+    'the arming happens before the observer is installed, so it may run against a queue this side has not adopted',
+  );
+
+  /*
+   * And a slot name is not a warm slot (v2.0-beta.16). The old arming returned the moment *anything*
+   * held the entry, so an entry whose prime never pulled a buffer was left in place while the card
+   * counted the seam as warm — the ten seconds the owner hears. The arming now re-loads that entry,
+   * but only under three conditions, and each is asserted here: it is a slot of this side's own (not
+   * one the app handed over), the look-ahead's own record says the prime failed or stopped short of
+   * `primeBuffer`, and the audible track has more than 20 s left so the reload cannot be heard.
+   */
+  const preloadAhead = native.slice(native.indexOf('private func preloadAhead('), native.indexOf('private func primeAhead('));
+  assert.match(preloadAhead, /guard !awake, index >= 0, index < queue\.count else \{ return \}/, 'preloadAhead no longer checks that it is the off-screen owner');
+  assert.ok(!/if holding\(entry\.songId\) != nil \{ return \}/.test(preloadAhead), 'preloadAhead returned on a slot name alone again — a slot with no audio would pass as warm');
+  assert.match(preloadAhead, /guard Self\.windowSlots\.contains\(holding\) else \{ return \}/, 'the reload may take over a slot that is not this side\'s own window');
+  assert.match(
+    preloadAhead,
+    /guard let state = ahead, state\.songId == entry\.songId,\s*\n\s*state\.gaveUp != nil \|\| state\.buffered < Self\.primeBuffer else \{ return \}/,
+    'the reload is not conditional on the look-ahead\'s own record saying the prime failed or stopped short of a startable buffer',
+  );
+  assert.match(
+    preloadAhead,
+    /guard Self\.remainingSeconds\(from: audible\?\.assetId, bridge: bridge\) > 20 else \{ return \}/,
+    'the reload is not guarded by time left on the audible track — it could be heard',
+  );
+  // Into the same slot, and primed again: a reload that allocated a second slot would leave two
+  // connections open on the same entry and the audible stream sharing the pipe with both.
+  assert.match(
+    preloadAhead,
+    /guard preloadSlot\(plugin: plugin, slot: holding, entry: entry, preroll: true\) else \{ return \}\s*\n\s*fetchWindow = \(holding, entry\.songId\)/,
+    'the reload does not go back into the slot that already held the entry',
+  );
+  assert.match(preloadAhead, /primeAhead\(slot: holding, songId: entry\.songId, token: token\)/, 'the reloaded slot is never primed, so it would sit at `.readyToPlay` with no audio again');
+});
+
 /**
  * v2.0-beta.16 — the one sentence the card-tap investigation is read from.
  *

@@ -43,16 +43,17 @@
  * says so in one line and draws the album-art theme rather than animating a lie.
  */
 import { platformInfo, type OsName } from '../platform.ts';
-import { createNativeBridge, isUnavailableSnapshot, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativePlaybackFacts, type NativeSnapshot, type NativeSnapshotState, type SnapshotRefusal, type UnavailableSnapshot } from './native.ts';
+import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativeHandover, type NativePlaybackFacts, type NativeReturnReading, type NativeSpectrumFrame } from './native.ts';
 import { STOPPED_WORD, reduce } from './engine-contract.ts';
 import type { EngineOptions, EngineState, EngineStatus, PlaybackBackend, PlayerEvent, QueueStatement, TrackRequest, VisualiserTone, VisualiserWord } from './engine-contract.ts';
-import { measuredDurationIsBelievable, withDeadline } from './engine-helpers.ts';
+import { askedRate, measuredDurationIsBelievable, spectrumChecksum, withDeadline } from './engine-helpers.ts';
+import { WarmPool } from './warm-pool.ts';
 
 /**
  * How long a `resume()` is given to turn into actual playback before the engine stops believing it.
  *
- * A resume on the queue's own transport is a request, not a fact: AVPlayer can decline to come back
- * after an interruption or a route change, and the plugin answers the *call*, not the state. Asking the
+ * `NativeAudio.resume()` is a request, not a fact: AVPlayer can decline to come back after an
+ * interruption or a route change, and the plugin answers the *call*, not the state. Asking the
  * player 300 ms later is what separates "it is playing" from "the promise resolved".
  */
 const RESUME_CONFIRM_MS = 300;
@@ -152,7 +153,7 @@ const START_ANCHOR_SLACK_MS = 3000;
 /** ~1.8 s of silence from the analyser while audio is definitely playing = not real samples. */
 const ZERO_FRAMES_BEFORE_THEME = 18;
 /**
- * The same, in native-tap polls (every {@link SNAPSHOT_POLL_MS}): 12 polls is ~0.4 s, and the tap
+ * The same, in native-tap polls (every {@link SPECTRUM_POLL_MS}): 12 polls is ~0.4 s, and the tap
  * has its own frame counter — a tap that has produced *frames* that were silent is a different
  * statement from a tap that has produced nothing, and the mode note says which.
  *
@@ -173,13 +174,102 @@ const ZERO_FRAMES_BEFORE_THEME = 18;
  * rate-limited — and the engine keeps saying the spectrum is coming, with the reason line naming
  * the state it is in.
  */
+const ZERO_POLLS_BEFORE_THEME = 12;
 /**
  * How often the native bands are read.
  *
  * 30 Hz, not the canvas's 60: the canvas redraws the last frame every animation frame, and what the
  * owner can see of a bar is its height, so 30 measurements a second is motion, not stepping.
  */
-const SNAPSHOT_POLL_MS = 33;
+const SPECTRUM_POLL_MS = 33;
+/** The clock is reported while playing at this rate, so the display never sits still. */
+const CLOCK_TICK_MS = 200;
+/**
+ * How recently a player report has to have arrived for the clock tick to skip its own redraw (v1.9.7).
+ *
+ * The player reports its position roughly every 100 ms, and every one of those reports already
+ * redraws the screen through `emit()`. The tick is there so the clock keeps moving when nothing else
+ * is arriving — it is not a second repaint on top of reports that are. A tick that lands within this
+ * window of the player's own word does nothing but the end-of-track check.
+ */
+const CLOCK_TICK_QUIET_MS = 250;
+/**
+ * How long the engine waits before asking again about a tap that is on the wrong item.
+ *
+ * v1.8.0 — much shorter than {@link SPECTRUM_RECHECK_MS}, because this is not a tap that is broken,
+ * it is a track change: the tap has to be moved onto the item that is now playing, and the bars are
+ * dark for exactly as long as that takes. One second is the backstop; the load's own install is the
+ * path that gets it right on the first try.
+ */
+const SPECTRUM_ORPHAN_RECHECK_MS = 1000;
+/**
+ * How often a tap that has stopped answering is allowed to be *checked* against the player.
+ *
+ * v1.7.2 armed the tap on the way in and then never looked at it again: if iOS tore the silent
+ * `AVPlayer` down while the app was suspended, the tap stayed dead for the rest of the track and the
+ * visualiser never came back on its own. That is the owner's *"it somehow automatically switches off
+ * the spectrum like it's in native only mode"*. A consumer that goes quiet while the engine is
+ * playing is now looked at again, no more than once every five seconds, and it is never simply left
+ * off.
+ *
+ * v1.7.7 — what that look *is* matters, and it is why this is no longer a "restart". It is a verify:
+ * one read of the plugin, which finds the audible item and, if that item already carries this tap,
+ * writes nothing at all. It only installs when the item is genuinely a different one (the plugin
+ * replaced it), which is not a mid-song reconfiguration of audio the listener is hearing.
+ */
+const SPECTRUM_RECHECK_MS = 5000;
+/**
+ * How close to the end of a track the tap may report "not playing" without being rebuilt.
+ *
+ * Kept from v1.7.5, when the tap read a *silent copy* of the stream that finished a beat before the
+ * audible player did, so at the end of every track the tap reported `playing: false` while sound was
+ * still coming out. v1.7.6 deleted that copy — the tap is on the audible item now, so the two cannot
+ * disagree — but the guard stays: the last seconds of a track are still not a dead tap, and treating
+ * them as one tore the tap down and emptied the bars to the theme for the last seconds of every song.
+ */
+const SPECTRUM_NEAR_END_MS = 4000;
+/**
+ * How close to the item's own end the clock has to sit to count as *pinned* there (v1.9.5).
+ *
+ * Much narrower than {@link NATIVE_END_SLACK_MS}: this is not "the last second of a track", it is
+ * "the clock has stopped moving because the player stopped playing", and the position it has
+ * stopped at is the end of the item because `nativeClock` clamps there while `playing`.
+ */
+const PINNED_END_SLACK_MS = 250;
+/**
+ * How long the clock has to sit pinned at the end, with no live frame, before the app calls the
+ * track over by itself (v1.9.5).
+ *
+ * This is the last door onto the end of a track, and it exists because every other one is a
+ * message from the plugin: the vendored player's own completion fires only on an exact
+ * `currentTime == duration` (see the tap's own notes), and a message that is never sent cannot be
+ * waited for. Two seconds of a clock that has stopped at the end of the item, while the tap is
+ * producing nothing, is not a track that is playing.
+ */
+const PINNED_END_HOLD_MS = 2000;
+/**
+ * v1.9.24 — **the slow poll that stood here is deleted, with the budget that drove it.**
+ *
+ * `SPECTRUM_SLOW_POLL_MS` (5 s) was the second half of `MAX_SPECTRUM_RECHECKS`: once three re-checks
+ * had failed, the reads slowed down and the chip said *native audio* for the rest of the track. The
+ * counts it was spent on were real facts — a tap on the wrong item, a tap reporting a player that is
+ * not playing — but spending them as a *capability* verdict is the defect this release removes, and
+ * a read that drops to one every five seconds is also five seconds of dark bars after a tap that
+ * recovers. Both states are now re-asked, on the player's own item, with the reads left where they
+ * are (one at a time, at {@link SPECTRUM_POLL_MS}) so a tap that comes back is drawn on the next
+ * frame rather than up to five seconds later.
+ */
+/**
+ * How many tracks are warm on the player at once (v1.9.5): the previous song and the next two.
+ *
+ * The owner's own rule (*"after any selection the app must commence prefetching/caching the previous
+ * song and the NEXT TWO songs, so stepping back or forward is instant"*), and it is three because
+ * the bridge has exactly three slots that are not the one being heard — the bound is structural, not
+ * a budget that a long session can spend. This is only the engine's side of it (the claims); the
+ * number that matters on the device is the bridge's slot pool, and the two are the same number by
+ * construction.
+ */
+const MAX_WARM_TRACKS = 3;
 /**
  * The same non-zero frame for ~1 s is a frozen buffer, not a measurement.
  *
@@ -192,19 +282,7 @@ const METER_INTERVAL_MS = 100;
 
 
 export class AudioEngine {
-  /**
-   * The browser's player — **made when a web path first asks for it, and nothing makes one otherwise**
-   * (unreleased).
-   *
-   * It used to be built by the constructor of every engine, so a phone carried a second, never-loaded
-   * element beside the one `NaviliteRemote` owns: the second player the design deletes, needing only
-   * a `src` to sound. `new Audio()` now happens in exactly one method ({@link makeWebElement}),
-   * reached only through the getter below, and the native backend has no path to it — every read of
-   * {@link el} in this file is inside a web branch. There is deliberately no throw on a native read:
-   * a throw on a path the phone can reach stops a press. What a stray native read gets is an element
-   * nothing has given a `src`, which cannot sound.
-   */
-  private webEl: HTMLAudioElement | null = null;
+  private readonly el: HTMLAudioElement;
   private readonly os: OsName;
   /** True inside the Capacitor shell: the native player is then the only engine there is. */
   private readonly nativePlatform: boolean;
@@ -225,40 +303,171 @@ export class AudioEngine {
   private zeroFrames = 0;
   private identicalFrames = 0;
   private lastChecksum = -1;
-  /**
-   * **The bars are drawn from the last snapshot** (unreleased) — one register, written by the one
-   * poll and read by the canvas, which never calls the bridge itself.
-   */
   private spectrumLive = false;
   /**
-   * The chip's third word: the transport is playing and this item's tap has not answered yet. It is
-   * derived from the snapshot now, not from a verdict the engine took.
+   * The other half of {@link spectrumLive} (v1.9.6): see {@link EngineStatus.spectrumArming}.
    */
   private spectrumArming = false;
-  private nativeBands: Uint8Array | null = null;
-  /** **The published state of the one player**, exactly as the phone answered it. */
-  private lastSnapshot: NativeSnapshot | null = null;
   /**
-   * **Which step of the one snapshot refused last** (unreleased, design §5) — non-null exactly while
-   * the row is painted from a refusal rather than a reading. Cleared by the next answer that parses.
+   * **Whether this item's tap has answered with its own verdict (v1.9.27, card `t_c8cc01c6`)** — the
+   * third fact about the native path's tap, and the one a resume needs.
+   *
+   * On this path `(spectrumLive, spectrumArming) = (false, false)` while the transport is **playing**
+   * has two very different reasons, and until this field the engine could not tell them apart:
+   *
+   *   - **the tap has ruled this item out** — the two verdicts {@link pollSpectrum} writes: frames
+   *     from a tap on this item whose bands read silence for {@link ZERO_POLLS_BEFORE_THEME}, or the
+   *     same frozen frame over and over. Both clear `spectrumArming`, and while the transport plays
+   *     they are the only thing the capability word `native audio` may mean.
+   *   - **the tap has not answered for this item yet, and nothing is feeding the bars this instant** —
+   *     which is what the status looks like for one bridge round trip after a **resume** (and after a
+   *     return from the background that adopts the player saying it is playing). `spectrumArming` is
+   *     only ever set by a start (`startNative`), an adoption ({@link adoptNativeAdvance}) and the
+   *     polls that find the tap producing nothing or sitting on another item; a resume is none of
+   *     those, so `visualiserWord`'s licence line was reached and the amber capability word painted
+   *     at every resume — `t_71dc787e`'s defect, on the other path.
+   *
+   * So this field is that second state's missing fact, stated per item and never re-armed by a
+   * clock: set where the two verdicts are written, cleared where {@link forgetTapFrames} is (a new
+   * item, or the tap leaving this one) and by this item's own live frame — a tap measuring again
+   * supersedes its own old verdict. The arming *tone* is then worn for exactly as long as *no answer
+   * for this item has arrived at all* (v2.0-beta: the word there is `spectrum`, as it is once the
+   * bars are fed), and a track whose tap has answered with silence keeps `native
+   * audio` across a pause and a resume, because that verdict is about the item and not the moment
+   * (§515's silence verdict, the owner's call of 2026-10-16 — the behaviour re-arming would have
+   * broken).
    */
-  private snapshotRefused: SnapshotRefusal | null = null;
-  /** The one interval in the snapshot path (unreleased): {@link SNAPSHOT_POLL_MS}. */
-  private snapshotPoll: ReturnType<typeof setInterval> | null = null;
-  /** One read in flight at a time: a bridge slower than the tick must not answer out of order. */
-  private snapshotReadInFlight = false;
-  /** When this item's tap last produced a frame — the snapshot's own stamp, not a poll count. */
-  /** The watchdog's pin (v1.9.5): the last live frame arrived at the end of the track. */
-  /** The plugin's own last report, verbatim, for the reason line — never acted on. */
-  private lastPluginState: { state: string; reason: string; currentTimeMs: number; durationMs: number } | null = null;
-  /** The app's own account of why the row says what it says — one sentence, written where it is known. */
+  private tapVerdictForItem = false;
   private modeReason = 'nothing playing yet';
-  /** Every start `play` has issued this session — the return record reads it. */
-  private startsIssued = 0;
-  /** Which player holds the sound: the app's own, or the queue that is making it. */
+  /**
+   * **Which branch the last foreground return took (unreleased)** — `adopt` (the player was already
+   * sounding the entry the queue is on, so the return read it and wrote nothing) or `handover` (it was
+   * not, so something had to be started). Written here so the next capture proves which of the two ran
+   * rather than asking anyone to trust it; read-only from {@link status}.
+   */
+  private returnPath: 'none' | 'adopt' | 'handover' = 'none';
+  /**
+   * **Who is making the sound — one word, and every transport reading is taken from that owner**
+   * (unreleased, `t_05775526`).
+   *
+   * THE INVARIANT: **a status surface may only assert what the player that owns the sound says.** One
+   * sound, two players on a return — the away queue sounding the track while the app's own player
+   * holds the same entry, loaded and silent — and both answer "is it playing": the queue says yes, the
+   * app's player says no. The row believed the app's player, because `readReturn` and the 100 ms
+   * state-report listener both read it, and the owner came back to the right track at the right time
+   * under a play icon, a frozen seekbar and a dead spectrum.
+   *
+   * So the owner is stated explicitly, and it is *only* ever changed by a fact about a player:
+   *
+   *   - `app` — the app's own player reported itself playing, or a start of it committed (the
+   *     handover's release). Its reports are the row's truth, exactly as before.
+   *   - `queue` — the away queue holds the sound: the reading the native side answered with names
+   *     `path: 'queue'`, or the queue rendered its own reading (`renderReading`). The queue's reading
+   *     is the row's truth and the app player's silence says nothing about it.
+   *   - `none` — nothing is sounding. This is the only state in which a "paused" row is honest
+   *     without the owner having stopped it himself.
+   *
+   * `queue` is deliberately sticky across the owner's own pause: the queue's player is still the one
+   * that owns the sound, it is merely paused, and the next press resumes *it* (`queueTransport`)
+   * rather than starting the app's silent player over the top. **It is not a statement that the queue
+   * is sounding** — a queue the owner paused while the app was away renders `paused` while still
+   * owning the tap, because `readReturn` reads the phone's own `sounding` and not this memory
+   * (unreleased, `t_234b1ab8`).
+   */
   private soundOwner: 'app' | 'queue' | 'none' = 'none';
+  /** The entry that owner is sounding, so a reading about another entry cannot inherit the row. */
   private soundOwnerSongId = '';
+  /** How many returns have adopted a player that was already sounding the visible entry. */
+  private returnAdoptions = 0;
+  /**
+   * Starts issued through {@link play} since this engine was built.
+   *
+   * The one number a return that adopted must leave alone. Two doors dispatch `select`, and `select`
+   * is what draws `loading`: {@link play} (which moves this counter, past its own early returns) and
+   * {@link retryPlayInPlace} (which does not — it re-asks the player that already holds the item, and
+   * no new start is issued). So the counter is **one** door's count, not the state: a return that
+   * adopted is asserted on both, the counter here and the state never reaching `loading`, and neither
+   * claim may be stated as the other.
+   */
+  private startsIssued = 0;
+  private nativeBands: Uint8Array | null = null;
+  private spectrumPoll: ReturnType<typeof setInterval> | null = null;
+  /**
+   * True while one poll's read of the tap is still in flight (v1.9.22) — see {@link pollSpectrum}.
+   *
+   * The poll is a `setInterval`, so a bridge that answers more slowly than {@link SPECTRUM_POLL_MS}
+   * used to have several reads out at once and no order between their answers: a frame about the
+   * item the player had just left could be applied *after* one about the item it moved to, clear
+   * `spectrumLive`, rewind the zero-poll budget and hand the visualiser nothing — `spectrum off`
+   * with audio playing. One read at a time is the whole fix for that class.
+   */
+  private spectrumReadInFlight = false;
+  /**
+   * The track the tap has already been re-attached for after the plugin reported it was on an item
+   * the player had left (v1.9.22) — see the orphan branch of {@link pollSpectrum}.
+   *
+   * The first sighting of an orphan *for a track* is a transition that landed while the previous
+   * attach was still in flight, and it is answered immediately; the repeats are rate-limited, as
+   * they always were.
+   */
+  private orphanReattachedFor: string | null = null;
+  /** The serial of the newest install request, so a superseded one cannot answer for this track. */
+  private spectrumInstallSerial = 0;
+  /** What the newest install request has answered, and whether it has answered at all (v1.9.22). */
+  private spectrumInstall: { track: TrackRequest; serial: number; answered: boolean; ok: boolean } | null = null;
+  private spectrumZeroPolls = 0;
+  /**
+   * **Frames the tap has produced for the item playing now (v1.9.24) — the per-item fact.**
+   *
+   * `NativeSpectrumFrame.frames` is the tap's own counter *since it started* (`NaviliteSpectrum`'s
+   * `frames += 1` in `analyze()`, reset by nothing: `detach()` and `unprepare()` both leave it), so
+   * it describes the app process's life rather than the track's. Reading it as "this item's tap has
+   * answered" is the defect this release fixes: from the second track onward a tap that has produced
+   * **nothing** for the new item is judged to have answered *digital silence* 12 polls in, and the
+   * chip goes to *native audio* while the attach is still in flight.
+   *
+   * **v1.9.25 — and the plugin now sends the count itself (`itemFrames`), so this is that number when
+   * the build has one** (see {@link noteTapFrames}): the same reading, taken from a counter that is
+   * per item by construction rather than inferred from deltas of a process-wide one. Either way it
+   * can only ever *under*-count; it cannot make another item's frames look like this item's.
+   */
+  private tapFramesForItem = 0;
+  /**
+   * The counter's value at the last read that could be attributed to this item, or null when there is
+   * no baseline yet (v1.9.24).
+   *
+   * Which counter it watches depends on the bridge (v1.9.25): the plugin's own per-item count when it
+   * sends one, and the process-lifetime counter otherwise — see {@link noteTapFrames}.
+   */
+  private tapFramesAtLastRead: number | null = null;
+  private spectrumPolls = 0;
+  private lastSpectrumRecheckAt = 0;
+  /** The last native frame's fingerprint, and how many polls in a row have repeated it. */
+  private lastNativeChecksum = -1;
+  private identicalNativeFrames = 0;
+  /**
+   * The last frame the poll read, kept so the reason line can print the **plugin's own numbers**
+   * (v1.9.25).
+   *
+   * The banner has carried a sentence about the app's own state since v1.9.5 and, for this defect,
+   * the facts that settle it are the plugin's: how many frames it has produced for this item, how
+   * many times it has installed a tap versus verified one, and which slot it says it is on. Three of
+   * those four were already computed and dropped on the floor at the bridge; this is where they are
+   * kept until {@link status} reads them. It is never a decision input.
+   */
+  private lastNativeFrame: NativeSpectrumFrame | null = null;
+  /** Polls in a row where the tap said it was not playing (v1.9.5) — re-checked, never a verdict. */
+  private spectrumDeadPolls = 0;
+  /** When the tap last produced a live frame (v1.9.5) — the watchdog's other half. */
+  private lastLiveFrameAt = 0;
+  /** Since when the clock has been sitting at the end of the item (v1.9.5), or null. */
+  private pinnedAtEndSince: number | null = null;
+  /** The last `playbackState` the plugin reported, kept verbatim for the reason line (v1.9.5). */
+  private lastPluginState: { state: string; reason: string; currentTimeMs: number; durationMs: number } | null = null;
+  /** What the boundary's adoption did (v1.9.5). */
+  private adoptOutcome = 'not attempted';
 
+  /* ------------------------------------------------------------- the machine */
   private state: EngineState = 'idle';
   /**
    * A counter that makes every in-flight callback stale the moment the user does something.
@@ -287,6 +496,15 @@ export class AudioEngine {
    */
   private reportsMutedUntil = 0;
   /**
+   * When the player last reported anything — a position or a state (v1.9.7).
+   *
+   * The player reports its own position about every 100 ms while it plays, and each of those reports
+   * already redraws the screen. {@link startClockTick} reads this so its own tick does not do the
+   * same work again a fraction of a second later: the tick exists to keep the clock moving when
+   * nothing else is, not to repaint on top of the reports that are arriving anyway.
+   */
+  private lastPlayerReportAt = 0;
+  /**
    * The generation of the load that is in flight, or `null` when no load is (v1.9.7).
    *
    * A load is an unload + preload: the outgoing asset stops **on purpose**, and the plugin reports
@@ -309,7 +527,7 @@ export class AudioEngine {
    * yet (v1.9.7).
    *
    * A load is an unload + a preload, and from the moment it opens until the player has been asked
-   * to make *this* start's item audible (`bridge.play` on a cold load, `bridge.load` on one that
+   * to make *this* start's item audible (`bridge.play` on a cold load, `bridge.adopt` on one that
    * was warm) the slot the listener is hearing still holds the item being replaced — so the
    * plugin's own 100 ms `currentTime` timer goes on reporting **that** item's position under the
    * audible asset id. A report from a track that is on its way out is not evidence about the item
@@ -329,6 +547,18 @@ export class AudioEngine {
    * Held per start, like `loadInFlight`: two overlapping starts share neither.
    */
   private audibleIsOutgoing: number | null = null;
+  /**
+   * The tracks the bridge is holding warm: `songId -> the exact URL it was warmed under` (v1.9.5).
+   *
+   * The pool's rules — its capacity, the drop order, which read means what, and the difference
+   * between giving a claim back and dropping one — live in {@link WarmPool}. What stays here is who
+   * is allowed to claim and every path a claim leaves by, each named at its site: the track is
+   * started and adopted or refused (`startNative`), a warm that did not happen (`prepareNext`), the
+   * pool is full ({@link WarmPool.trim} from `prepareNext`), the queue knows the chain has moved
+   * (`pruneWarmed`), the engine is stopped or the track list cleared (`discardPrepared`), and a cold
+   * load clears it outright.
+   */
+  private readonly warm = new WarmPool(MAX_WARM_TRACKS);
   /**
    * The queue as the **queue** published it (v1.9.9): the resolved play order, the position playing
    * now, and the repeat mode.
@@ -400,7 +630,7 @@ export class AudioEngine {
    * every one of those is a **zero-tolerance** seek on the plugin's own audio queue
    * (`RemoteAudioAsset.swift`: it settles only when AVFoundation reports the seek finished). Eight
    * overlapping seeks a second is how this app jams the queue that every later transport call —
-   * including the boundary's load — has to wait behind. One at a time, coalesced to the newest
+   * including the boundary's adopt — has to wait behind. One at a time, coalesced to the newest
    * target: the finger's last position is the one that matters and the queue stays free.
    */
   private seekInFlight: Promise<void> | null = null;
@@ -434,7 +664,18 @@ export class AudioEngine {
   private nativeDurationMs = 0;
   /** True while the app is on screen — the only time the clock is allowed to extrapolate. */
   private foreground = true;
-    /** True while the clock ticker is running, so only one ever runs. */
+  /**
+   * **The away queue's reading, waiting to be adopted (v2.0-beta.18).**
+   *
+   * The queue hands the sound back at a position of its own (it kept playing while the app was away,
+   * and the app's clock did not). That reading belongs to ONE entry: it is applied when that entry is
+   * started — `play` uses it as the start position instead of 0 — and the queue is released only after
+   * that start has committed, so the paused items stay the only thing that knows the position until
+   * the app's own player has taken it over.
+   */
+  private handover: NativeHandover | null = null;
+  /** True while the clock ticker is running, so only one ever runs. */
+  private clockTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Whether the track was playing when the app went out of sight.
    *
@@ -443,20 +684,11 @@ export class AudioEngine {
    * session another app took can all leave the player stopped; if it *was* playing when it left,
    * coming back puts it back to playing rather than reporting a pause nobody asked for.
    */
+  private wasPlayingBeforeHide = false;
   /** True while the native tap is armed. The web path's equivalent is the meter. */
   private remoteDetach: (() => void) | null = null;
   private meterTimer: ReturnType<typeof setInterval> | null = null;
   private listeners = new Set<(status: EngineStatus) => void>();
-  /**
-   * Handles this engine was *given* rather than minted — the canvas' animation frame, the lifecycle
-   * listeners in `app.ts` — registered through {@link own} so that {@link dispose} gives them back.
-   * A handle the engine cannot reach is a handle it cannot end.
-   */
-  private readonly owned = new Set<() => void>();
-  /** The 300 ms resume confirmations in flight, each released by {@link dispose}. */
-  private readonly resumeWaits = new Set<() => void>();
-  /** Once true, `dispose()` has run: nothing here starts a timer again. */
-  private disposed = false;
 
   /**
    * v1.9.0 — whether the track that is playing has already been reported as *finished*.
@@ -481,7 +713,7 @@ export class AudioEngine {
   /**
    * The native player took a track boundary **by itself** (v1.9.8), and this is the track it moved
    * to — with the **index** it moved to inside the queue the app published (v1.9.9). The queue owns
-   * what "next" means, so it owns this too: it is a *read* — the audio is already playing — and
+   * what "next" means, so it owns this too: it is an *adoption* — the audio is already playing — and
    * the handler is awaited where the answer matters (the return to the foreground reads the player's
    * record and hands it over before anything else is read).
    */
@@ -492,28 +724,13 @@ export class AudioEngine {
     this.os = info.os;
     this.nativePlatform = info.native;
     this.nativeFactory = options.nativeFactory ?? createNativeBridge;
-  }
 
-  /**
-   * The browser's player, made on the first web read (unreleased) — see {@link webEl}.
-   *
-   * `backend === 'web'` is the only backend that has one: the element is the browser's transport
-   * (`startWeb`, `ensureGraph`) and the native backend reads its clock and its duration from the
-   * snapshot instead.
-   */
-  private get el(): HTMLAudioElement {
-    if (this.webEl === null) this.webEl = this.makeWebElement();
-    return this.webEl;
-  }
-
-  /**
-   * The element and its listeners, attached exactly once for the life of the engine.
-   *
-   * The element's own events are inputs into the machine like any other. A listener attached per play
-   * (or per visibility change) is the other half of "double-attached listeners" that made a track
-   * restart or repeat; there is one of each, and this is where they live.
-   */
-  private makeWebElement(): HTMLAudioElement {
+    /*
+     * The element's own events are inputs into the machine like any other — and they are attached
+     * exactly once, here, for the life of the engine. A listener attached per play (or per
+     * visibility change) is the other half of "double-attached listeners" that made a track
+     * restart or repeat; there is one of each, and this is where they live.
+     */
     const el = new Audio();
     el.preload = 'auto';
     el.addEventListener('play', () => {
@@ -535,14 +752,14 @@ export class AudioEngine {
       /* The element's own numbers, and the duration the rest of the app would show (`durationMs`):
        * a ticker that hands an estimate the library contradicts to the lock screen's position state
        * would be the same 70:01 through a second door (`t_972b8fc5`). */
-      this.onProgress?.(el.currentTime * 1000, this.durationMs());
+      this.onProgress?.(this.el.currentTime * 1000, this.durationMs());
     });
     el.addEventListener('ended', () => {
       if (this.backend !== 'web') return;
       this.reportEnded('the element reached the end of the stream');
     });
     el.addEventListener('error', () => this.handleMediaError());
-    return el;
+    this.el = el;
   }
 
   subscribe(listener: (status: EngineStatus) => void): () => void {
@@ -593,17 +810,8 @@ export class AudioEngine {
        * keyed on the track's identity would swallow the second end of it.
        */
       this.endedReported = false;
-      this.startSnapshotPoll();
+      this.startClockTick();
       this.startConsumers();
-      /*
-       * **Every way into `playing` is a window until this item's own frame arrives (unreleased).**
-       * A resume and a return from the background do not install anything, so nothing else here
-       * writes the arming state — and the chip would spend a capability word (`native audio`) on a
-       * build that has the tap and whose next read is already in flight. This is the fact
-       * `visualiserWord` documents as the arming branch; it is written here, where the transport
-       * says it is playing again.
-       */
-      if (this.backend === 'native' && this.hasSpectrumTap() && !this.spectrumLive) this.spectrumArming = true;
       return;
     }
     const reason =
@@ -612,11 +820,11 @@ export class AudioEngine {
         : next === 'ended'
           ? 'the track ended'
           : next === 'interrupted'
-            ? 'the audio stopped without being asked (a call, another app, or the session being interrupted) — one tap on play restarts it here'
+            ? 'the audio stopped without being asked (a call, another app, or the session being taken) — one tap on play restarts it here'
             : next === 'loading'
               ? 'loading'
               : 'nothing playing';
-    this.stopSnapshotPoll();
+    this.stopClockTick();
     this.disarmConsumers(reason);
   }
 
@@ -680,6 +888,46 @@ export class AudioEngine {
     if (durationMs <= NATIVE_END_SLACK_MS) return false;
     const positionMs = Number.isFinite(facts?.currentTime) ? Math.max(0, (facts?.currentTime as number) * 1000) : this.nativePositionMs;
     return positionMs >= durationMs - NATIVE_END_SLACK_MS;
+  }
+
+  /**
+   * The last door onto the end of a track: the app's own clock (v1.9.5).
+   *
+   * Every other way the queue hears that a track is over is a message from the plugin, and the
+   * vendored player's messages are one fragile event (an exact `currentTime == duration`) plus a
+   * state word it reserves for assets that are not being heard. When that event is missed there is
+   * nothing left to wait for — so this reads the two facts the app does have and reports the end
+   * itself: the machine says `playing`, the clock is pinned at the end of the item, and the tap is
+   * producing no live frame. The clock is pinned exactly because the player stopped reporting: it
+   * advances only while playing and clamps at the duration, so a player that has quietly stopped
+   * at the end of its item looks like this and nothing else.
+   *
+   * Held for {@link PINNED_END_HOLD_MS} before it fires, so a momentary report gap in the last
+   * quarter-second of a track is not a track ending. `reportEnded` is idempotent, so a real
+   * completion arriving during the hold changes nothing.
+   */
+  private watchForPinnedEnd(): void {
+    if (this.backend !== 'native' || this.state !== 'playing' || this.endedReported) {
+      this.pinnedAtEndSince = null;
+      return;
+    }
+    const duration = this.durationMs();
+    const position = this.nativeClock();
+    const pinned = duration > NATIVE_END_SLACK_MS && position >= duration - PINNED_END_SLACK_MS;
+    const frameLive = this.spectrumLive && this.clockNow() - this.lastLiveFrameAt <= PINNED_END_HOLD_MS;
+    if (!pinned || frameLive) {
+      this.pinnedAtEndSince = null;
+      return;
+    }
+    const now = this.clockNow();
+    if (this.pinnedAtEndSince === null) {
+      this.pinnedAtEndSince = now;
+      return;
+    }
+    if (now - this.pinnedAtEndSince < PINNED_END_HOLD_MS) return;
+    this.pinnedAtEndSince = null;
+    this.nativePositionMs = duration;
+    this.reportEnded('the clock has been sitting at the end of the item with no live frame, so the player is not going to say it');
   }
 
   /**
@@ -757,173 +1005,23 @@ export class AudioEngine {
     return this.startOutcome;
   }
 
-  /**
-   * **The one cadence (unreleased).** {@link SNAPSHOT_POLL_MS}: one bridge call, one snapshot, and
-   * every consumer renders from it. It replaces the 200 ms clock tick, the 33 ms spectrum poll and
-   * the return's own reading — there is one interval in this path, and it is this one.
-   */
-  /** The web path's meter: the same samples the canvas reads, at the analyser's own pace. */
-  private startMeter(): void {
-    if (this.meterTimer !== null) return;
-    this.meterTimer = setInterval(() => this.sample(), METER_INTERVAL_MS);
-    this.sample();
-  }
-
-  /**
-   * Start the one poll. `immediate` is false at the one site that has just made the read itself —
-   * the return to the app (`handleVisibility(false)`) — because a return is *one* read.
-   *
-   * **Bound to visibility (unreleased, S3):** a poll is a bridge call per 33 ms and there is nothing
-   * to hear it off screen, so while `foreground` is false this starts nothing. The bars hold the
-   * last frame the poll wrote, which is what a return redraws from.
-   */
-  private startSnapshotPoll(immediate = true): void {
-    if (!this.foreground || this.snapshotPoll !== null) return;
-    this.snapshotPoll = setInterval(() => void this.pollSnapshot(), SNAPSHOT_POLL_MS);
-    if (immediate) void this.pollSnapshot();
-  }
-
-  private stopSnapshotPoll(): void {
-    if (this.snapshotPoll === null) return;
-    clearInterval(this.snapshotPoll);
-    this.snapshotPoll = null;
-  }
-
-  /**
-   * **One read of the one player, applied (unreleased).** The row's entry, the clock and the bars
-   * come out of the same answer, dated to the same item: a frame whose `itemKey` is not the entry's
-   * key is never drawn, and a frame from a tap slower than this tick is still live because nothing
-   * here compares it to the tick — the drawing rule is the producer's own `framePeriodMs`.
-   */
-  private async pollSnapshot(): Promise<void> {
-    const bridge = this.native;
-    if (!bridge?.snapshot || this.backend !== 'native') return;
-    // A tick that was already in flight when the app went out of sight is not a read anybody sees.
-    if (!this.foreground) return;
-    if (this.snapshotReadInFlight) return;
-    this.snapshotReadInFlight = true;
-    /*
-     * **A reading belongs to the moment it was asked for (unreleased).** A bridge round trip can
-     * outlast a transition: the answer to a read taken while the player was playing can land after
-     * the listener paused it, and applying it would paint a live spectrum for a track that is
-     * stopped — the poll is stopped by that transition, so nothing would ever correct it. The
-     * engine's own generation is what says the moment changed.
-     */
-    const generation = this.generation;
-    let snap: NativeSnapshot | UnavailableSnapshot | null = null;
-    try {
-      snap = await bridge.snapshot();
-    } finally {
-      this.snapshotReadInFlight = false;
-    }
-    if (!snap) return;
-    /*
-     * **A read that could not be taken is a state, not a skipped tick** (unreleased, design §5).
-     * This used to be a `null` and a bare `return`, so a plugin that stopped answering left the last
-     * word on the chip — `spectrum`, or the transport's `playing` — over a player nothing had read.
-     */
-    if (isUnavailableSnapshot(snap)) {
-      this.noteSnapshotUnavailable(snap.unavailable);
-      return;
-    }
-    if (this.snapshotRefused !== null) this.clearSnapshotRefusal(snap.state);
-    if (generation !== this.generation) return;
-    if (snap.generation !== 0 && snap.generation !== this.generation) return;
-    this.lastSnapshot = snap;
-    this.applySnapshot(snap);
-  }
-
-  /**
-   * **The one snapshot could not be read, and here is which step failed** (unreleased, design §5).
-   *
-   * The chip may not go on claiming a measurement while the thing that measures is unreadable, so a
-   * machine that says `playing` is moved to `error` and the reason names the refused step. It is
-   * self-healing on purpose: the next snapshot that answers puts the machine back on what the player
-   * itself reports (`clearSnapshotRefusal`), so one missed deadline is not a stuck error, and a
-   * plugin that has gone for good is no longer a silent `spectrum`.
-   */
-  private noteSnapshotUnavailable(refusal: SnapshotRefusal): void {
-    if (this.backend !== 'native') return;
-    const sentence = `the player would not answer the one snapshot (${refusal}), so the row has no reading — the bars keep the last frame that was dated to this item`;
-    this.snapshotRefused = refusal;
-    this.error = sentence;
-    this.modeReason = sentence;
-    if (this.state === 'playing') this.dispatch({ type: 'failure', message: sentence });
-    this.emit();
-  }
-
-  /** A snapshot answered again: the refused state is over, and the player's own word is the state. */
-  private clearSnapshotRefusal(state: NativeSnapshotState): void {
-    const refusal = this.snapshotRefused;
-    if (refusal === null) return;
-    this.snapshotRefused = null;
-    this.error = null;
-    if (state === 'playing') this.applyState('playing');
-    else if (this.state === 'error') this.applyState(state === 'ended' ? 'ended' : 'paused');
-    this.modeReason = `the one snapshot answers again after ${refusal} — the row is the player's own word`;
-  }
-
-  /// What one snapshot says, applied to the engine's own registers.
-  private applySnapshot(snap: NativeSnapshot): void {
-    if (this.track) {
-      this.setNativePosition(snap.positionMs);
-      if (snap.durationMs > 0) this.nativeDurationMs = snap.durationMs;
-    }
-    const frame = snap.spectrum;
-    /*
-     * **A frame is drawn only when this item's own tap produced it (unreleased).** `frames` is the
-     * item's own count — zero at the item's install, growing only while its analysis measures — and
-     * the tap publishes its key with **64 zeros** until then (`NaviliteSpectrum.snapshot`), so a key
-     * and `attached` alone are not enough: a fresh item would be drawn as a measured flat line before
-     * a single sample of it existed, and the arming window that exists for exactly that moment would
-     * never be entered. A silent item is a different fact: its counter moves, and its zeros are its
-     * own frame, drawn as the silence it is.
-     */
-    /**
-     * **The drawing rule is the producer's own pace (unreleased, design §3).** `frames` says *that*
-     * this item's tap produced something; `lastAnalysisAt` and `framePeriodMs` say *when* and *how
-     * often*. A frame is held for one window of its own declared period — that is a tap between its
-     * own frames, and a tap slower than this poll is still live — and past it the tap has stopped
-     * producing for this item, so the last frame it left is no longer drawn. Without this, a tap that
-     * stopped stood on screen for ever with `spectrum: true` behind the bars: the whole-track state
-     * the owner reported. No constant and no poll count is compared here: both numbers are the
-     * plugin's, about the item its tap is on.
-     */
-    const pace = frame.framePeriodMs;
-    const ageMs = frame.lastAnalysisAt > 0 ? Date.now() - frame.lastAnalysisAt : 0;
-    const outOfPace = pace > 0 && frame.lastAnalysisAt > 0 && ageMs > pace;
-    const dated =
-      snap.state === 'playing' &&
-      frame.attached &&
-      frame.frames > 0 &&
-      frame.itemKey !== '' &&
-      frame.itemKey === snap.entry.key &&
-      !outOfPace;
-    if (dated) {
-      const bands = frame.bands;
-      if (!this.nativeBands || this.nativeBands.length !== bands.length) this.nativeBands = new Uint8Array(bands.length);
-      for (let i = 0; i < bands.length; i += 1) this.nativeBands[i] = bands[i];
-      this.spectrumArming = false;
-      if (!this.spectrumLive) {
-        this.spectrumLive = true;
-        this.modeReason = 'real spectrum — an FFT of the stream this player is playing, read from the item’s own tap';
-        this.emit();
-      }
-      return;
-    }
-    this.nativeBands = null;
-    // A build with no tap has no window to be in: the capability word is its honest answer, and the
-    // poll may not re-arm one for a measurement this build cannot take.
-    this.spectrumArming = this.state === 'playing' && this.hasSpectrumTap();
-    if (this.spectrumLive) {
-      this.spectrumLive = false;
-      this.modeReason = outOfPace
-        ? `the frame this item’s tap last produced is ${Math.round(ageMs)} ms old, longer ago than its own frame period (${Math.round(pace)} ms) — the tap has stopped producing for this item, and the bars wait for its next frame`
-        : snap.spectrum.attached
-          ? 'the frame the tap is holding belongs to another item — the bars wait for this item’s own'
-          : 'nothing is attached to the item that is playing — the bars follow the audio';
+  private startClockTick(): void {
+    if (this.clockTimer !== null) return;
+    this.clockTimer = setInterval(() => {
+      if (this.state !== 'playing') return;
+      // The end the player never announced (v1.9.5) — see {@link watchForPinnedEnd}.
+      this.watchForPinnedEnd();
+      // v1.9.7 — the tick does not redraw on top of the player's own reports (see
+      // {@link CLOCK_TICK_QUIET_MS}). The end-of-track check above still runs on every tick.
+      if (this.clockNow() - this.lastPlayerReportAt < CLOCK_TICK_QUIET_MS) return;
       this.emit();
-    }
+    }, CLOCK_TICK_MS);
+  }
+
+  private stopClockTick(): void {
+    if (this.clockTimer === null) return;
+    clearInterval(this.clockTimer);
+    this.clockTimer = null;
   }
 
   private clockNow(): number {
@@ -1050,8 +1148,8 @@ export class AudioEngine {
     const durationMs = this.durationMs();
     const positionMs = this.backend === 'native' ? this.nativeClock() : this.el.currentTime * 1000;
     const plugin = this.lastPluginState;
-    const snap = this.lastSnapshot;
-    const frame = snap?.spectrum ?? null;
+    const evidence = this.native?.spectrumEvidence?.() ?? null;
+    const frame = this.lastNativeFrame;
     /*
      * The chip's third word (v1.9.6), and it is a fact about the *whole* state, not just the tap:
      * only a track that is playing can be waiting for its bars. A paused, ended or loading item has
@@ -1059,10 +1157,20 @@ export class AudioEngine {
      * *native audio* (v1.9.26; see {@link VisualiserWord}). Computed once, here, and handed to both
      * the field and the word below so the two cannot disagree.
      *
-     * The window is `spectrumArming`, and the snapshot is what writes it: the tap is attached and
-     * has produced no frame for this item yet. Nothing is inferred from a poll count any more.
+     * **Two registers answer for the two paths (v1.9.27).** The native tap has had a window for
+     * "installed and not answered yet" since v1.9.6; the web path had none, so the same state — an
+     * analyser that is attached and has not produced this item's first frame — fell through to the
+     * capability word `theme` (`t_71dc787e`). `analyserArming` is that window, read from the web
+     * path's own per-item register, so both paths answer the question with a fact about the item in
+     * hand rather than with an elimination.
+     *
+     * **And the native flag is not enough on its own** (`t_c8cc01c6`): `spectrumArming` is written by
+     * starts and adoptions, so the ways into `playing` that are neither — a resume, a return from the
+     * background — reached the licence word with the flag untouched. `tapArming` is the native path's
+     * read of its own register, the mirror of `analyserArming`, and it is what makes the window
+     * survive those transitions.
      */
-    const arming = this.state === 'playing' && (this.spectrumArming || this.analyserArming());
+    const arming = this.state === 'playing' && (this.spectrumArming || this.analyserArming() || this.tapArming());
     return {
       state: this.state,
       backend: this.backend,
@@ -1075,6 +1183,20 @@ export class AudioEngine {
       visualiser: this.visualiser(arming),
       modeReason: this.modeReason,
       /*
+       * **Which branch the last foreground return took (unreleased)**, in the engine's own words.
+       *
+       * `path` is the fact the next capture needs: `adopt` means the player was already sounding the
+       * visible entry and the return read it, `handover` means something had to be started. `adoptions`
+       * counts the first kind for the session, and `starts` is every start `play` has issued — a
+       * return that adopted must not move it, which is the same claim as "the state never became
+       * `loading`" (see `readReturn`).
+       */
+      returnPath: {
+        path: this.returnPath,
+        adoptions: this.returnAdoptions,
+        starts: this.startsIssued,
+      },
+      /*
        * The phone's own account, as a line (v1.9.5): what it said, why it said it, and where the
        * item it said it about was — the three facts that were dropped at the bridge until this
        * release, and the reason a failure on the device could not be told from a failure in the
@@ -1083,9 +1205,9 @@ export class AudioEngine {
       pluginState: plugin
         ? `${plugin.state}${plugin.reason ? ` · ${plugin.reason}` : ''} · ${(plugin.currentTimeMs / 1000).toFixed(1)}/${(plugin.durationMs / 1000).toFixed(1)} s`
         : null,
+      adoptOutcome: this.adoptOutcome,
       droppedEvents: this.native?.droppedEvents?.() ?? { inaudible: 0, slotGrace: 0 },
-      /** Empty by construction: this engine holds no track warm (unreleased — the look-ahead is gone). */
-      warmedIds: [],
+      warmedIds: this.warm.ids(),
       /*
        * The native side's own boundary (v1.9.8). Read straight from the bridge, which is the only
        * thing that knows which slots it was given and what it did with them; a build with no such
@@ -1107,17 +1229,22 @@ export class AudioEngine {
       error: this.error,
       nativeAvailable: this.native !== null,
       /*
-       * The snapshot the row is rendering, verbatim: which item the frame is dated to, how many frames
-       * that item's tap has produced, and the pace it declared for itself. Numbers the phone
-       * measured — this side decides nothing from them beyond "same item or not".
+       * The tap's own numbers (v1.9.25) — see the field's own doc. Read here, never acted on: a
+       * `spectrumFrame` read would be a bridge round trip per status event, which is a dozen a second.
        */
       tap: {
-        itemKey: frame?.itemKey ?? null,
-        entryKey: snap?.entry.key ?? null,
-        framesForItem: frame?.frames ?? 0,
-        attached: frame?.attached ?? false,
-        framePeriodMs: frame?.framePeriodMs ?? null,
-        lastAnalysisAt: frame?.lastAnalysisAt ?? null,
+        framesForItem: this.tapFramesForItem,
+        pluginFrames: frame?.frames ?? null,
+        pluginItemFrames: frame?.itemFrames ?? null,
+        installs: frame?.installs ?? null,
+        verifies: frame?.verifies ?? null,
+        tapped: evidence?.tapped ?? null,
+        audible: evidence?.audible ?? null,
+        // The pace the drawing rule is judged on (v1.9.26): the tap's own declaration and the age of
+        // the frame it is holding, both read from the last frame — never a decision, always the phone's
+        // own numbers, and the pair his phone is the only place that can settle.
+        framePeriodMs: frame?.itemFramePeriodMs ?? null,
+        frameAgeMs: frame?.itemFrameAgeMs ?? null,
       },
     };
   }
@@ -1294,12 +1421,41 @@ export class AudioEngine {
   }
 
   /**
+   * **The native path's own arming window** (v1.9.27, card `t_c8cc01c6`) — the last hole in
+   * `spectrumArming`, and the same question read off the same kind of register `analyserArming` reads
+   * off the analyser's.
+   *
+   * `spectrumArming` is a *flag*, and only three kinds of writer ever set it: a start (`startNative`),
+   * an adoption (`adoptNativeAdvance`), and the polls that find the tap producing nothing for this
+   * item or sitting on another one. Every other way into `playing` — **a resume**, a return from the
+   * background that adopts the player's own `playing`, the recovery from an interruption — enters
+   * with the flag exactly as it was and with `disarmConsumers` having cleared `spectrumLive`, so for
+   * one bridge round trip the engine's own facts said *"playing, nothing measured, and the tap has
+   * told me nothing"*, which `visualiserWord`'s licence line painted as `native audio` (see the
+   * field's own note for the measurement).
+   *
+   * The window is read from the same fact the verdicts are kept in: the tap is on this item
+   * ({@link hasSpectrumTap}, which is also what keeps a build with **no** tap on `native audio`),
+   * nothing is feeding the bars right now, and this item's tap has **no verdict for it** — so the
+   * spectrum is coming, and saying so cannot overwrite §515's silence verdict, which is the whole
+   * reason this is a fact and not a re-arm.
+   *
+   * Nothing here is a clock and nothing here is a budget (v1.9.24 deleted that shape): what ends the
+   * window is this item's tap producing its own frame, or giving its own verdict about it.
+   */
+  private tapArming(): boolean {
+    if (this.backend !== 'native' || this.spectrumLive) return false;
+    if (!this.hasSpectrumTap()) return false;
+    return !this.tapVerdictForItem;
+  }
+
+  /**
    * Whether this build's native bridge has the spectrum tap at all — the one question, asked in one
    * place, by both the consumers' arming and the chip's word.
    */
   private hasSpectrumTap(): boolean {
     const bridge = this.native;
-    return bridge?.hasNativeSpectrum === true;
+    return bridge?.hasNativeSpectrum === true && typeof bridge.startSpectrum === 'function';
   }
 
   /**
@@ -1312,6 +1468,19 @@ export class AudioEngine {
   spectrumData(): Uint8Array | null {
     if (this.backend === 'native') return this.spectrumLive ? this.nativeBands : null;
     return this.spectrumLive && this.analyser ? this.freq : null;
+  }
+
+  /**
+   * A fresh read of the native tap, bypassing the poll's own cache.
+   *
+   * The visualiser draws the polled frame; this is for checks that need the tap's *own* numbers —
+   * the frame counter, its position, and whether the frames it is producing are silent — rather
+   * than what the app believes about them.
+   */
+  async readNativeFrame(): Promise<NativeSpectrumFrame | null> {
+    const bridge = this.native;
+    if (!bridge?.spectrumFrame) return null;
+    return bridge.spectrumFrame();
   }
 
   /**
@@ -1372,6 +1541,7 @@ export class AudioEngine {
       this.nativeReady = this.nativeFactory(this.os, {
         onPosition: (seconds) => {
           if (this.backend !== 'native') return;
+          this.lastPlayerReportAt = this.clockNow();
           const ms = seconds * 1000;
           this.setNativePosition(ms);
           /*
@@ -1416,6 +1586,7 @@ export class AudioEngine {
         },
         onState: (state, isPlaying, facts) => {
           if (this.backend !== 'native') return;
+          this.lastPlayerReportAt = this.clockNow();
           /*
            * What the plugin said, kept as it said it (v1.9.5).
            *
@@ -1565,7 +1736,7 @@ export class AudioEngine {
          * The queue owns what "next" means, so the message is passed straight to it: it moves its
          * cursor onto the track that is sounding and re-arms the look-ahead around it. Nothing here
          * touches the machine — the track that was playing is over and the one that replaced it is
-         * already audible, and `nativeMovedTo` is the single account of that.
+         * already audible, and `adoptNativeAdvance` is the single account of that.
          */
         onAdvanced: (songId, index, positionMs) => {
           if (this.backend !== 'native' || !songId) return;
@@ -1603,6 +1774,15 @@ export class AudioEngine {
 
   async play(track: TrackRequest, startMs = 0, force = false): Promise<void> {
     /*
+     * **A handover reading applies to the entry it names, and to that entry only (v2.0-beta.18).**
+     * A fresh start of that track (a tap on it, the queue's own start after the return) begins where the
+     * queue was rather than at zero, which is the whole point of keeping the reading: the sound never
+     * went back to the beginning of the song, and the app's own clock was not the one that was running.
+     */
+    if (this.handover && this.handover.songId === track.id && startMs === 0) {
+      startMs = this.handover.positionMs;
+    }
+    /*
      * The same track, **already playing**, is a second press on the same thing — not a second
      * playback. Nothing is reloaded, nothing is replayed and nothing is re-attached.
      *
@@ -1615,8 +1795,9 @@ export class AudioEngine {
      * changes nothing except that the row stops being drawn as waiting.
      */
     /*
-     * `force` is the one way past the idempotence rule: a caller that knows the player has to be
-     * asked for this entry again (a row press after the queue stopped on it) says so.
+     * `force` is the handover's own start (v2.0-beta.18): the engine may believe it is playing — an
+     * adoption said so a moment ago — while the queue has just been PAUSED by the handover, so the
+     * idempotence rule would swallow the one start that gives the sound back.
      */
     if (!force && this.track?.id === track.id && this.state === 'playing') {
       this.emit();
@@ -1657,14 +1838,106 @@ export class AudioEngine {
       }
       await this.startNative(track, startMs, ready);
       /*
-       * **And only now does the queue let go (v2.0-beta.18).** The app’s own row has the entry
-       * at the position it read; until this line the paused items were the only thing that knew where
+       * **And only now does the queue let go (v2.0-beta.18).** The app's own player has taken the entry
+       * at the adopted position; until this line the paused items were the only thing that knew where
        * the track was. A failed start keeps the reading, so the next attempt still starts there.
        */
-
+      if (!this.startFailed) await this.releaseHandover(track.id);
       return;
     }
     await this.startWeb(track, startMs);
+  }
+
+  /**
+   * Prepare the track that follows the current one — buffered on the player, silent (v1.9.1).
+   *
+   * This is the queue's look-ahead, and it is deliberately *data-level*: the same plugin loads it
+   * under its own asset id, nobody ever sends that asset `play`, it is not tapped for the spectrum
+   * and it is not in this engine's state machine. Nothing here can make a sound, which is what keeps
+   * the one-engine rule v1.7.6 set: the second `AVPlayer` that was deleted does not come back, a
+   * buffered item that is never played does.
+   *
+   * A no-op in a browser (where the element's own preload is the whole story) and on a bridge with
+   * no prepared slot. It never rejects: a preparation that cannot happen costs a cold fetch at the
+   * boundary, which is where v1.9.0 left it — not a failure the listener should see.
+   */
+  async prepareNext(track: TrackRequest): Promise<boolean> {
+    if (!this.nativePlatform) return false;
+    // Already warm under exactly this URL: the same stream, so a second preload is nothing.
+    if (this.warm.matches(track.id, track.url)) return true;
+    const bridge = this.native ?? (await this.ensureNative());
+    if (!bridge?.prepare) return false;
+    /*
+     * Claimed before the call, not after: two warms for the same track (the queue's own, then a
+     * start that reads it back) must not both go out, and the claim is what makes the second one a
+     * no-op.
+     *
+     * v1.9.2 — **and given back when the warm did not happen.** `bridge.prepare` answers whether
+     * the plugin actually took the asset; a warm that timed out, or that the bridge refused because
+     * the listener had already moved on, leaves no warmed track behind, so the claim must not
+     * outlive it. That leak is what the owner hit as a track that never came: the claim stayed for
+     * a track that was never loaded, the queue then refused to re-warm it ("already holding exactly
+     * this"), and the boundary paid a cold fetch with no word about why.
+     */
+    this.warm.claim(track.id, track.url);
+    const settled =
+      (await bridge.prepare({
+        id: track.id,
+        url: track.url,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        artworkUrl: track.artworkUrl,
+      })) === true;
+    if (!settled) {
+      this.warm.release(track.id, track.url);
+      return false;
+    }
+    this.warm.trim();
+    // A new warm slot is a new candidate for the native side to play itself (v1.9.9).
+    void this.syncQueue();
+    return true;
+  }
+
+
+  /**
+   * Drop the claims for tracks the queue is no longer around (v1.9.5).
+   *
+   * Called when a selection moves the queue: a claim for a track nobody is going to hear is a claim
+   * that would make a later start try to adopt an asset the player no longer holds. The bridge's own
+   * slots are not touched — they are reused by the next warm, and the pool is fixed, so dropping a
+   * claim costs nothing and removes a whole class of stale state.
+   */
+  pruneWarmed(keep: readonly string[]): void {
+    this.warm.prune(keep);
+    // What is no longer warm is no longer a slot the native side may be given (v1.9.9).
+    void this.syncQueue();
+  }
+
+  /**
+   * The exact URL a track is warm under, or `null` when the pool does not hold it (v1.9.5).
+   *
+   * This is the queue's single source of truth about warmth, and it is the engine's on purpose: the
+   * engine is what drops a claim a cold load invalidated, so a queue keeping its own copy could
+   * believe a track was warm that the player had long since forgotten — and would then never warm it
+   * again. The string it returns is the one the asset holds, so asking for it again asks for the
+   * bytes that are already there rather than for a second transcode.
+   */
+  warmedUrl(songId: string): string | null {
+    return this.warm.urlOf(songId);
+  }
+
+  /**
+   * Throw the warmed tracks away — the queue is not going where they were warmed for.
+   */
+  async discardPrepared(): Promise<void> {
+    this.warm.clear();
+    // Nothing is warm, so the native side is told that none of these entries can be played from a
+    // slot — and a fetch here would be a fetch it has no reason to make.
+    void this.syncQueue();
+    const bridge = this.native;
+    if (this.backend !== 'native' || !bridge?.discard) return;
+    await bridge.discard();
   }
 
   /* ------------------------------------------------- the native boundary (v1.9.8) */
@@ -1709,11 +1982,12 @@ export class AudioEngine {
       return;
     }
     /*
-     * The queue goes to the native side as the queue's own entries, with no warmth attached: the
-     * pool this used to join in is gone (unreleased), so every entry is one the player fetches or
-     * already holds from the statement before this one.
+     * The warm pool goes with each entry, under the exact URL it holds: the bridge names a slot for
+     * an entry only when the two agree, so a slot whose bytes are a different stream is never played
+     * as if it were this entry. Everything else is stated without a slot, which the native side reads
+     * as "fetch this one yourself".
      */
-    const list = this.statement.list.map((entry) => ({ ...entry }));
+    const list = this.statement.list.map((entry) => ({ ...entry, warmUrl: this.warm.urlOf(entry.songId) }));
     const armed = await bridge.setQueue({
       list,
       index: this.statement.index,
@@ -1785,13 +2059,75 @@ export class AudioEngine {
   }
 
   /**
+   * Adopt a track the **native player started by itself** (v1.9.8) — the audio is already playing.
+   *
+   * Nothing here loads, plays, adopts from the pool or writes to the player: the native side played
+   * the slot the app had armed for it, and all that is left is for the engine's own state to agree
+   * with it. The clock is re-based at the start of the new track (the native play is `time: 0`) and
+   * marked *unreported*, so the display holds at zero until the player's own report arrives rather
+   * than counting up from a position nobody measured.
+   *
+   * The request is the queue's, and its URL is the one the warmed slot holds: the same string the
+   * asset on the player was fetched under, which is what keeps the spectrum's own URL check and the
+   * next adoption consistent.
+   */
+  adoptNativeAdvance(track: TrackRequest, positionMs?: number): void {
+    if (this.backend !== 'native') return;
+    /*
+     * **A position that rode with the adoption is the reading, and it is reported (unreleased).**
+     * An ordinary away boundary has no number to give — the native play is `time: 0`, so the clock
+     * is re-based at zero and marked *unreported* until the player's own report arrives. A refusal
+     * answered with an entry **and a position** is the other case: the sound exists at that
+     * position, so displaying zero would be a measurement this side does not have.
+     */
+    const answered = typeof positionMs === 'number' && Number.isFinite(positionMs) && positionMs >= 0
+      ? Math.round(positionMs)
+      : null;
+    this.generation += 1;
+    this.track = track;
+    this.error = null;
+    this.startFailed = false;
+    this.startOutcome = 'player';
+    this.loadInFlight = null;
+    this.audibleIsOutgoing = null;
+    this.warm.forget(track.id);
+    this.nativeDurationMs = 0;
+    this.spectrumLive = false;
+    this.spectrumArming = true;
+    this.spectrumZeroPolls = 0;
+    // v1.9.24 — the tap's frame count is per item: this track's tap has answered nothing yet, and
+    // the frames the *previous* item's tap produced are not this one's answer.
+    this.forgetTapFrames();
+    /*
+     * v1.9.25 — **the frame the item that just ended left behind is not this one's measurement
+     * either.** The boundary takes the item over without passing through `startNative`, so the
+     * per-item drawing state has to be cleared here as well as there: the register holds the previous
+     * item's last frame, and the fingerprint and the run of identical frames that go with it would
+     * otherwise be judged against the track the native player has just started.
+     */
+    this.nativeBands = null;
+    this.lastNativeChecksum = -1;
+    this.identicalNativeFrames = 0;
+    this.orphanReattachedFor = null;
+    this.positionReported = answered !== null;
+    this.setNativePosition(answered ?? 0, answered !== null);
+    this.modeReason = answered !== null
+      ? `the away queue is sounding ${track.id} at ${Math.round(answered / 1000)} s and the app has been told so — the row renders that reading, the app's own player stays silent, and nothing is started, paused or seeked`
+      : 'the native player took the track boundary itself while the app was not listening — the audio never stopped, and this is the app catching up with it';
+    this.dispatch({ type: 'engine-state', playing: true });
+    this.concludeStart('player');
+    this.attachSpectrum(track);
+    this.emit();
+  }
+
+  /**
    * **Render a reading the native side has answered with (unreleased).**
    *
    * The row sat on `loading` because the return's own start was issued and never committed, while
    * the sound it was waiting for was already there — the away queue's. The refusal that names the
    * entry, and where it is, is the answer: this writes that position, settles the machine on
    * `playing`, and starts nothing. The app's own player stays silent, and the reading the queue
-   * read is still in hand, so one tap starts that entry at that position.
+   * offered is still held (`this.handover`), so one tap takes that entry at that position.
    */
   renderReading(positionMs: number): void {
     if (this.backend !== 'native') return;
@@ -1818,9 +2154,70 @@ export class AudioEngine {
     this.setSpectrumReason(
       'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
     );
-    this.startSnapshotPoll();
+    this.startClockTick();
     this.emit();
     this.onProgress?.(this.nativePositionMs, this.durationMs());
+  }
+
+  /**
+   * **Adopt the position the away queue handed back (v2.0-beta.18).**
+   *
+   * Called on the return, after the boundary adoption above has moved the queue onto the entry the
+   * native player reached. The reading is taken from the plugin's own handover — the call that pauses
+   * the queue, so from this moment exactly one player is sounding — and it is spent in two halves:
+   *
+   *  - the entry is the one the app is about to play: `play(track, positionMs, force)` starts it there
+   *    (forced, because an adoption a moment ago said "playing" about a track the handover just
+   *    paused), and the queue is released from `play`'s tail once that start has committed;
+   *  - it is not (yet): the reading is kept, and the next start of that entry uses it as its position.
+   *
+   * Nothing is started for an entry the app has no track for: a reading about a track the queue
+   * reached is not an instruction to play it.
+   */
+  async adoptHandover(): Promise<void> {
+    if (this.backend !== 'native') return;
+    const bridge = this.native ?? (await this.ensureNative());
+    const reading = (await bridge?.handover?.()) ?? null;
+    if (!reading || !reading.songId) return;
+    const positionMs = Math.max(0, Math.round(reading.positionMs));
+    this.handover = { songId: reading.songId, index: reading.index, positionMs };
+    const track = this.track;
+    if (!track || track.id !== reading.songId) {
+      this.modeReason = `the away queue reached ${reading.songId} at ${Math.round(positionMs / 1000)}s — that entry is started from there when it is played`;
+      return;
+    }
+    this.modeReason = `the away queue handed the sound back ${Math.round(positionMs / 1000)}s into ${reading.songId}, so the app's own player starts there`;
+    await this.play(track, positionMs, true);
+  }
+
+  /**
+   * **The app's own player has taken the entry the queue handed back (v2.0-beta.18)** — so the queue
+   * stops holding a reading about items it no longer sounds.
+   *
+   * Keyed on the entry, because a reading is only ever spent by a start of the track it names: a start
+   * of any other track must not release it.
+   */
+  private async releaseHandover(songId: string): Promise<void> {
+    if (this.handover?.songId !== songId) return;
+    this.handover = null;
+    /*
+     * **The entry is named, and the position is not (v2.0.0-beta.31).**
+     *
+     * This call used to carry nothing at all: the ported bridge's `releaseHandover()` passes no
+     * options, `NaviliteRemote.releaseHandover` read `positionMs` as `-1`, refused the take as "no
+     * position reported", and the away queue went on sounding under the app's own player — two
+     * songs, one of them beyond any control, until the app was force-quit. The entry is named here
+     * because that is the app's fact (`this.handover.songId === songId` above); the *position* is
+     * read by the native side off the app's own player, which is the only answer that cannot be a
+     * stale statement — `nativePositionMs` here can be a clock from before the load.
+     */
+    await this.native?.releaseHandover?.({ songId });
+    /*
+     * **The sound has changed hands (unreleased, `t_05775526`).** The release is the app saying its
+     * own start committed, so from here the app's own player is the sound and its reports are the
+     * row's truth again — the queue's reading is spent.
+     */
+    this.claimSound('app', songId);
   }
 
   async toggle(): Promise<void> {
@@ -1903,7 +2300,7 @@ export class AudioEngine {
         this.muteReports(TRANSPORT_MUTE_MS);
         await this.native?.queueTransport?.('resume');
         this.modeReason = `the press resumed the away queue, which is the player making the sound — at ${Math.round(this.nativePositionMs / 1000)} s, with nothing written to the app's own player`;
-        this.startSnapshotPoll();
+        this.startClockTick();
         this.emit();
         this.onProgress?.(this.nativePositionMs, this.durationMs());
         return;
@@ -1935,7 +2332,7 @@ export class AudioEngine {
      */
     const generation = this.generation;
     // A resumed AVPlayer is not instantaneous; asking immediately would restart healthy tracks.
-    await this.resumeConfirmWindow();
+    await new Promise((resolve) => setTimeout(resolve, RESUME_CONFIRM_MS));
     // The user may have moved on inside that window — a different track, or a pause.
     if (generation !== this.generation || this.state !== 'playing' || this.track !== track) return;
     const truth = await bridge.sync();
@@ -1991,7 +2388,7 @@ export class AudioEngine {
        * overlapping. Each of those is a zero-tolerance seek on the plugin's own audio queue — it
        * settles only when AVFoundation reports the seek finished — so a drag was eight blocking
        * seeks a second on the very queue that every later transport call has to wait behind,
-       * including a load at a track boundary. A finger on the bar could therefore stall the
+       * including the adopt at a track boundary. A finger on the bar could therefore stall the
        * queue's own advance, which is the shape of the owner's *"it took around 40s to load"*.
        *
        * What the listener means is where his finger *is*, not every position on the way there, so a
@@ -2049,28 +2446,10 @@ export class AudioEngine {
          * an unconfirmed position is not the position being heard, and the clock keeps the last
          * position the player itself reported.
          */
-        const truthOf = async () =>
+        const truth =
           generation === this.generation
             ? await withDeadline(this.native?.sync() ?? Promise.resolve(null), null, SEEK_VERIFY_TIMEOUT_MS, 'the player (after a seek)')
             : null;
-        let truth = await truthOf();
-        /*
-         * **One retry, and a second refused by this seek's own token** (unreleased, design §5).
-         *
-         * The deadline answering nothing used to end the seek with a sentence and no attempt:
-         * `withDeadline` gave up on the read and the seek was never asked again, so a player that
-         * was simply slow looked like a player that cannot seek. Asking once more is bounded work
-         * (one more seek, one more read) and the token is what stops it being a loop: a generation
-         * that moved on — a newer seek, a pause, a new track — refuses the retry outright, and the
-         * word for the end of it is `unsettled`.
-         */
-        if (!truth && generation === this.generation) {
-          this.modeReason = `the seek to ${Math.round(positionMs / 1000)} s is unsettled — the player did not say where it is, so it is asked once more`;
-          if (this.native) {
-            await withDeadline(this.native.seek(positionMs / 1000), undefined, SEEK_TIMEOUT_MS, 'native.seek (one retry)');
-          }
-          truth = await truthOf();
-        }
         if (generation !== this.generation) return;
         const asked = Math.round(positionMs / 1000);
         if (truth) {
@@ -2082,7 +2461,7 @@ export class AudioEngine {
               ? `the seek to ${asked} s landed — the player itself reports ${landed} s`
               : `the seek to ${asked} s was asked for and the player is at ${landed} s — the bar follows the player, not the request`;
         } else {
-          this.modeReason = `the seek to ${asked} s is unsettled — one retry was made and the player still would not say where it is, and a second is refused by this seek's own token; the bar keeps the position the player last reported`;
+          this.modeReason = `the seek to ${asked} s was sent and the player would not say where it is — the bar keeps the position the player last reported`;
         }
         this.emit();
       })();
@@ -2106,16 +2485,11 @@ export class AudioEngine {
     this.concludeStart('superseded');
     this.seekInFlight = null;
     this.seekTarget = null;
-    /*
-     * **The element is stopped only if there is one** (unreleased). On the phone the browser's
-     * player is never built, so there is nothing here to pause and nothing to unload — the native
-     * player is stopped below, and that is the only player there.
-     */
-    if (this.backend !== 'native') {
-      this.el.pause();
-      this.el.removeAttribute('src');
-    }
+    this.el.pause();
+    this.el.removeAttribute('src');
     this.track = null;
+    // Nothing is playing, so nothing is warm for it either (v1.9.1).
+    this.warm.clear();
     // Nothing is playing, so there is no queue for the native side to walk (v1.9.9).
     this.statement = { list: [], index: -1, repeat: 'off' };
     void this.syncQueue();
@@ -2128,79 +2502,19 @@ export class AudioEngine {
   }
 
   /**
-   * The 300 ms a resumed player is given before it is read (`RESUME_CONFIRM_MS`).
-   *
-   * A timer with an owner (unreleased, S3): the confirmation that is waiting on it is in
-   * {@link resumeWaits}, and {@link dispose} releases every one of them, so a teardown mid-wait
-   * ends the confirmation rather than leaving a promise — and a timeout — behind.
-   */
-  private resumeConfirmWindow(): Promise<void> {
-    return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      const release = (): void => {
-        if (timer !== null) clearTimeout(timer);
-        timer = null;
-        this.resumeWaits.delete(release);
-        resolve();
-      };
-      timer = setTimeout(release, RESUME_CONFIRM_MS);
-      this.resumeWaits.add(release);
-    });
-  }
-
-  /**
-   * **Every handle this engine minted or was given, given back (unreleased, S3).**
-   *
-   * The design's §4 expiry table, in code: the snapshot poll, the web path's meter, the start's
-   * deadline, the resume confirmation's window, the lock-screen command disposer, every handle the
-   * app registered through {@link own} (the canvas' frame, the lifecycle listeners) and the Web
-   * Audio graph. Called from the app's one teardown, and from nothing else. Idempotent; a bridge
-   * answer that lands after it is dropped by the same token that drops any other stale event.
-   */
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    this.generation += 1;
-    this.concludeStart('superseded');
-    this.seekInFlight = null;
-    this.seekTarget = null;
-    this.stopSnapshotPoll();
-    this.stopMeter();
-    for (const release of [...this.resumeWaits]) release();
-    this.remoteDetach?.();
-    this.remoteDetach = null;
-    for (const disposer of [...this.owned]) disposer();
-    this.owned.clear();
-    // The web path's graph is the last thing holding a thread: closing it also ends its listener.
-    void this.ctx?.close?.()?.catch(() => undefined);
-  }
-
-  /**
-   * Hand a handle to the engine so that {@link dispose} can end it — the returned function takes it
-   * back (a screen that stops listening to itself before the app does).
-   */
-  own(disposer: () => void): () => void {
-    this.owned.add(disposer);
-    return () => this.owned.delete(disposer);
-  }
-
-  /**
    * Entering and leaving the background, on a wrapped build.
    *
    * **Nothing here touches the audio.** It is the native engine's, and native playback is not
    * suspended the way WebKit's is — so leaving the screen changes no state, sends no pause and
    * takes no engine away. What this does is exactly two things: it stops the clock from inventing
    * time while nothing is reporting to it, and on the way back in it *asks the player* what is
-   * true — reading that answer rather than overriding it — and re-arms the visualiser, which
+   * true — adopting that answer rather than overriding it — and re-arms the visualiser, which
    * cannot have been receiving frames while the web view was suspended.
    */
   async handleVisibility(hidden: boolean): Promise<void> {
     this.dispatch({ type: 'lifecycle', phase: hidden ? 'hidden' : 'foreground' });
     if (!this.track) {
       this.foreground = !hidden;
-      // Nothing is playing, so nothing is polled — and an engine that is hidden stops a poll it
-      // somehow still had rather than trusting the state machine to have done it.
-      this.stopSnapshotPoll();
       return;
     }
     if (this.backend !== 'native') {
@@ -2212,6 +2526,7 @@ export class AudioEngine {
     }
     if (hidden) {
       this.foreground = false;
+      this.wasPlayingBeforeHide = this.state === 'playing';
       /*
        * A start that was still waiting for the player's word ends here (v1.9.2) — but not as a
        * failure. Off screen the reports stop arriving, so the wait could only ever end in a timeout
@@ -2222,7 +2537,7 @@ export class AudioEngine {
       // The player keeps playing and keeps reporting *to nobody* — the web view is suspended and
       // no callback arrives. So the clock stops counting here rather than at an unknown later
       // moment; what it shows is the last position the player was known to be at.
-      this.stopSnapshotPoll();
+      this.stopClockTick();
       /*
        * **And this is the moment the boundary changes hands (v1.9.8).** The web layer is about to
        * stop running, so the native player is handed the queue — with `awake: false` — and it is
@@ -2235,58 +2550,366 @@ export class AudioEngine {
     }
     this.foreground = true;
     /*
-     * **A return is a read (unreleased).** One snapshot of the one player — the entry it is on, its
-     * place in the order, the clock, whether it is making a sound, and that item's own spectrum
-     * frame. Nothing is started, stopped, restarted or replaced: the app never interrupted the
-     * player, so there is nothing to give back. Both halves of the row come out of the same answer,
-     * dated to the same item, which is why the bars cannot lag the row.
+     * **The app comes back to a player that may have moved on without it.** Nothing in the web
+     * layer heard the track end, so before anything is read from the player the native side is
+     * asked which slot it is playing now, and its answer is adopted: the queue moves onto that
+     * track (it is already sounding — nothing is started, nothing is re-fetched) and everything
+     * else below reads the player that is actually playing. This is the return half of the native
+     * boundary, and the reason a track that advanced while the app was away is never lost.
      */
-    const answer = await this.native?.snapshot?.();
-    if (answer && isUnavailableSnapshot(answer)) {
-      /*
-       * **A return that cannot read the player says which step refused** (unreleased, design §5).
-       * The old `null` was painted as nothing at all: the row kept the state it had before the app
-       * went away, which is a claim about a moment nobody had read.
-       */
-      this.noteSnapshotUnavailable(answer.unavailable);
-    } else if (answer) {
-      const snap = answer;
-      if (this.snapshotRefused !== null) this.clearSnapshotRefusal(snap.state);
-      this.lastSnapshot = snap;
-      this.applySnapshot(snap);
-      if (snap.entry.songId && snap.entry.songId !== this.track?.id) {
-        await this.onAdvancedNatively?.(snap.entry.songId, snap.entry.index);
-      }
-      this.modeReason = `the return read ${snap.entry.songId || 'nothing'} at ${Math.round(snap.positionMs / 1000)} s, ${snap.state} — one snapshot, nothing loaded, started, paused or seeked`;
-      if (snap.state === 'playing') {
-        /*
-         * **The row is the reading, and the machine is the row** (unreleased, design §5). `applyState`
-         * alone only re-anchors the clock: the state word belongs to the machine, and a return over a
-         * player the lock screen had restarted left `paused` on the row for the 33 ms until the poll's
-         * next answer — the same read, said twice, disagreeing. This is the poll's own idiom.
-         */
-        if (this.state !== 'playing') this.dispatch({ type: 'engine-state', playing: true });
-      } else if (this.state === 'playing') {
-        /*
-         * **The sound stopped and nobody here asked** (unreleased, design §5). This was a silent
-         * `applyState('paused')`, which is the word for a press; a return that finds the player
-         * stopped is the machine's `interrupted`, and after a failed `activateSession` it is the
-         * exact state the owner was reading as a pause he never made.
-         */
-        this.dispatch({ type: 'interruption' });
-      } else if (this.state !== 'paused') {
-        this.applyState(snap.state === 'ended' ? 'ended' : 'paused');
-      }
+    /* **This return's own start count (unreleased).** Everything below is one return, and a start
+     * issued from here on is that return's start — the fact the `return` record carries. */
+    const startsBefore = this.startsIssued;
+    const moved = await this.native?.reconcile?.();
+    if (moved?.changed && moved.songId) {
+      this.modeReason = `the native player moved to another track while the app was away (${moved.songId}) — the app is adopting the track that is already playing`;
+      // The index travels with the track (v1.9.9): the queue adopts by position in the order it
+      // published, which is the only thing that is right when that order is shuffled.
+      await this.onAdvancedNatively?.(moved.songId, moved.index);
     }
     /*
-     * `syncQueue` is not a write to the player: `awake: this.foreground` inside it is the only thing
-     * that tells the phone the app is back on screen, which hands the boundary to the web layer again.
+     * **The return is an ADOPTION when the player already holds the entry the queue is on
+     * (unreleased).**
+     *
+     * `reconcile` above has already asked the player what it is sounding, and the answer carries the
+     * route that owns the sound as well as the entry. Three facts decide this, in this order, and not
+     * one of them is a flag:
+     *
+     *   - the entry it names is the entry the queue's cursor is on (`this.track.id`);
+     *   - the owner is the app's own player — `plugin` or `fetch` — never the away queue, which is a
+     *     player of its own: it can only give the sound back by the app starting that entry over;
+     *   - something is sounding at all. An empty `songId` is "nothing this side can name", which is
+     *     the handover's business, not the adoption's.
+     *
+     * When all three hold, the return is a **pure read**: position, duration, playing state, the
+     * clock, the spectrum. Nothing is loaded, started, paused or seeked, so `loading` is not merely
+     * avoided on this path — neither door that dispatches `select` is on it (`play` and
+     * `retryPlayInPlace`), so there is nothing that could reach it. This is the owner's ordinary
+     * return: he leaves the app while a track is playing and comes back to it, and it must be
+     * invisible to the music.
+     *
+     * **And it states the queue on the way out (unreleased).** `syncQueue` is not a write to the
+     * player: it is the statement of the queue to the native boundary, and `awake: this.foreground`
+     * inside it is the *only* thing that ever tells the phone the app is back on screen
+     * (`NaviliteRemote.setQueue` is the sole writer of `awake`). Returning from a read without that
+     * statement left the native side believing the app was still away while the owner was looking at
+     * it: Swift's `itemDidEnd` then took the next track end itself *and* the foreground web layer
+     * took it, which is heard as a skip or a double start at the first seam after a return, and the
+     * card watchdog went on rewriting the Now Playing card over a screen it does not own.
      */
+    const held = moved?.reading ?? null;
+    /*
+     * **Which player holds the sound at this instant (unreleased, `t_05775526`).**
+     *
+     * `reconcile` has already asked the phone which player is sounding, on which entry, and by which
+     * route. `path: 'queue'` on the entry that is on screen is the owner's scenario: the away queue is
+     * making the sound and the app's own player holds the same entry, loaded and silent. It is a
+     * **flag for this return only** — the take below is still attempted, because a return that ends
+     * with the app's own player sounding the track at the queue's position is the outcome the owner
+     * remembers as instant, with the spectrum alive. What the flag decides is the *tail*: if that take
+     * does not commit, the queue is still the sound, and the row must be the queue's (playing,
+     * ticking, controllable) instead of the silent player's (a play icon over audible music).
+     */
+    const queueHoldsSound = held?.path === 'queue' && !!held.songId && held.songId === this.track?.id;
+    /*
+     * **And whether it is still sounding at all (unreleased, `t_05775526`).** A queue the owner paused
+     * himself is the same player and the same reading, but nothing is coming out of it — so the row is
+     * `paused` and no reading is rendered over it. Only a queue that is *sounding* owns the row.
+     */
+    const queueSounding = queueHoldsSound && held?.sounding !== false;
+    if (this.returnIsAdoption(held)) {
+      this.claimSound('app', held?.songId ?? '');
+      this.returnPath = 'adopt';
+      this.returnAdoptions += 1;
+      this.modeReason = `the return adopted ${this.track?.id ?? 'the visible entry'} — the player is already sounding it at ${Math.round((held?.positionMs ?? 0) / 1000)} s (${held?.path ?? 'plugin'}), so nothing was loaded, started, paused or seeked`;
+      await this.readReturn('adopt', false, held);
+      /*
+       * The boundary goes back to the web layer here exactly as it does on the handover below — the
+       * same statement, made in both directions, so no flag can stick (v1.9.8). Safe on this branch:
+       * `returnIsAdoption` is false whenever the away queue owns the sound (`path === 'queue'`), so
+       * the native side's `awake && awayOwnsAudible` handover cannot fire, `armAwayQueue` only
+       * attaches items, and `preloadAhead` only fetches bytes. No `play`, `pause` or `seek`.
+       */
+      await this.syncQueue();
+      await this.recordReturn('adopt', held, startsBefore);
+      return;
+    }
+    this.returnPath = 'handover';
+    /*
+     * **The other half: the player does not hold the entry, so the sound comes back to the app.**
+     *
+     * `adoptHandover` takes the away queue's reading, starts the app's own player at it (the entry the
+     * queue reached is the entry the queue just adopted above), and releases the queue only once that
+     * start has committed — see `play`'s tail and `releaseHandover`. This branch runs only when the
+     * player is NOT already sounding the visible entry (a track that stopped, an entry `reconcile`
+     * moved to, nothing sounding), because a start over a player that already holds the sound is the
+     * restart this release takes off the screen.
+     */
+    await this.adoptHandover();
+    /*
+     * **A take that did not commit leaves the queue the sound — so the queue owns the row
+     * (unreleased, `t_05775526`).**
+     *
+     * This is the branch the owner is looking at. The offer is refused (`handover-refused` names the
+     * entry the queue is sounding), the app's own start never reaches the speakers, and the app's
+     * player stays loaded and silent at the queue's position: right track, right second, and a play
+     * icon. `releaseHandover` is the only thing that moves ownership to the app's player, and it only
+     * runs when that start commits — so if it did not, the queue still holds the sound and it is the
+     * row's transport, its clock and its presses (`queueTransport`) that must follow it. The settle to
+     * `paused` below is then a lie about a track that is audibly playing.
+     */
+    if (queueSounding && this.soundOwner !== 'app' && held?.songId) {
+      this.claimSound(
+        'queue',
+        held.songId,
+        `the return could not take the sound: the away queue is still sounding ${held.songId} at ${Math.round((held.positionMs ?? 0) / 1000)} s, so the queue owns the row — playing, ticking from its reading, with the presses routed to it`,
+      );
+    }
+    // And with the web layer running again, the boundary goes back to it (v1.9.8).
     await this.syncQueue();
-    this.startSnapshotPoll(false);
+    await this.readReturn('handover', queueSounding, held);
+    await this.recordReturn('handover', held, startsBefore);
   }
 
-    /* ------------------------------------------------------------------ the engines */
+  /**
+   * **One `return` record per foreground return, written by the side that decided (unreleased).**
+   *
+   * The branch is chosen here and the phone's log is written by `NaviliteRemote.record(_:_:)`, so the
+   * sentence naming the branch (`modeReason`) never reached the file the owner copies out: a capture
+   * could say what the phone did and not what the app decided, and could not be dated from its own
+   * content either. This is the one call the web layer makes for it — once, at the end of the branch,
+   * never off a status or report stream — and it asks for the line rather than writing it: the Swift
+   * `record` stays the only writer, and it adds `kind`, `at`, `awake`, `index` and `generation` there.
+   *
+   * It writes nothing and moves nothing: a bridge with no `recordReturn` (an older plugin, a build
+   * without the iOS side) returns as it always did, and a record that cannot be written is not a
+   * failed return.
+   *
+   * @param path which branch this return took — the branch is the fact the file was missing.
+   * @param held the player's own reading the branch was decided from, `null` when it gave none.
+   * @param startsBefore `startsIssued` at the start of this return, so "a start was issued" is this
+   *   return's own count rather than the session's.
+   */
+  private async recordReturn(
+    path: 'adopt' | 'handover',
+    held: NativeReturnReading | null,
+    startsBefore: number,
+  ): Promise<void> {
+    const durationMs = this.nativeDurationMs > 0 ? this.nativeDurationMs : (this.track?.durationMs ?? 0);
+    await this.native?.recordReturn?.({
+      path,
+      songId: held?.songId || this.track?.id || '',
+      route: held?.path ?? 'none',
+      /*
+       * **`-1` is the file's own word for "no reading" (unreleased, F4).** `NativeReturnRecord`
+       * documents `positionMs: -1` for "there was no reading" and `durationMs: -1` for "unknown",
+       * and this call used to answer a number and a `0` instead: a reader filtering the log on `-1`
+       * found nothing, and the only thing separating a read from a handover in the file was
+       * `started:false`. The convention the record states is the one it is written with.
+       */
+      positionMs: held ? Math.round(held.positionMs) : -1,
+      durationMs: durationMs > 0 ? Math.round(durationMs) : -1,
+      started: this.startsIssued > startsBefore,
+      state: this.state,
+      why: this.modeReason,
+    });
+  }
+
+  /**
+   * **Is the player already sounding the entry the queue is on? (unreleased)**
+   *
+   * The return's whole decision, as one question asked of the player's own reading rather than of a
+   * remembered flag. `reading.songId` is the entry the *owning route* is on — read on the phone from
+   * the player's own `currentItem`, not from a cursor this side moved — and `path` is that route:
+   * the away queue (`queue`), the app's fetch player (`fetch`) or the plugin's own player (`plugin`).
+   *
+   * The away queue is excluded even when it names the same entry: it is a second player, and the only
+   * way the app can come to own a sound the queue is making is to start that entry itself (the
+   * handover). What this answers `true` for is the case the owner reports: the plugin is playing the
+   * track, the queue's cursor is on the same track, and there is nothing to hand over at all.
+   */
+  private returnIsAdoption(reading: NativeReturnReading | null): boolean {
+    const track = this.track;
+    if (!track || !track.id || !reading || !reading.songId) return false;
+    if (reading.path === 'queue') return false;
+    return reading.songId === track.id;
+  }
+
+  /**
+   * **The return's own tail: read the player, adopt what it says, write nothing** (v2.0-beta.18 for
+   * the handover, and both branches since the unreleased adoption).
+   *
+   * The player is the authority, in both directions, and this path **never writes to it**.
+   *
+   * That is the third invariant of this release and it is the one that "completely breaks playback":
+   * if the owner pauses from the lock screen or the control centre while the app is away, coming back
+   * must adopt that pause — not send a resume over the top of a decision he made, which is what trying
+   * to be helpful here produces. v1.7.1's reconciliation did exactly that (and worse, wrote a *pause*
+   * into a player it could not read, because the deleted web copy was holding the audio session under
+   * it). So: read, adopt, and leave the writing to the taps. A track that the platform stopped is
+   * `interrupted`, which is one tap from playing again; a track the user stopped is `paused`, which is
+   * also one tap.
+   *
+   * @param path which of the two returns this is — `adopt` is asserts reads-only at the end of it.
+   * @param queueSounding whether the away queue is **making a sound** at this instant, from the
+   *   phone's own `sounding` (`t_234b1ab8`) — not "the queue owned the row earlier".
+   * @param held the reading the branch was decided from, so the row can be settled on what the
+   *   phone said was held and silent rather than on a remembered owner (`t_234b1ab8`).
+   */
+  private async readReturn(
+    path: 'adopt' | 'handover',
+    queueSounding = false,
+    held: NativeReturnReading | null = null,
+  ): Promise<void> {
+    const startsBefore = this.startsIssued;
+    const stateBefore = this.state;
+    await this.native?.activateSession();
+    const truth = await this.native?.sync();
+    /*
+     * **THE GATE (unreleased, `t_05775526`).** `sync()` reads the app's own player. That reading is
+     * the row's truth only when that player is the one making the sound — and on the owner's return
+     * it is not: the away queue holds the sound, the app's player holds the same entry loaded and
+     * silent, and its `playing: false` was dispatched over the row as an interruption/pause while the
+     * music went on. A player that is not the sound has no opinion about the row.
+     *
+     * **And the ownership this asks about is one the queue has *now* (unreleased, `t_234b1ab8`).**
+     * `queueOwnsSound()` is a *memory* — `soundOwner === 'queue'`, which a pause taken from the island
+     * or the lock screen never clears, because that press never reaches this side — so
+     * `queueOwnsSound() || queueSounding` read a queue the owner had just paused as a queue that was
+     * sounding: the phone's own `sounding: false` arrived and was thrown away by the no-op branch
+     * below, the row stayed `playing` with a ticking clock over silence, and every press was routed
+     * through `queueTransport` to a paused player. The memory decides the row only while the phone has
+     * not said the queue is silent — a build that sends no `sounding` key still answers `false` at
+     * `returnReadingOf`, so the one shape that keeps the memory is a reading that does not exist.
+     */
+    const queueOwns = queueSounding || (this.queueOwnsSound() && held?.sounding !== false);
+    /*
+     * **The queue holding the entry and making no sound is the owner's own pause (unreleased,
+     * `t_234b1ab8`).** `path: 'queue'` names the route that holds the entry; `sounding: false` is the
+     * phone's own player saying nothing is coming out of it. Together they are the one state the row
+     * must not answer with `playing` (its reading was rendered by an earlier return and nothing here
+     * is a sound any more) and must not answer with `interrupted` either: the queue still holds *his*
+     * entry at *his* position, so the honest row is `paused` there, with the tap still routed to that
+     * queue (`soundOwner` stays `queue`) and no transport write to either player.
+     */
+    const queueHeldSilent =
+      !!held && held.path === 'queue' && !!held.songId && held.songId === this.track?.id && held.sounding === false;
+    if (truth && !queueOwns) {
+      this.setNativePosition(truth.positionMs);
+      if (truth.durationMs > 0) this.nativeDurationMs = truth.durationMs;
+      if (truth.playing) {
+        this.dispatch({ type: 'engine-state', playing: true });
+        // The player's own answer for the audible item: sound exists (v1.9.2).
+        this.concludeStart('player');
+        this.claimSound('app', this.track?.id ?? '');
+      } else if (queueHeldSilent) {
+        /*
+         * The row is paused at the queue's position, not at the silent app player's: the queue is the
+         * one holding that entry, and its reading is the only position that is this entry's.
+         */
+        this.dispatch({ type: 'transport', action: 'pause' });
+        this.setNativePosition(held.positionMs);
+        this.claimSound('queue', held.songId);
+        this.modeReason = `the owner paused the away queue ${Math.round(held.positionMs / 1000)} s into ${held.songId} — the queue still holds that entry and is making no sound, so the row is paused there rather than playing over silence: one tap resumes that queue, and nothing was written to either player`;
+        this.emit();
+        this.onProgress?.(this.nativePositionMs, this.durationMs());
+      } else if (this.state === 'playing') {
+        if (held && !!held.songId && held.songId === this.track?.id) {
+          /*
+           * **A player that still holds the entry and is not playing it is `paused`, not
+           * `interrupted` (unreleased, `t_234b1ab8`).** `interrupted` is the machine's word for "the
+           * sound stopped and nobody asked"; when the app was away the phone cannot tell his own
+           * pause from a stop nobody asked for, and the reading does not carry the difference — but it
+           * does carry that the player is still *on* this entry at a position, which is what a pause
+           * is. Both are one tap from playing; only one of them is true here, and the row says
+           * `paused` with the reason line naming what it could not know.
+           */
+          this.dispatch({ type: 'transport', action: 'pause' });
+          this.modeReason = `the return found ${held.songId} still held by its player at ${Math.round(this.nativePositionMs / 1000)} s and not playing — his own pause taken while the app was away, adopted as paused (the wire does not say whether he asked or the platform stopped it; either way one tap starts it again from here), and nothing was written to the player to get there`;
+        } else {
+          this.dispatch({ type: 'interruption' });
+          this.modeReason = this.wasPlayingBeforeHide
+            ? 'the track was playing when the app left the screen and the player is not playing now — one tap on play starts it again from here, and nothing was written to the player to get there'
+            : 'the player is not playing';
+        }
+        // Nothing is sounding (the platform stopped it or the owner did): the row may say so.
+        this.claimSound('none');
+      } else this.dispatch({ type: 'engine-state', playing: false });
+    } else if (truth) {
+      /* The queue owns the sound: the app's silence is not news about it, and its position is not
+       * this entry's position. Nothing is read from it and nothing is dispatched. */
+    } else if (this.state === 'playing' && !queueOwns) {
+      // The player would not answer. Never leave a "playing" on screen that no tap can act on.
+      this.dispatch({ type: 'interruption' });
+    }
+    /*
+     * **And it ends in a decision, never in a phase (unreleased).**
+     *
+     * `engine-state: playing false` does not move a machine that is still `loading` — `reduce` returns
+     * that state unchanged — so a start the handover issued that never produced sound would leave the
+     * visible row spinning over a track nothing is sounding. That is the owner's "stuck in a loading
+     * phase", and it is reachable on the handover branch (the adopt branch never dispatches `select`
+     * at all). The row is settled to `paused`: a decision, one tap from playing, and this is a
+     * dispatch to the state machine — nothing is written to the player.
+     */
+    if (queueSounding && this.state !== 'playing') {
+      /*
+       * **A return that did not take the sound is not a return that found nothing sounding
+       * (unreleased, `t_05775526`).** The settle below is a decision that nothing is playing; over a
+       * queue that is audibly playing it is the lie in the owner's report — and it is reached from
+       * every way an app's own start can end badly (`loading` that never committed, and the `error`
+       * a start that made no sound leaves behind). The queue's reading is the answer, so the row
+       * renders it: `renderReading` settles the machine on `playing`, seeds the clock from the
+       * queue's own position, claims the queue as the sound's owner and starts nothing.
+       */
+      this.renderReading(
+        this.handover && this.handover.songId === this.track?.id ? this.handover.positionMs : this.nativePositionMs,
+      );
+    } else if (this.state === 'loading') {
+      this.dispatch({ type: 'transport', action: 'pause' });
+      /*
+       * **And the line says what is still sounding, not just that nothing is (unreleased).** A
+       * return that could not take the sound leaves a reading behind (`this.handover`) naming the
+       * entry the away queue is still playing at a position: the row must not be left implying the
+       * music stopped, and it must not be left waiting either. It is a decision — paused, one tap
+       * from taking that entry at that position — and the number is on the line so the next press
+       * is not a guess.
+       */
+      const offered = this.handover;
+      this.modeReason = offered
+        ? `the return could not take the sound: the away queue is still sounding ${offered.songId} at ${Math.round(offered.positionMs / 1000)} s, so the row settles to paused — one tap takes that entry at that position — rather than sitting in loading, and nothing was written to the player`
+        : `the return found nothing sounding ${this.track?.id ?? 'the visible entry'} — the row settles to paused, one tap away from playing, rather than sitting in loading; nothing was written to the player`;
+    }
+    if (this.state === 'playing') {
+      /*
+       * The state did not change (the player was playing all along), but the web view was suspended
+       * and its timers went with it: the clock ticker is re-armed unconditionally. The spectrum is
+       * *verified*, not rebuilt — v1.7.6 detached and re-installed here, on a player that had been
+       * rendering the whole time the app was away, and that reconfiguration is audible. The tap
+       * outlived the suspension just as it outlives a pause, so all this needs is one read that
+       * confirms it is still on the item (see {@link verifySpectrum}).
+       */
+      this.startClockTick();
+      if (truth?.playing && stateBefore === 'playing' && this.backend === 'native') this.verifySpectrum();
+    }
+    /*
+     * **The guard, where the return decides (unreleased).** An adoption that started a player is the
+     * defect this branch exists to remove — so it is named here rather than left to a test on the
+     * other side of the build. `startsIssued` is the counter `play` increments past its own early
+     * returns; it is not the same claim as "the state never became `loading`", because
+     * `retryPlayInPlace` dispatches `select` too and does not move this counter. Both are asserted
+     * separately: the counter here, and the row's ending state above, which is settled to a decision
+     * (`paused`) rather than left in `loading`.
+     */
+    if (path === 'adopt' && (this.startsIssued !== startsBefore || this.state === 'loading')) {
+      console.warn('[navilite] the adoption branch of the return wrote to the player');
+      this.modeReason = `a return that adopted ${this.track?.id ?? 'the visible entry'} started a player instead of reading one (${this.startsIssued - startsBefore} start(s), state ${this.state}) — the adoption branch must never write`;
+    }
+    this.emit();
+    this.onProgress?.(this.nativePositionMs, this.durationMs());
+  }
+
+  /* ------------------------------------------------------------------ the engines */
 
   /** The browser's engine — the only one a browser has, and never a substitute for a native one. */
   private async startWeb(track: TrackRequest, startMs: number): Promise<void> {
@@ -2328,14 +2951,8 @@ export class AudioEngine {
     if (startMs > 0) {
       try {
         this.el.currentTime = startMs / 1000;
-      } catch (cause) {
-        /*
-         * The stream has no seekable range yet, so the start offset cannot be applied and playback
-         * begins at 0. Named on the row rather than swallowed (design §5): a listener who asked for
-         * 40 s and got 0 is owed the sentence, and the player's own reports move the clock from
-         * there either way.
-         */
-        this.modeReason = `the start offset of ${Math.round(startMs / 1000)} s could not be applied — the stream is not seekable yet, so it starts at 0 (${String(cause)})`;
+      } catch {
+        // Not seekable yet; the next play will land at the start.
       }
     }
   }
@@ -2392,8 +3009,8 @@ export class AudioEngine {
     /*
      * **And the tap has not answered for this item yet (v1.9.6).**
      *
-     * `spectrumLive` is cleared here for the item that is starting, ahead of its first frame, and
-     * it comes back on *this* item's first live frame — which, for a track the queue already holds, is a
+     * `spectrumLive` is cleared here for the item that is starting, ahead of the adoption below, and
+     * it comes back on *this* item's first live frame — which, for a warm track that is adopted, is a
      * fraction of a second after the hand-over. That window is the owner's complaint in miniature:
      * `status.spectrum` false with a native backend is precisely what the bar chip prints as *native
      * audio*, so the words he reported came back at every boundary, briefly, instead of for a whole
@@ -2404,9 +3021,41 @@ export class AudioEngine {
      * the chip has a third word for it.
      */
     this.spectrumArming = true;
-    // The register this item's frame is drawn from starts empty: the previous item's last frame is
-    // not a measurement of this one. The snapshot's own `itemKey` is what keeps them apart.
+    /*
+     * The tap's budget is per item, and so is the verdict it feeds (v1.9.6): a zero-poll count left
+     * over from the track that just ended used to decide, on this item's first poll, that this item's
+     * tap was reading silence (see `pollSpectrum`) — which now also means deciding, on the first
+     * poll, whether the chip is allowed to say "native audio" about a tap it has not heard from yet.
+     */
+    this.spectrumZeroPolls = 0;
+    /*
+     * v1.9.24 — **and the frames counted so far are not this item's answer.**
+     *
+     * The tap's own counter runs for the life of the app process (`NaviliteSpectrum`'s `frames += 1`
+     * is reset by nothing). Reading it as "this item's tap has answered" is what turned the chip to
+     * *native audio* 12 polls into every track after the first one — `forgetTapFrames` is that
+     * attribution, cleared here for the item that is starting (see `noteTapFrames`).
+     */
+    this.forgetTapFrames();
+    /*
+     * v1.9.25 — **and the frame the item that just ended left behind is not evidence about this one.**
+     *
+     * `nativeBands`, the fingerprint it was compared by and the run of identical frames are per item
+     * for the same reason the tap's counter is: the frame in the register is the *previous* item's
+     * last measurement, and a run of them would be counted against the track starting now — which is
+     * how a frozen register came to spend the chip's third word on a track whose own tap had produced
+     * nothing. `startConsumers` resets these when it arms the poll, and a track change does not go
+     * through it (the poll is already running), so the reset belongs here too.
+     */
     this.nativeBands = null;
+    this.lastNativeChecksum = -1;
+    this.identicalNativeFrames = 0;
+    // v1.7.7's rule is kept — the tap on the previous item is left where it is and this item gets
+    // its own — but v1.9.24 removed the *budget* it was paired with: a tap that will not answer is
+    // re-asked, and a tap that has answered is judged on this item's frames alone.
+    // v1.9.22 — and a fresh "has this track's tap been re-attached yet": the first orphan frame
+    // this track produces is answered on the spot (see `pollSpectrum`).
+    this.orphanReattachedFor = null;
     this.modeReason =
       'native playback (AVFoundation / ExoPlayer) — this is the engine that keeps going when you leave the app and the one the lock screen drives; the spectrum is an FFT of the same stream, read from the native audio tap';
     // A load is an unload + preload: the outgoing asset's stop must not be read as a track ending,
@@ -2430,21 +3079,83 @@ export class AudioEngine {
      */
     this.startAnchorMs = Math.max(0, startMs);
     /*
-     * **One statement, one load (unreleased).** There is no warm pool on this bridge and nothing to
-     * take over: `load` names the entry the queue is to play, and the queue switches to the item it
-     * already built for it.
+     * **The boundary: this track is warm on the player, so there is nothing to load (v1.9.1).**
+     *
+     * The queue keeps the previous track and the next two buffered on the player's other assets —
+     * silent, never played. When one of them is the track being started, and from its start, its
+     * asset is adopted: it is already the audible asset, with an item AVFoundation has been filling
+     * since before it was asked for. That is the whole of "autoplay after a track ends is instant":
+     * at a boundary the app is not fetching anything, it is switching a pointer, because the whole
+     * length of the listening that came before it was available to get ready.
+     *
+     * Deliberately narrow, and the URL is part of the condition (v1.9.5): the warmed asset holds the
+     * stream the URL asked for, so the claim must name *this* track **under exactly this string** —
+     * a bitrate the ladder has moved since the warm makes the assets different bytes, and adopting
+     * one for the other would play something other than what the play request asked for. A resume
+     * mid-track, a track that is not warm, a URL that has moved, or a bridge with no warm pool all
+     * fall through to the load below, which is exactly v1.9.0's behaviour.
      */
+    const warmUrl = this.warm.urlOf(track.id);
+    const adoptable = startMs === 0 && warmUrl !== null && warmUrl === track.url && typeof bridge.adopt === 'function';
+    /*
+     * What the boundary did, named before it is tried (v1.9.5) — see `NativeBridge.adoptOutcome`.
+     * A cold load is a legitimate outcome; an *unaccounted* one is what the reason line exists to
+     * end.
+     */
+    this.adoptOutcome =
+      startMs !== 0
+        ? 'not attempted — this track starts part-way through'
+        : warmUrl === null
+          ? `nothing warm for this track (holding ${this.warm.size})`
+          : warmUrl !== track.url
+            ? /*
+               * **The mismatch, named with its two numbers (v1.9.8).** A warm asset the play request
+               * does not ask for is an asset of different bytes, so it must not be played — but the
+               * reason this deserves a sentence is that it is also *recoverable*: the cold fetch
+               * that follows drops every claim, and the queue re-warms around this track the moment
+               * it has sound. What it must never be is silent, which is what one fixed sentence for
+               * a rung move and for a re-created client made it.
+               */
+              `not attempted — the warm asset is a different stream than this request (warmed as ${askedRate(warmUrl)}, asked for as ${askedRate(track.url)}), so this start fetches cold and the neighbourhood is re-warmed around it`
+            : typeof bridge.adopt !== 'function'
+              ? 'not attempted — this build has no warm pool'
+              : 'attempting';
+    let adopted = false;
     try {
-      {
+      if (adoptable) {
+        // v1.9.7 — this is the call that makes this start's item the audible one, so from here a
+        // report about it is news rather than a leftover from the item being replaced (see
+        // `audibleIsOutgoing`). Conditional on the token: an older start's adopt must not open the
+        // window on a newer start's behalf.
+        if (this.audibleIsOutgoing === generation) this.audibleIsOutgoing = null;
+        adopted = (await bridge.adopt?.(track.id)) === true;
+        // The bridge's own words when it has them ('nothing prepared', 'play refused (…)',
+        // 'timed out'), and an honest fallback when it does not.
+        this.adoptOutcome = bridge.adoptOutcome?.() ?? (adopted ? 'adopted' : 'refused — the track was loaded instead');
+        // Whichever way it went, this track is not warm any more: adopted it is audible, refused it
+        // is not on the player at all, and the queue re-warms around the new track after this start.
+        this.warm.forget(track.id);
+      }
+      if (!adopted) {
         /*
-         * v1.9.11 — **the load is not a cold fetch by definition.** It is asked, and then the reason
-         * line is written from its own answer: the bridge hands over to a slot that already holds
-         * this track (the armed next item becoming current from its own buffered state, which is the
-         * boundary this release is about), it writes the incoming track beside the one being heard
-         * when it has to fetch, or it finds the track already audible and has nothing to do.
-         * Reporting the fetch as a reload was the last place the app described the boundary as one.
+         * A track the pool did not hold is a cold fetch, and a cold fetch is where the old chain
+         * ends (v1.9.5): every claim from here on describes a track the player is not holding —
+         * `load` clears the bridge's own pool for the same reason — so the claim map is cleared with
+         * it. What is left is nothing claiming anything, which is the state a selection has to
+         * leave behind; the queue warms the new neighbourhood as soon as this start has sound.
+         *
+         * v1.9.11 — **and the load is no longer a cold fetch by definition.** It is asked, and then
+         * the reason line is written from its own answer: the bridge hands over to a slot that already
+         * holds this track (the armed next item becoming current from its own buffered state, which is
+         * the boundary this release is about), it writes the incoming track beside the one being heard
+         * when it has to fetch, or it finds the track already audible and has nothing to do. The
+         * engine's own claim being gone — a timed-out prepare, a prune — is no longer the same thing as
+         * the player not holding the track, and reporting it as a fetch was the last place the app
+         * still described the boundary as a reload.
          */
+        this.warm.clear();
         await bridge.load(track);
+        this.adoptOutcome = bridge.loadOutcome?.() ?? this.adoptOutcome;
         /*
          * **The guard the review found missing: two rapid plays of two different tracks race here.**
          *
@@ -2482,6 +3193,7 @@ export class AudioEngine {
        * behind it. So: the track starts, and the tap follows it — the time from "the item is the new
        * one" to "the new item is playing" is now nothing at all.
        */
+      this.attachSpectrum(track);
     } catch (cause) {
       this.fail(cause);
     } finally {
@@ -2499,9 +3211,9 @@ export class AudioEngine {
       // (v1.9.7 — see `audibleIsOutgoing`).
       if (this.audibleIsOutgoing === generation) this.audibleIsOutgoing = null;
       /*
-       * **The snapshot is what answers for the tap, at the close of every load (v1.9.22).**
+       * **The tap is confirmed at the close of every load, not only an adopted one (v1.9.22).**
        *
-       * v1.9.5 confirmed the tap here for one path only and left the other to `startConsumers`,
+       * v1.9.5 gave the adopted item its verify here and left the cold path to `startConsumers`,
        * which is right only while the cold load is still `loading` when this bracket closes. A
        * player that reports sound *inside* the load — the thing `bridge.play` has just asked it for,
        * and what the owner's phone does — makes that false: the `playing` transition runs
@@ -2510,9 +3222,10 @@ export class AudioEngine {
        * fire-and-forget request three lines above. An install the plugin superseded, or one that
        * answered `false`, then leaves the engine at `spectrum off` with audio playing — the state
        * the owner reported, and the one this release makes unreachable. One plugin call, and it is
-       * a read of the item in hand, and the item keeps exactly the
+       * a read unless the item is genuinely a different one; the adopted item keeps exactly the
        * verify it had.
        */
+      if (this.track === track && this.state === 'playing') this.confirmSpectrum(track);
     }
     /*
      * A pause that arrived *while the asset was loading* wins.
@@ -2561,62 +3274,524 @@ export class AudioEngine {
    * has one: it reads the audio the player is playing, so the bars are of the sound being heard
    * rather than of a second copy of the stream.
    */
-  /**
-   * **The consumers of the published snapshot (unreleased).** One poll, at {@link SNAPSHOT_POLL_MS};
-   * the canvas draws the last snapshot on its own `requestAnimationFrame` and never asks the bridge
-   * for anything. Nothing is installed, re-installed or verified from here.
-   */
   private startConsumers(): void {
     if (this.backend === 'web') {
-      // The browser's own analyser is the measurement there: the meter samples it on its own pace.
       this.startMeter();
       return;
     }
-    if (this.backend !== 'native') return;
+    const track = this.track;
+    if (!track) return;
+    /*
+     * **The bars follow the sound or say nothing (unreleased, `t_05775526`).** While the away queue is
+     * the sound, the tap is on a silent player: polling it would render "playing" over no samples —
+     * the dead spectrum in the owner's report. The album-art theme with the reason on the line is the
+     * honest answer until the app's own player holds the sound again.
+     */
     if (this.queueOwnsSound()) {
       this.spectrumLive = false;
       this.spectrumArming = false;
       this.setSpectrumReason(
-        'the sound is the away queue’s, so the bars are drawn from the snapshot it publishes — nothing is installed or re-installed here',
+        'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
       );
-    } else if (!this.hasSpectrumTap()) {
-      // No tap in this build (Android today, and the browser): the honest statement, and the
-      // album-art theme.
+      return;
+    }
+    if (!this.hasSpectrumTap()) {
+      /*
+       * No tap in this build (Android today, and the browser). v1.7 played a second, silent copy
+       * of the stream in the page to get samples here — a second engine, a second clock, and the
+       * thing that stopped the owner's playback on return. That is deleted. What is left is the
+       * honest statement, and the album-art theme.
+       */
       this.spectrumLive = false;
+      // v1.9.6 — nothing is being installed either: this build has no tap to install.
       this.spectrumArming = false;
       this.modeReason = 'this build has no spectrum tap on its native player, so the bars are on the album-art theme — the audio itself is unaffected';
+      return;
     }
-    this.startSnapshotPoll();
+    if (this.spectrumPoll !== null) return;
+    this.nativeBands = null;
+    this.spectrumZeroPolls = 0;
+    this.spectrumPolls = 0;
+    this.spectrumLive = false;
+    this.lastNativeChecksum = -1;
+    this.identicalNativeFrames = 0;
+    /*
+     * Start reading **now**, not when the plugin says it has started.
+     *
+     * A frame that is not live yet is exactly what the zero-poll counter is for, and it costs nothing
+     * to start reading first: it is what makes the first real frame appear the moment the tap has one,
+     * rather than one poll later.
+     */
+    this.spectrumPoll = setInterval(() => void this.pollSpectrum(), SPECTRUM_POLL_MS);
+    this.lastSpectrumRecheckAt = this.clockNow();
+    /*
+     * v1.8.0 — no install from here.
+     *
+     * v1.7.7 called `startSpectrum` from this transition, which fires *before* `bridge.load`: the
+     * plugin's `attach` was then asked about the item the player still had — the outgoing one — and,
+     * because it verifies an item that already carries this tap, it answered "yes" without touching
+     * anything. The new item was left untapped. The install now happens in `startNative` once the load
+     * has resolved (`attachSpectrum`). What is left here is the *verify* a resume and a return from
+     * the foreground need — and the gate is the load itself, not the report window: a pause or a
+     * resume has nothing to do with which item the player is on, and gating this on their window
+     * meant a resume a moment after a pause could not confirm the tap it already had (v1.9.1).
+     */
+    if (this.loadInFlight === null) this.verifySpectrum();
+    void this.pollSpectrum();
   }
 
   /**
-   * **The queue moved to another entry by itself (unreleased).** The row follows the player: the
-   * entry it is on is rendered from the reading, and nothing is loaded, started or re-attached.
+   * Disarm the visualiser, because the engine is not playing any more.
+   *
+   * `paused`, `ended`, `interrupted`, `error`, `idle`: the spectrum is a picture of what is being
+   * heard, and nothing is. Note what is *not* here — there is no call to the native tap at all, and
+   * that absence is v1.7.7's whole point.
+   *
+   * v1.7.6 called `stopSpectrum` from here, so leaving `playing` took the audio mix off the player's
+   * item; the resume then put a new mix back on a player that was already rendering, which is an
+   * audible reconfiguration of the audio pipeline — the owner's *"a short pause"* in the middle of a
+   * song, immediately before the bars came back. The tap is now installed for the life of the item and
+   * outlives every one of these states. The bars settle to zero because the engine has no frame to
+   * hand the canvas (the visualiser's own release envelope), not because anything was taken apart.
    */
-  nativeMovedTo(track: TrackRequest, positionMs = 0): void {
-    if (this.track?.id !== track.id) this.track = track;
-    this.renderReading(Math.max(0, positionMs));
-  }
-
-  /** The last snapshot the phone published, for the debug panel — never a second reading. */
-  currentSnapshot(): NativeSnapshot | null {
-    return this.lastSnapshot;
-  }
-
   private disarmConsumers(reason: string): void {
-    this.stopSnapshotPoll();
+    if (this.spectrumPoll !== null) {
+      clearInterval(this.spectrumPoll);
+      this.spectrumPoll = null;
+    }
     this.stopMeter();
     this.nativeBands = null;
+    this.spectrumZeroPolls = 0;
     if (this.spectrumLive) {
       this.spectrumLive = false;
       this.modeReason = reason;
     }
   }
 
+  /** One poll of the tap: the frame, and the honesty check on top of it. */
+  private async pollSpectrum(): Promise<void> {
+    const bridge = this.native;
+    if (!bridge?.spectrumFrame || this.backend !== 'native' || !this.track) return;
+    /*
+     * **One read at a time (v1.9.22).**
+     *
+     * The tick is {@link SPECTRUM_POLL_MS} and a read is a bridge round trip, so on a phone whose
+     * plugin answers slower than that there were several reads in the air at once with no order
+     * between their answers — and every one of them writes `spectrumLive`, `nativeBands` and the
+     * poll budgets. An answer that describes the item the player has just left could therefore be
+     * applied *after* one that describes the item it moved to: the engine went back to
+     * `spectrum off` while the new track was playing, which is the state the owner reported. A read
+     * that is already out is the newest information there is; the tick that arrives while it is
+     * still out is skipped, not queued.
+     */
+    if (this.spectrumReadInFlight) return;
+    this.spectrumReadInFlight = true;
+    let frame: NativeSpectrumFrame | null = null;
+    try {
+      frame = await bridge.spectrumFrame();
+    } finally {
+      this.spectrumReadInFlight = false;
+    }
+    if (!frame || !this.track) return;
+    this.spectrumPolls += 1;
+    /*
+     * The tap is on an item the player has moved off — v1.8.0.
+     *
+     * The plugin reports which item it is tapped on (`itemIsCurrent`: the item the tap holds against
+     * `player.currentItem`), and that is the signal the v1.7.7 recheck was *trying* to read: it was
+     * gated on `frame.playing`, which is the **player's** answer, and the player is playing the new
+     * track throughout the swap — so the orphan it was written for could never fire. A track change
+     * left the bars frozen on the previous song's last frame (or on the theme) until a pause/resume.
+     *
+     * Nothing is drawn while this is true: the previous song's last frame is not a measurement of
+     * this one. The tap is re-attached to the item the player is on now, no more often than
+     * {@link SPECTRUM_ORPHAN_RECHECK_MS} — and, in the normal case, the load has already installed it
+     * (see `attachSpectrum`), so this is only ever the backstop.
+     */
+    if (frame.itemIsCurrent === false) {
+      this.nativeBands = null;
+      this.spectrumDeadPolls = 0;
+      /*
+       * Frames seen while the tap is off this item are not this item's answer: the next read that
+       * finds the tap back on it re-baselines instead of counting the gap (see `noteTapFrames`).
+       */
+      this.forgetTapFrames();
+      /*
+       * **v1.9.24 — and this branch no longer spends the chip's third word.**
+       *
+       * It used to. Three orphan sightings, one a second, and the reason line said *"the tap is on
+       * the item the player has moved off and would not re-attach"* — a capability claim made out of
+       * two momentary refusals, and half of what the owner reads as *"it defaults to native audio"*
+       * at a track change. The state is real and it is reported; the conclusion was not.
+       *
+       * There are two ways into that state and the plugin's own `attached` separates them:
+       *
+       *   - **no tap at all** (`attached === false`) — the request was refused (a named slot with no
+       *     loaded item is a real state for the length of a `fillSlot`, `src/player/native.ts:791`)
+       *     or has not landed yet. The remedy is another request, against *this* item.
+       *   - **the tap is on an item the player has left** (`attached === true`) — the ordinary
+       *     transition (the install the new track just issued is still in flight), or an install that
+       *     read the outgoing item before its `await` and attached to it after.
+       *
+       * Both are answered the same way: the plugin is asked again, no more often than
+       * {@link SPECTRUM_ORPHAN_RECHECK_MS} — and at once when an install for this track has already
+       * answered while the tap is elsewhere (v1.9.22) — while the chip keeps its third word.
+       * Nothing in this branch decides that this track cannot have a spectrum.
+       */
+      this.spectrumLive = false;
+      // The tap is off the item that is playing, so the engine has no answer for that item and says
+      // so with the chip's third word — a request for this track is what the poll below issues.
+      this.spectrumArming = this.state === 'playing';
+      this.setSpectrumReason(
+        frame.attached !== false
+          ? 'the tap is on the item the player has moved off — re-attaching it to the track that is playing'
+          : 'nothing is attached to the item that is playing — asking the plugin to put a tap on it; the bars follow the audio',
+      );
+      const trackId = this.track.id;
+      const probe = this.spectrumInstall;
+      const orphaned = probe !== null && probe.track === this.track && probe.answered;
+      const firstSighting = orphaned && this.orphanReattachedFor !== trackId;
+      if (firstSighting || this.clockNow() - this.lastSpectrumRecheckAt >= SPECTRUM_ORPHAN_RECHECK_MS) {
+        this.orphanReattachedFor = trackId;
+        this.verifySpectrum();
+      }
+      return;
+    }
+    /*
+     * The tap is on the item the player is playing, so the growth of the plugin's counter from here
+     * is **this item's** frames — the only input that may say whether this track's tap has answered
+     * (v1.9.24, see `noteTapFrames`), and the fact that decides whether the frame in hand is drawn at
+     * all (v1.9.25).
+     */
+    const measured = this.noteTapFrames(frame);
+    const playing = this.state === 'playing' && frame.playing;
+    if (!playing) {
+      /*
+       * The last seconds of a track are not a dead tap: the silent copy ends slightly before the
+       * audible one, and rebuilding on that report is what dropped the bars exactly when the song
+       * was finishing. Near the end the last real frame is held — no rebuild, no theme, no flicker.
+       */
+      if (this.nearTrackEnd()) {
+        this.spectrumDeadPolls = 0;
+        return;
+      }
+      this.spectrumLive = false;
+      /*
+       * The tap has gone quiet while the engine is playing: the plugin is reporting a *player* that
+       * is not playing, on the item this app is playing. There is no silent copy to be torn down any
+       * more, so the honest causes are an item the plugin has replaced under the tap and a stream
+       * that is genuinely stopped — and both are answered by *verifying* the tap (one read of the
+       * plugin, which writes nothing at all when the item already carries it) rather than detaching
+       * and rebuilding it, which is what put an audible gap in the middle of a song.
+       *
+       * **v1.9.24 — and the budget that used to end this is gone.** Twelve polls, then the third
+       * failure, then the chip said *native audio* and the reads dropped to one every five seconds:
+       * a capability verdict made out of a clock, which is the defect this release removes. The
+       * re-checks continue for as long as the state does — rate-limited to one every
+       * {@link SPECTRUM_RECHECK_MS}, so a tap that will not stay up is still not asked thirty times a
+       * second — and the chip keeps saying the spectrum is coming, with the reason line naming what
+       * the plugin is reporting.
+       */
+      if (this.state !== 'playing') {
+        this.spectrumDeadPolls = 0;
+        return;
+      }
+      this.spectrumDeadPolls += 1;
+      if (this.spectrumDeadPolls < ZERO_POLLS_BEFORE_THEME) return;
+      if (this.clockNow() - this.lastSpectrumRecheckAt < SPECTRUM_RECHECK_MS) return;
+      this.setSpectrumReason(
+        'the plugin reports that the player it is tapping is not playing, while this app is playing this track — checking the tap again; the bars follow the audio',
+      );
+      this.verifySpectrum();
+      return;
+    }
+    this.spectrumDeadPolls = 0;
+    /*
+     * **Nothing is drawn, and nothing is judged, from a frame this item's tap did not produce
+     * (v1.9.25) — and this item's own last frame is drawn for as long as its own tap's period says
+     * it is still the measurement in hand (v1.9.26).**
+     *
+     * `bands` and `live` are a last-value register: the plugin publishes the last frame its FFT ever
+     * produced and zeroes it only in `detach`, so on this path — tap on the item playing now, player
+     * playing — a register that has stopped moving is *not* a measurement of this item. It is either
+     * the previous item's last frame (the loud skip's shape: the incoming item's analysis was torn
+     * down by the outgoing item's `unprepare`, so `bands` still holds a non-zero frame with `live`
+     * true and nothing produces another one) or an all-silent frame from a tap that has since gone
+     * still. Both are the owner's report — *"the lines stay dead the whole track, the spectrum seems
+     * to jump up at the start and then go to zero and remain there"*, and, while the bars are flat,
+     * the chip reading *native audio*.
+     *
+     * **And the counter's movement alone is not the test** (v1.9.26 — §516.1 amended, and the whole
+     * of Sage's SEND BACK of `2e1eb9d`). It was: *a frame may only be drawn if this item's tap
+     * produced it since the last read*, which silently assumed a healthy tap produces one frame per
+     * {@link SPECTRUM_POLL_MS} read. It does not — the plugin's frame production is quantized to the
+     * PCM buffer AVFoundation hands the tap (`drainAndAnalyze` resets `sinceLastFrame` per callback
+     * instead of subtracting the hop, `NaviliteSpectrum.swift:678`; `maxFrames` from `prepare` was
+     * discarded, `:811`), and 4096-frame buffers are ~11 frames/s against 30 reads/s. So the rule
+     * blanked the bars — and flapped the chip between *spectrum* and *spectrum…* — on two reads in
+     * three, **of a tap that was measuring perfectly**, which weakened exactly the cases that work
+     * today: a quiet skip and a cold start.
+     *
+     * The rule that stands instead rests on two facts the plugin publishes about **this item's own
+     * analysis** and on nothing else — no engine constant, no poll count, no timer, no "give up after
+     * N s" (`DECISIONS.md` §515.1 deleted that shape): the period that tap declared for itself
+     * (`itemFramePeriodMs`) and how old the frame it is holding is (`itemFrameAgeMs`). A frame is
+     * drawn when this item's tap produced it since the last read, **or** when it is this item's own
+     * last frame and is no older than that tap's own period. Past that the register is named and not
+     * drawn — the loud-skip state, and the tap that has stopped, are both still covered: a tap that
+     * has produced *nothing* for this item (`itemFrames === 0`) never reaches either half.
+     *
+     * What a held frame is not: evidence of anything. It is drawn and nothing else — it does not feed
+     * the frozen-frame rule (the same frame *not produced again* is not a tap stuck on one buffer, it
+     * is the same measurement in hand), it does not count toward the silence verdict (a poll the tap
+     * did not answer is not another 33 ms of digital silence), it does not refresh the pinned-end
+     * watchdog's live stamp (nothing new was measured) and it does not touch the chip (there is no new
+     * fact about this item's tap for the chip to say).
+     */
+    this.lastNativeFrame = frame;
+    const held = !measured && this.holdsThisItemsOwnFrame(frame);
+    if (!measured && !held) {
+      this.spectrumLive = false;
+      this.spectrumZeroPolls = 0;
+      /*
+       * **And the chip keeps its third word** — the same word §515.4 gives a tap that has never
+       * answered at all: a tap on the item playing now that is producing nothing is *the spectrum is
+       * coming*, which is a statement about this item's tap and nothing about whether this track can
+       * have one. It goes back to *spectrum* on this item's next frame, and it is the word the owner
+       * asked for in place of *native audio* while the bars are flat.
+       *
+       * The sentence names which register is being looked at, and — since v1.9.26 — the pace the
+       * judgement is made on: this item's tap has produced something and stood still longer than its
+       * own frame period (the register is this item's own, one period old and past it), or this item's
+       * tap has produced nothing at all for this track (the register is the previous item's, and it
+       * still looks live or it is flat).
+       */
+      this.spectrumArming = this.state === 'playing';
+      this.setSpectrumReason(
+        this.tapFramesForItem > 0
+          ? 'this item’s tap produced its last frame longer ago than its own frame period — nothing is measuring this track now, so the bars follow the audio until its analysis produces another'
+          : frame.live
+            ? 'the frame the plugin is holding was not produced by this item’s tap — the bars follow the audio, and this track’s own tap has yet to give one'
+            : 'the tap on the item that is playing has produced no frame for this track — nothing is being measured, so the bars follow the audio while the engine keeps waiting on its tap',
+      );
+      return;
+    }
+    this.nativeBands = Uint8Array.from(frame.bands);
+    if (held) return;
+    if (frame.live) {
+      this.spectrumZeroPolls = 0;
+      // A live frame is what the watchdog waits for before it will call the end of a track by
+      // itself (v1.9.5): the tap is measuring sound, so nothing here is over.
+      this.lastLiveFrameAt = this.clockNow();
+      // And it has answered (v1.9.6): whatever the bars were doing a poll ago, this item's tap is
+      // installed and reading sound, so the chip is back on "spectrum".
+      this.spectrumArming = false;
+      /*
+       * v1.9.27 (card `t_c8cc01c6`) — and this item's own live frame supersedes any verdict it
+       * carried: a tap measuring again is the one thing that ends a verdict, exactly as a real frame
+       * ends the same verdict on the web path (`sample()` resets `zeroFrames`). It is what keeps the
+       * chip off `native audio` at the next resume over a track whose tap recovered.
+       */
+      this.tapVerdictForItem = false;
+      if (!this.spectrumLive) {
+        this.spectrumLive = true;
+        this.modeReason = 'real spectrum — an FFT of the stream this player is playing, read from the native audio tap';
+        this.emit();
+      }
+    } else {
+      this.spectrumZeroPolls += 1;
+      /*
+       * **A verdict about this item's tap, whether or not it ever fed the bars (v1.9.6).**
+       *
+       * This used to require `spectrumLive`, which meant a tap that *never* produced a live frame was
+       * never judged at all: the engine said nothing, and the chip was left with two words for three
+       * states — so "the tap has not answered yet" and "there will be no bars from this item" printed
+       * the same sentence. Twelve polls (~0.4 s) of frames from a tap on the item the player is
+       * playing is the tap's own answer, and it closes both questions at once: the reason line gets
+       * one honest sentence (once, on the transition, not thirty times a second), and the chip stops
+       * saying the spectrum is coming.
+       *
+       * **v1.9.24 — and "frames from a tap on the item the player is playing" is now what `answered`
+       * means.** It was `frame.frames > 0`, and that counter belongs to the app *process*
+       * (`NaviliteSpectrum.swift:605`, reset by nothing), so on every track after the first one that
+       * ever produced a frame this branch said *"the native tap is reading digital silence"* about a
+       * tap that had produced **nothing** for the item playing — 12 polls, ~0.4 s, in, while the
+       * attach was still in flight. That is the owner's *"it defaults to native audio"*, and it was
+       * chosen *because* the attach had not landed yet. `tapFramesForItem` counts this item's frames
+       * only (see `noteTapFrames`), so a tap that has answered nothing for this track keeps the chip's
+       * third word and the attach is allowed to arrive.
+       */
+      const answered = this.tapFramesForItem > 0;
+      if (this.spectrumZeroPolls >= ZERO_POLLS_BEFORE_THEME && (this.spectrumLive || (this.spectrumArming && answered))) {
+        this.spectrumLive = false;
+        this.spectrumArming = false;
+        /*
+         * v1.9.27 (card `t_c8cc01c6`) — **the verdict is recorded as this item's answer**, which is
+         * what lets the chip go back to `spectrum…` at a resume *without* saying it over a track the
+         * tap has already ruled out (see `tapVerdictForItem`).
+         */
+        this.tapVerdictForItem = true;
+        this.modeReason =
+          answered
+            ? 'the native tap is reading digital silence — the audio itself is silent, so the bars are flat'
+            : 'the native tap is running but has not produced a frame yet';
+        this.emit();
+      }
+    }
+    /*
+     * The same frame over and over is not a measurement — v1.8.0, and the same rule the web path has
+     * had since v1.1 (see `sample()`).
+     *
+     * The native path trusted `frame.live`, which is the *tap's* own opinion that it is producing
+     * something. A tap that is alive but stuck on one buffer — the shape an orphaned one produces
+     * when the player it is listening to has moved on — would otherwise be drawn as if it were the
+     * new song, which is the owner's "it is not showing... it is showing the last song" family. An
+     * identical, non-silent frame ten polls in a row is a frozen buffer, not an audio signal.
+     *
+     * v1.9.25 — **and it only ever sees frames this item's tap produced.** The branch above returns
+     * before this point when the counter did not move, so a register that simply stopped is not
+     * "frozen" here: it is `the tap has stopped producing`, which is a different state with a
+     * different sentence, and it no longer spends the chip's third word. What this rule still catches
+     * is the live-but-stuck tap it was written for — one that *is* producing frames, all of them the
+     * same.
+     */
+    const checksum = spectrumChecksum(frame.bands);
+    const identical = checksum !== 0 && checksum === this.lastNativeChecksum;
+    this.lastNativeChecksum = checksum;
+    this.identicalNativeFrames = identical ? this.identicalNativeFrames + 1 : 0;
+    if (this.identicalNativeFrames >= FROZEN_FRAMES_BEFORE_THEME && this.spectrumLive) {
+      this.spectrumLive = false;
+      // v1.9.6 — a frozen buffer is an answer about this item's tap (and not a good one); the chip
+      // stops waiting and says so, as the reason line does.
+      this.spectrumArming = false;
+      // v1.9.27 (card `t_c8cc01c6`) — and it is recorded as this item's verdict, beside the silence
+      // one above: the two are the whole of what `native audio` may mean while this item plays.
+      this.tapVerdictForItem = true;
+      this.modeReason = 'the native tap kept returning the same frame, which is not a measurement — showing the album-art theme';
+      this.emit();
+    }
+  }
+
+  /**
+   * True when the audible player is within {@link SPECTRUM_NEAR_END_MS} of the end of its track.
+   *
+   * Judged on the displayed position, which is the player's own position: the question is whether
+   * the *listener* is at the end of the song, not whether some other clock has run out.
+   */
+  private nearTrackEnd(): boolean {
+    const duration = this.durationMs();
+    if (duration <= 0) return false;
+    return this.nativeClock() >= duration - SPECTRUM_NEAR_END_MS;
+  }
+
+  /**
+   * True when the frame in hand is **this item's own last measurement, still inside the tap's own
+   * frame period** (v1.9.26 — the premise §516.1 was amended for).
+   *
+   * `bands`/`live` are a last-value register, and on this item the register is not another item's: the
+   * plugin's `SpectrumAnalysis` is one per install, so while this item's analysis is between two
+   * frames, what it hands over is *this item's* last frame, one window old. The two facts that say so
+   * are both the plugin's, and this method reads them and nothing else:
+   *
+   *   - **`tapFramesForItem > 0`** — this item's tap has produced a frame for this item at some point
+   *     (see `noteTapFrames`). A register that has never moved *for this item* is the previous item's
+   *     frame, which is the loud skip, and it is deliberately not covered here.
+   *   - **`itemFramePeriodMs` / `itemFrameAgeMs`** — the period this item's tap declared for itself at
+   *     `prepare` (`maxFrames` over the sample rate, floored by the tap's own FFT hop:
+   *     `NaviliteSpectrum.SpectrumAnalysis.framePeriodMs`) and how old the frame it is holding is. A
+   *     frame no older than one of the tap's own periods is the measurement in hand; one older than
+   *     that is a tap that has stood still longer than its own pace — a state to name, not to draw.
+   *
+   * What the threshold is **not**: an engine constant, a count of polls, a `setTimeout`, or a "give up
+   * after N s" — the shapes `DECISIONS.md` §515.1 deleted, and the reason this is a comparison of two
+   * numbers the *plugin* publishes about the item it is tapping.
+   *
+   * A bridge that does not publish the pace reads as "not known" and the frame is not held: the
+   * v1.9.25 rule (only frames this item's tap produced since the last read) then stands, because a
+   * fact the engine cannot read is not a fact it may assume.
+   */
+  private holdsThisItemsOwnFrame(frame: NativeSpectrumFrame): boolean {
+    if (this.tapFramesForItem <= 0) return false;
+    const period = frame.itemFramePeriodMs;
+    const age = frame.itemFrameAgeMs;
+    if (typeof period !== 'number' || typeof age !== 'number') return false;
+    if (!(period > 0) || !(age >= 0)) return false;
+    return age <= period;
+  }
+
+  /**
+   * Count the tap's frames **for the item playing now**, and say whether this read carries a frame
+   * that item's tap actually produced (v1.9.24; the second half is v1.9.25).
+   *
+   * The rule the engine needs from this is one sentence long: *a frame may only be drawn, and may
+   * only spend the chip's third word, if this item's tap produced it since the last read* — plus, since
+   * v1.9.26, *unless it is this item's own last frame and is no older than that tap's own declared
+   * period* (see `holdsThisItemsOwnFrame`, and §516.1 as amended). A
+   * last-value register is not a measurement of the item that is playing — and the register is
+   * exactly what the plugin hands over: `bands`/`live` are the last frame *whose* tap ever analyzed,
+   * zeroed only by `detach`. So the frame in hand is admitted on the counter moving, and there are
+   * two counters it can move on:
+   *
+   *   - **`itemFrames`** — the plugin's own count **for the item its tap is on** (v1.9.25,
+   *     `NaviliteSpectrum.SpectrumAnalysis.frames`). It is zero at the install and grows only while
+   *     that item's analysis measures, so growth is the whole test: no baseline to get wrong and no
+   *     process-lifetime number to subtract. A tap measuring *silence* keeps growing it, and a tap
+   *     whose analysis is gone stands still — which is the difference the engine could not read
+   *     before, and the reason this defect looked like the owner's *"there isn't enough silence"*.
+   *   - **`frames`** — the tap's process-lifetime counter, for a bridge whose plugin predates
+   *     `itemFrames`. Its growth is only attributable while the plugin says the tap is on the item
+   *     the player is playing (the caller's `itemIsCurrent` gate), the first attributable read is a
+   *     *baseline* rather than a count (growth before it cannot be told apart from the previous
+   *     item's), and a read that finds the tap off this item rewinds the baseline
+   *     (`forgetTapFrames`). It can only ever under-count, and it cannot state another item's frames
+   *     as this one's.
+   *
+   * It is never reset by a clock: only by a new item, or by the tap leaving this one.
+   *
+   * @returns true when the counter moved — i.e. when the frame in hand is a measurement of this item
+   *   that the engine has not drawn yet.
+   */
+  private noteTapFrames(frame: NativeSpectrumFrame): boolean {
+    if (typeof frame.itemFrames === 'number') {
+      const moved = this.tapFramesAtLastRead === null ? frame.itemFrames > 0 : frame.itemFrames > this.tapFramesAtLastRead;
+      this.tapFramesForItem = frame.itemFrames;
+      this.tapFramesAtLastRead = frame.itemFrames;
+      return moved;
+    }
+    if (this.tapFramesAtLastRead === null) {
+      this.tapFramesAtLastRead = frame.frames;
+      return false;
+    }
+    const moved = frame.frames > this.tapFramesAtLastRead;
+    this.tapFramesForItem += Math.max(0, frame.frames - this.tapFramesAtLastRead);
+    this.tapFramesAtLastRead = frame.frames;
+    return moved;
+  }
+
+  /**
+   * Forget the frames seen so far: a new item is starting, or the tap is no longer on this one.
+   *
+   * Called at every start and adoption (the item is new) and from the orphan branch of
+   * {@link pollSpectrum} (the tap is somewhere else, so the growth in between describes neither item).
+   */
+  private forgetTapFrames(): void {
+    this.tapFramesForItem = 0;
+    this.tapFramesAtLastRead = null;
+    /*
+     * v1.9.27 (card `t_c8cc01c6`) — **and the verdict with the frames.** Both of this file's verdicts
+     * about an item's tap (silence, and one frozen frame) are answers about *that item's* frames, so
+     * the fact that one was reached belongs to the item as well: a new one starts with no answer
+     * (`startNative`, `adoptNativeAdvance`) and an item the tap has left goes back to having none (the
+     * orphan branch), which is what keeps the chip's window open for the item that is actually
+     * playing instead of spending the previous item's verdict on it.
+     */
+    this.tapVerdictForItem = false;
+  }
+
   /**
    * Say why the bars are what they are, once per distinct sentence (v1.9.24).
    *
-   * The poll runs at {@link SNAPSHOT_POLL_MS}, and several of the states it reports persist for the
+   * The poll runs at {@link SPECTRUM_POLL_MS}, and several of the states it reports persist for the
    * length of a transition or a track — so a sentence written straight from the poll would repaint
    * the screen thirty times a second with the same words. Same output, one write.
    */
@@ -2625,6 +3800,165 @@ export class AudioEngine {
     this.modeReason = reason;
     this.emit();
   }
+
+  /**
+   * Confirm the tap is still on the player, and re-arm the poll if the web view let it die.
+   *
+   * v1.7.7 — this replaces v1.7.6's `restartSpectrum`, which disarmed and then re-armed, i.e. called
+   * `stopSpectrum` (mix off the item) and then `startSpectrum` (a new mix on a playing item). That
+   * detach-then-install pair is the family of path the card names as the bug: it is what made the
+   * bars vanish until a whole new track was loaded, and the reconfiguration it performed on a
+   * rendering item is what the owner heard as *"a short pause"*.
+   *
+   * Nothing here detaches. `startSpectrum` reaches the plugin's `start`, which finds the audible
+   * player and calls `attach`, which **verifies** an item that already carries this tap — no mix
+   * written, no tap created — and only installs when the item is genuinely a different one, i.e. a
+   * new load, which is the one moment a tap can be installed without touching audio being rendered.
+   * So a resume, a return from the background and a dead-poll retry are all cheap reads that cannot
+   * make a sound. Idempotent, and safe while the tap is already healthy.
+   */
+  private verifySpectrum(): void {
+    if (this.backend !== 'native' || this.state !== 'playing') return;
+    // A tap on a player that is not the sound measures nothing (unreleased, `t_05775526`).
+    if (this.queueOwnsSound()) return;
+    const bridge = this.native;
+    const track = this.track;
+    if (!bridge?.startSpectrum || !track) return;
+    this.lastSpectrumRecheckAt = this.clockNow();
+    if (this.spectrumPoll === null) {
+      /*
+       * The poll itself died — the web view was suspended long enough that its timers went with it.
+       * Arming it again is the recovery, and it reaches the plugin's verify on its own.
+       */
+      this.startConsumers();
+      return;
+    }
+    /*
+     * The poll is alive, so what needs confirming is the *tap*: exactly one call, which is a read
+     * unless the item has been replaced under us.
+     *
+     * v1.9.22 — the request takes the install ownership like any other, so a `false` from it is not
+     * confused with a `false` from an install that a newer request has overtaken (see
+     * {@link claimSpectrumInstall}); a verify's own answer changes nothing else, as it never has.
+     */
+    const serial = this.claimSpectrumInstall(track);
+    void bridge.startSpectrum(track.url, this.nativePositionMs).then(
+      (started) => void this.settleSpectrumInstall(serial, started === true),
+      () => void this.settleSpectrumInstall(serial, false),
+    );
+  }
+
+  /**
+   * Put the tap on the item a load has just put in place, and say so if it will not go.
+   *
+   * v1.8.0 — this is the install, and it is the only place a load installs. `bridge.load` has
+   * resolved, so the player's current item is the new one and the plugin's `attach` — which verifies
+   * an item that already carries this tap and installs on any other — lands on the item that is
+   * about to be heard. Called after a load and nowhere else; a resume reaches the same plugin method
+   * through {@link verifySpectrum}, where it is a verify.
+   *
+   * v1.9.22 — **one install request, and only the newest one may answer for this track.** Every
+   * request that reaches the plugin is answered (`true`, `false`, or a rejection the bridge turns
+   * into `false`), and the plugin itself rejects a request a newer one has overtaken — so a track's
+   * install answer arrives out of order with respect to the requests. Writing `spectrum off` and
+   * *"the tap did not start"* from a superseded request's answer is a verdict about the wrong
+   * request, on the track the listener is hearing; the serial is what keeps the answer with the
+   * request that owns it. The newest request's own answer is kept on {@link spectrumInstall}, where
+   * {@link confirmSpectrum} reads it.
+   *
+   * v1.9.24 — **and a `false` is no longer a verdict.** It used to clear `spectrumArming` and start a
+   * 5 s timer (`retrySpectrumOnce`), i.e. it stated *native audio* about a track, out of one answered
+   * request, and then asked again on a clock. Both halves are the defect this release removes: the
+   * ways the plugin refuses are transient by construction — a named slot with no loaded item is a
+   * real state for the length of a `fillSlot` (`src/player/native.ts:791`), and a request a newer one
+   * overtook says nothing about this track at all — so the answer is reported on the reason line and
+   * the *poll* does the asking: a tap that is not on this item is an orphan sighting, and the orphan
+   * branch of {@link pollSpectrum} re-verifies on the plugin's own evidence, rate-limited, for as long
+   * as the state lasts. Nothing here decides that this track cannot have a spectrum.
+   */
+  private attachSpectrum(track: TrackRequest): void {
+    const bridge = this.native;
+    if (this.backend !== 'native' || !bridge?.startSpectrum) return;
+    /*
+     * **The tap follows the sound or says nothing (unreleased, `t_05775526`).** The tap is on the
+     * app's own player. When the away queue owns the sound that player is silent, so a tap there
+     * renders "playing" over no samples — the owner's dead spectrum. The honest choice is the
+     * album-art theme with the reason on the line, not a flat row under a playing icon.
+     */
+    if (this.queueOwnsSound()) {
+      this.spectrumLive = false;
+      this.setSpectrumReason(
+        'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
+      );
+      return;
+    }
+    const serial = this.claimSpectrumInstall(track);
+    void bridge
+      .startSpectrum(track.url, this.nativePositionMs)
+      .then((started) => {
+        // A request a newer one has overtaken is not a verdict about anything this engine holds.
+        if (!this.settleSpectrumInstall(serial, started === true)) return;
+        if (this.track !== track || this.backend !== 'native') return;
+        if (started) return;
+        this.setSpectrumReason(
+          'the plugin has no tap on the item that is playing yet — it answered that this request did not start, so the engine keeps asking while the bars follow the audio',
+        );
+      })
+      .catch((error: unknown) => {
+        if (!this.settleSpectrumInstall(serial, false)) return;
+        if (this.track !== track) return;
+        this.spectrumLive = false;
+        this.setSpectrumReason(
+          `the plugin did not put a tap on the item that is playing (${error instanceof Error ? error.message : String(error)}) — the engine keeps asking while the bars follow the audio`,
+        );
+      });
+  }
+
+  /**
+   * Take ownership of the tap's next answer (v1.9.22).
+   *
+   * Every request the engine makes for the tap — an install after a load, the verify a resume or a
+   * re-check makes — is given a serial, and only the newest serial's answer is allowed to describe
+   * this engine's state. The plugin answers out of order by construction: it rejects a request a
+   * newer one has overtaken, so an *older* request's `false` and a *newer* request's `true` both
+   * exist at once, and one of them is a lie about the track that is playing.
+   */
+  private claimSpectrumInstall(track: TrackRequest): number {
+    const serial = (this.spectrumInstallSerial += 1);
+    this.spectrumInstall = { track, serial, answered: false, ok: false };
+    return serial;
+  }
+
+  /** Record what a request answered. False when a newer request has taken the ownership. */
+  private settleSpectrumInstall(serial: number, ok: boolean): boolean {
+    const install = this.spectrumInstall;
+    if (install === null || install.serial !== serial) return false;
+    install.answered = true;
+    install.ok = ok;
+    return true;
+  }
+
+  /**
+   * Confirm the tap for the track a load has just put in place (v1.9.22) — one plugin call, made
+   * unless the install that request made for this track has already answered that it landed.
+   */
+  private confirmSpectrum(track: TrackRequest): void {
+    if (this.backend !== 'native' || this.state !== 'playing') return;
+    const install = this.spectrumInstall;
+    if (install !== null && install.track === track && install.answered && install.ok) return;
+    this.verifySpectrum();
+  }
+
+  /**
+   * One retry for an install that did not take is **deleted** (v1.9.24).
+   *
+   * It was a `setTimeout` of {@link SPECTRUM_RECHECK_MS} per failed install, and it existed because
+   * the recheck budget in `pollSpectrum` only reached a tap that was *polling* while an orphaned tap
+   * was the one case that reported anything. The retry is the poll's now, on the plugin's own
+   * evidence: an item with no tap on it reads `itemIsCurrent: false`, the orphan branch of
+   * {@link pollSpectrum} sees it and re-verifies, rate-limited — which is the same ask, keyed to the
+   * item rather than to a timer, and it is the shape §24.6.2 of the diagnosis requires.
+   */
 
   /**
    * Line the tap up with the position the audible player reports.
@@ -2638,7 +3972,7 @@ export class AudioEngine {
   /**
    * The Web Audio graph, built only by the browser path and only for it.
    *
-   * `source → analyser → gain → destination`, written once and never dismantled: the analyser is
+   * `source → analyser → gain → destination`, written once and never taken apart: the analyser is
    * always reachable from the destination, so it is always rendered. A graph with no path to the
    * destination is pruned by the engine, and then `getByteFrequencyData()` returns zeros and
    * raises nothing — the silent flatline of v1.7.
@@ -2695,11 +4029,17 @@ export class AudioEngine {
     if (this.ctx.state === 'suspended') {
       try {
         await this.ctx.resume();
-      } catch (cause) {
+      } catch {
         this.spectrumLive = false;
-        this.modeReason = `the audio context could not be resumed (the browser wants a user gesture first) — the bars follow the album art until it is (${String(cause)})`;
+        this.modeReason = 'the audio context could not be resumed (the browser wants a user gesture first)';
       }
     }
+  }
+
+  private startMeter(): void {
+    if (this.meterTimer !== null) return;
+    this.meterTimer = setInterval(() => this.sample(), METER_INTERVAL_MS);
+    this.sample();
   }
 
   private stopMeter(): void {
@@ -2730,7 +4070,7 @@ export class AudioEngine {
     this.identicalFrames = identical ? this.identicalFrames + 1 : 0;
     const frozen = this.identicalFrames >= FROZEN_FRAMES_BEFORE_THEME;
 
-    // Bands above ~10 kHz are usually empty on lossy streams, so loudness is measured over the range
+    // Bands above ~10 kHz are usually empty on lossy streams, so loudness is taken over the range
     // a music signal actually occupies.
     const audibleBins = Math.max(1, Math.floor(freq.length * 0.6));
     let audibleSum = 0;

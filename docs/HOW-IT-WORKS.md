@@ -43,7 +43,7 @@ green `npm test` on a machine with no Chrome is not evidence about the browser a
 | `api/subsonic.ts` | the Subsonic client: URL building, salt+md5 token auth, error mapping |
 | `api/sidecar.ts`, `api/lyrics.ts` | the deployment's own `/lyrics` route, and the server's lyrics fallback |
 | `player/engine.ts` | **the one transport**: a pure reducer (`reduce`) + a class that drives one of the two engines |
-| `player/native.ts` | the Capacitor bridge: the app's one player (`NaviliteRemote`) — load/play/pause/seek/sync and the published queue — plus `NaviliteSpectrum`'s frames and `NaviliteDownloads` |
+| `player/native.ts` | the Capacitor bridge (`@capgo/capacitor-native-audio`): load/play/pause/seek/sync + the spectrum tap |
 | `player/visualizer.ts` | the canvas bars: attack/release envelope, palette, no-samples theme mode |
 | `player/palette.ts` | palette extraction from the cover art, and the default palette |
 | `player/mediasession.ts` | the lock screen / media keys |
@@ -54,13 +54,13 @@ green `npm test` on a machine with no Chrome is not evidence about the browser a
 ## Audio architecture, in one paragraph
 
 There is exactly **one audible engine**, and `src/player/engine.ts` is the only thing that decides
-which: inside the Capacitor wrapper the audio comes from the app's own queue player
-(`NaviliteRemote`) driven through `src/player/native.ts`, and in a browser it comes from the page's
-own `<audio>` element through a Web Audio graph (`ensureGraph`) whose analyser feeds the speakers.
-The engine is a state machine (`idle | loading | playing | paused | interrupted | error`) driven by `reduce()`;
+which: inside the Capacitor wrapper the audio comes from the platform player (AVPlayer / ExoPlayer)
+driven through `src/player/native.ts`, and in a browser it comes from the page's own `<audio>`
+element through a Web Audio graph (`ensureGraph`) whose analyser feeds the speakers. The engine is a
+state machine (`idle | loading | playing | paused | interrupted | error`) driven by `reduce()`;
 nothing else in the codebase writes playback state. The **FFT tap** is the spectrum source and lives
-on the *audible item*: on the native path every item is built with its own tap (`makeItem`) as the
-player creates it and it is never re-attached on a pause or a return to the foreground, and in
+on the *audible item*: on the native path it is attached to the item the load just put in place
+(`attachSpectrum`, v1.8.0) and never re-attached on a pause or a return to the foreground, and in
 the browser it is the analyser node on the element. The **queue** (`src/state/queue.ts`) is the only
 owner of what "next" means — the order, the cursor, repeat and shuffle — and the only caller of
 `engine.play`; the engine's job when a track finishes is to say so exactly once (`reportEnded`), and

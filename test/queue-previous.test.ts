@@ -58,6 +58,10 @@ function stubEngine(): Stub {
       plays.push(track.url);
       return Promise.resolve();
     },
+    prepareNext: async () => true,
+    warmedUrl: () => null,
+    pruneWarmed: () => undefined,
+    discardPrepared: async () => undefined,
     seek: async (ms: number) => {
       seeks.push(ms);
     },
