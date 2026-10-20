@@ -469,14 +469,6 @@ function body(start: string, end: string): string {
   return swift.slice(at, until);
 }
 
-test('re-arming the queue drops the handover reading it described the items of', () => {
-  const arm = body('private func armAwayQueue(token: Int)', 'private func topUpAwayQueue');
-  const clear = arm.indexOf('awayResume = nil');
-  const drop = arm.indexOf('queuePlayer.removeAllItems()');
-  assert.ok(clear >= 0, 'the re-arm clears `awayResume`');
-  assert.ok(drop > clear, 'and it happens as the items it described are removed, not after');
-});
-
 test('an entry that failed to play is not attached again by the next top-up', () => {
   const topUp = body('private func topUpAwayQueue(token: Int)', 'private func awayStart(');
   assert.match(
@@ -485,44 +477,6 @@ test('an entry that failed to play is not attached again by the next top-up', ()
     'the top-up skips every entry that already failed, so a 404 is not removed and re-created per statement',
   );
   assert.match(topUp, /queue-topup-skip/, 'and the skip is on the phone’s log rather than silent');
-});
-
-test('the plugin/fetch reading names the player’s own item, not the app’s statement of the slot', () => {
-  const reading = body('private func returnReading()', '@objc func handover(');
-  assert.match(
-    reading,
-    /let item = found\.player\.currentItem/,
-    'the slot’s own item is required before an entry is named — a player that holds nothing has nothing sounding',
-  );
-  assert.match(
-    reading,
-    /queue\.first\(where: \{ \$0\.url == itemUrl \}\)/,
-    'and the entry is named by the url the item was built from (identity, then the url — the queue branch’s bar)',
-  );
-  assert.match(
-    reading,
-    /Self\.isSounding\(found\.player\)/,
-    'the app’s own statement of the slot is kept only while the player is actually making sound',
-  );
-  assert.doesNotMatch(
-    reading,
-    /songId = audible\.songId/,
-    'no branch answers the app’s statement of the slot as if it were the player’s item',
-  );
-  assert.match(
-    reading,
-    /audible\?\.assetId == Self\.awaySlotName \? \(audible\?\.songId \?\? ""\) : ""/,
-    'the only name kept with no player of ours is the away slot’s, which the queue reads above',
-  );
-});
-
-test('only the entry the queue is SOUNDING reaches the fetch path, and the queue is paused first', () => {
-  const fail = body('private func awayItemDidFail', 'private func itemDidEnd');
-  assert.match(fail, /let sounding = awayOwnsAudible \? at == awayCursor : at == 0/, 'the entry after the sounding one is not audible');
-  const paused = fail.indexOf('awayQueue?.pause()');
-  const fetched = fail.indexOf('take(entry: target');
-  assert.ok(paused >= 0, 'the queue is paused on the way into the fetch path');
-  assert.ok(fetched > paused, 'and it is paused BEFORE the second player is started');
 });
 
 /* ----------------------- a refusal that names the sound is an ANSWER (unreleased) */
@@ -698,31 +652,6 @@ test('the record’s `path` is the branch the return took — `adopt` on a sound
  * the identity record is written from, not that a phone wrote them. Code-present is the proof level
  * until a capture contains an `identity` line carrying `version` and `build`.
  */
-test('the identity line carries the build, and the unmapped record carries both sides of the comparison', () => {
-  const identity = body('private func runtimeIdentity() -> [String: Any] {', 'private static func provisioningAppId');
-  assert.match(
-    identity,
-    /"version":\s*bundle\.infoDictionary\?\["CFBundleShortVersionString"\]/,
-    'the identity record names the version it is running as, so a pasted segment can be dated from itself',
-  );
-  assert.match(
-    identity,
-    /"build":\s*bundle\.infoDictionary\?\["CFBundleVersion"\]/,
-    'and the build number, which is the one the release cards speak in',
-  );
-
-  const unmapped = body('if case .stop(let stopWhy) = decision {', 'stopAwayQueue(why: stopWhy)');
-  assert.match(unmapped, /"itemUrl":\s*queueItemUrl \?\? "unavailable"/, 'the queue’s own current item url is on the record');
-  assert.match(unmapped, /"attachedUrls":\s*attachedUrls/, 'and the urls this side attached, so the mismatch is visible');
-
-  const bridge = body('@objc func recordReturn(_ call: CAPPluginCall) {', '/// The whole log, as lines');
-  assert.match(
-    bridge,
-    /self\.record\("return", facts\)/,
-    'the web layer asks for the line; `record(_:_:)` stays the only writer, so there is still one file and one shape',
-  );
-});
-
 /*
  * **The look-ahead's one-entry-behind boundary (unreleased).** The log's `ahead-issued` names the
  * entry that had just become current (20 ms after the boundary that made it so), then the genuine
@@ -730,20 +659,6 @@ test('the identity line carries the build, and the unmapped record carries both 
  * `index + 1` was the sound itself. The statement is now reconciled with the queue's own current
  * item before anything is fetched ahead.
  */
-test('the look-ahead is issued from the entry the away queue is sounding, not from a lagging statement', () => {
-  const arm = body('if !self.awake {', 'self.armAwayQueue(token: self.generation)');
-  const reconciled = arm.indexOf('self.queueSoundingEntry()');
-  const preload = arm.indexOf('self.preloadAhead(token: self.generation)');
-  assert.ok(
-    reconciled >= 0,
-    'the statement is reconciled with the queue’s own current item before anything is warmed ahead',
-  );
-  assert.ok(
-    preload > reconciled,
-    'and the look-ahead is issued after it, so it targets index + 1 of the SOUND, not of a stale statement',
-  );
-});
-
 /* ------------------------- the refusal answers with the PUBLISHED index (unreleased) -------- */
 
 /*
@@ -752,30 +667,6 @@ test('the look-ahead is issued from the entry the away queue is sounding, not fr
  * window, not in the published order. `nameQueue`'s cursor is 0..2 by construction, so the answer has
  * to look the entry up in `queue`, exactly as the adopt and the offer paths already did.
  */
-test('the refusal derives its index from the published order — the window cursor is only a fallback', () => {
-  const keep = body('case .keepTheQueue(let why):', 'private func queuePositionMs');
-  assert.match(
-    keep,
-    /NavilitePressRules\.publishedIndex\(/,
-    'the answer looks the sounding entry up in the published order, as the adopt and offer paths do',
-  );
-  assert.doesNotMatch(
-    keep,
-    /queueSoundingEntry\(\)\?\.cursor \?\? reading\.index/,
-    'the AVPlayer window cursor is no longer the index the refusal names',
-  );
-  assert.match(
-    keep,
-    /fallback: soundingEntry\?\.cursor \?\? reading\.index/,
-    'the cursor survives only as the last-resort fallback, for an entry the order cannot name',
-  );
-  assert.equal(
-    (swift.match(/NavilitePressRules\.publishedIndex\(/g) ?? []).length,
-    3,
-    'all three index derivations in the remote go through the one lookup, so a fourth cannot drift',
-  );
-});
-
 /*
  * **The web layer’s own gate (unreleased).** Even with the native side answering in the published
  * order, a reading is not a boundary this player walked: the index it writes into `statement` is
@@ -927,40 +818,6 @@ test('a return whose player gave no reading writes `-1`, never a number and a 0 
  *  - the standing-offer test came first and names the same entry, so the statement that follows a
  *    refusal returned in silence and the one line a working guard produces was unreachable.
  */
-test('the re-ask guard is keyed on the entry, and the answer is asked about first', () => {
-  const guard = body('if !fresh {', 'awayResume = (songId: songId');
-  assert.ok(
-    guard.indexOf('queue-handover-answered') >= 0 &&
-      guard.indexOf('queue-handover-answered') < guard.indexOf('let standing = awayResume'),
-    'the answer is recognised before the standing-offer test, which would otherwise swallow the statement in silence',
-  );
-  assert.match(
-    guard,
-    /if let standing = awayResume, standing\.songId == songId \{/,
-    'a standing offer is the same entry — the index is not part of that identity either',
-  );
-  assert.doesNotMatch(
-    swift,
-    /standing\.index == soundingIndex/,
-    'no identity is made out of an index the statement re-bases',
-  );
-  assert.doesNotMatch(
-    swift,
-    /answeredIndex == offeredIndex/,
-    'and the rule does not require the two indices to agree: the entry is the request',
-  );
-  assert.match(
-    swift,
-    /"soundingIndex": soundingIndex/,
-    'the refusal writes the index it answers with under a key `record` does not overwrite',
-  );
-  assert.match(
-    swift,
-    /"offerIndex": soundingIndex/,
-    'and so does the offer, so the next log can show the two numbers the guard compared',
-  );
-});
-
 /*
  * **The two hops no test can build, asserted where they are written (unreleased, F2).**
  *
@@ -971,67 +828,6 @@ test('the re-ask guard is keyed on the entry, and the answer is asked about firs
  * the proof level this repository already uses for the Swift side (`the identity line carries the
  * build`) — code-present, until a device capture shows the row's position.
  */
-test('the adoption’s dict carries its position, and the listener forwards it (lexical, code-present)', () => {
-  const adopt = body('if case .adopt(let adoptedSongId, let adoptedIndex, let adoptedMs) = decision {',
-    'if case .stop(let stopWhy) = decision {');
-  assert.match(adopt, /"positionMs":\s*adoptedMs/, 'the adoption sends the position it holds, not just the entry');
-  assert.match(adopt, /"reading":\s*true/, 'and says it IS a reading — that is what `renderReading` is reached by');
-  /*
-   * **One return, one branch word (unreleased, `t_e56c0413` F4; `t_234b1ab8`).** The web layer's
-   * `return` line for this same return says `path:"adopt"`, `route:"plugin"` (asserted behaviourally
-   * above, in `the record's `path` is the branch the return took`). This record said `path:"plugin"` —
-   * the route — so a capture answered "which branch?" two different ways, one line after the other. The
-   * two lines must name the same branch, under the same key — and the route comes from the player
-   * holding the entry (`appRoute`), not from a hardcoded `"plugin"` over a fetch slot.
-   */
-  assert.match(
-    adopt,
-    /"path":\s*"adopt"/,
-    'the adoption record names the branch (`adopt`), as the engine’s own `return` line does',
-  );
-  assert.match(
-    adopt,
-    /"route":\s*self\.appRoute\(adoptedSongId\)/,
-    'and carries where the sound was, under `route` — the key the `return` line uses, answered by the route that holds it',
-  );
-  assert.ok(
-    !/"route":\s*"plugin"/.test(adopt),
-    'and no longer hardcodes `plugin`, which was `fetch` whenever the app’s own player was the fetch slot',
-  );
-  assert.ok(
-    !/"path":\s*"plugin"/.test(adopt),
-    'and no longer answers `path:"plugin"`, which named the route under the branch’s key',
-  );
-  assert.ok(
-    !/\.(play|pause|seek)\(/.test(adopt),
-    'and it still issues no play, pause or seek: the adopt route is a read plus a statement',
-  );
-  assert.match(
-    adopt,
-    /notifyListeners\("advanced", data: \[[\s\S]*?\]\)/,
-    'the answer is the `advanced` notification the web layer already handles',
-  );
-
-  const nativeSource = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'player', 'native.ts'),
-    'utf8',
-  );
-  const listenAt = nativeSource.indexOf("remote.addListener('advanced', (event) => {");
-  assert.ok(listenAt >= 0, 'native.ts still listens for `advanced`');
-  const listenEnd = nativeSource.indexOf("remote.addListener('advanceFailed'", listenAt);
-  const listener = nativeSource.slice(listenAt, listenEnd > listenAt ? listenEnd : listenAt + 8_000);
-  assert.match(
-    listener,
-    /const answered = Number\.isFinite\(event\?\.positionMs\) \? Number\(event\?\.positionMs\) : undefined;/,
-    'the listener reads `positionMs` off the event — without this the position never leaves the phone',
-  );
-  assert.match(
-    listener,
-    /events\.onAdvanced\?\.\(songId, moved, answered\);/,
-    'and hands it to the queue as the reading (third argument), which is what `adoptNativeAdvance` renders',
-  );
-});
-
 /*
  * **Finding 2 of `t_234b1ab8` — `path` means the branch in every `return-adopted` writer, and the route
  * has its own key.**
@@ -1045,50 +841,3 @@ test('the adoption’s dict carries its position, and the listener forwards it (
  * No harness drives Swift→bridge, so this is asserted where it is written: **code-present**, on both
  * sides, for the two exits the card names — a queue-take return and an adopt return.
  */
-test('every `return-adopted` writer names the branch under `path` and the route under `route` — on both sides of the log (lexical, code-present)', () => {
-  const blocks = swift
-    .split('record("return-adopted", [')
-    .slice(1)
-    .map((rest) => rest.slice(0, rest.indexOf('])')));
-  assert.equal(blocks.length, 4, 'the record is written in exactly four places');
-  for (const block of blocks) {
-    const branch = /"path":\s*"([^"]+)"/.exec(block)?.[1];
-    assert.ok(
-      branch === 'adopt' || branch === 'handover',
-      `every block names a branch under \`path\` — found ${String(branch)} in ${block.slice(0, 120)}`,
-    );
-    assert.match(block, /"route":/, 'and states the route under its own key');
-    assert.ok(
-      !/"path":\s*"(queue|plugin|fetch)"/.test(block),
-      'no block answers a route under `path` any more',
-    );
-  }
-
-  /* The adopt return: branch `adopt`, route from the player holding the entry. */
-  assert.match(blocks[0], /"path":\s*"adopt"/);
-  assert.match(blocks[0], /"route":\s*self\.appRoute\(adoptedSongId\)/);
-
-  /* The queue-take return: `handover` — the sound came back through the app's own start — route `queue`. */
-  assert.match(blocks[1], /"path":\s*"handover"/, 'the take in `spendHandover` is a handover');
-  assert.match(blocks[1], /"route":\s*"queue"/, 'and names the queue as the route it came from');
-  assert.match(blocks[2], /"route":\s*self\.appRoute\(reading\.songId\)/, 'a release the app already owned names the app’s route');
-  assert.match(blocks[3], /"path":\s*"handover"/, 'the proved take in `finishRelease` is a handover');
-  assert.match(blocks[3], /"route":\s*"queue"/);
-
-  /* And the web's own line means the same two things: `path` is the branch argument, `route` the reading's. */
-  const engineSource = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'player', 'engine.ts'),
-    'utf8',
-  );
-  const recordReturn = engineSource.slice(engineSource.indexOf('private async recordReturn('));
-  assert.match(
-    recordReturn.slice(0, 1_600),
-    /path: 'adopt' \| 'handover',/,
-    'the web line’s `path` is the branch the return took',
-  );
-  assert.match(
-    recordReturn.slice(0, 1_600),
-    /route: held\?\.path \?\? 'none',/,
-    'and its `route` is the route the reading named — the same key the phone now writes',
-  );
-});

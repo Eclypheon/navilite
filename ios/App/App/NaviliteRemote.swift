@@ -9,20 +9,20 @@ import UIKit
  * Navilite's own lock-screen remote commands, the audio session's re-arm, and — since v1.9.8, and
  * **for the whole queue since v1.9.9** — the track boundary itself while the app is not running.
  *
- * Why the file exists at all (v1.7): playback on iOS is AVFoundation, driven by
- * `@capgo/capacitor-native-audio`, which sets the `AVAudioSession` to `.playback`, activates it,
- * publishes the Now Playing card and targets `MPRemoteCommandCenter` — for **play, pause, stop,
- * toggle, skip-15s and scrub**. It does not enable `nextTrackCommand` / `previousTrackCommand`, so a
- * lock screen driven by that plugin alone has no next/previous buttons. Those two buttons are what
- * this plugin added first, and — since v1.9.10 — the Now **Playing** card as well (see the v1.9.10
- * section below), because the vendor's own writer publishes a duration in the same turn as the play,
- * before the item has one, and never comes back to correct it. It still never touches the session
- * *category*: two writers on the session is exactly how the transport goes dead.
+ * Why the file exists at all (v1.7): playback on iOS is AVFoundation, and since v2.0.0-beta.33 the
+ * only player the app constructs is this file's `AVQueuePlayer`. That player publishes the Now
+ * Playing card and targets `MPRemoteCommandCenter` — for **play, pause, stop, toggle, skip-15s and
+ * scrub** — but it does not enable `nextTrackCommand` / `previousTrackCommand`, so a lock screen
+ * driven by it alone has no next/previous buttons. Those two buttons are what this file added first,
+ * and — since v1.9.10 — the Now **Playing** card as well (see the v1.9.10 section below), because a
+ * writer that publishes a duration in the same turn as the play, before the item has one, never comes
+ * back to correct it. This file still never touches the session *category*: two writers on the
+ * session is exactly how the transport goes dead.
  *
  * `activateSession()` is the second half: after a call, Siri, or another app taking the session, iOS
  * deactivates ours, and re-activating it is the documented fix for "playback looks fine but the
  * controls do nothing" after a return to the foreground. It only calls `setActive(true)` — it never
- * changes the category, so it cannot undo what the audio plugin set up.
+ * changes the category, so it cannot undo what `activateSession` set up.
  *
  * ## v1.9.9 — the queue is published here, and this side walks the whole of it
  *
@@ -953,11 +953,19 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             takeNext(how: "the away queue drained at the boundary", automatic: true, token: generation)
             return
         }
-        guard let recorded = audible, let found = AudibleBridgePlayer.player(recorded.assetId, from: bridge), found.player.currentItem === item else {
+        /*
+         * The queue is the only player (v2.0.0-beta.33), so "is this an item we are hearing?" is a
+         * membership test against the items this app attached — not a lookup of another player's
+         * current item. That lookup is why every background boundary was logged `end-ignored` and
+         * returned once the plugin left the graph: the name no player answers to, on every track end.
+         */
+        guard awayItems.contains(item) else {
             ignored += 1
-            record("end-ignored", ["why": "the item that ended is not the audible player's current item"])
+            record("end-ignored", ["why": "the item that ended is not one this app attached to the queue"])
             return
         }
+        // The entry the cursor names, read off the queue's own list.
+        let recordedSongId = awayCursor >= 0 && awayCursor < awayEntries.count ? awayEntries[awayCursor] : ""
         /*
          * And with the web layer running this side does not act at all: the app owns the boundary
          * then, exactly as it did before this release, and two owners is how a track gets skipped.
@@ -971,11 +979,11 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
              * `awake: true` while the app was in his pocket, then nothing in this file ever ran at the
              * seam and every native fix before this one was a fix to a path that was not being taken.
              */
-            record("end", ["taken": false, "slot": recorded.assetId, "songId": recorded.songId,
+            record("end", ["taken": false, "slot": Self.awaySlotName, "songId": recordedSongId,
                            "why": "the app was on screen, so the web layer owns this boundary"])
             return
         }
-        record("end", ["taken": true, "slot": recorded.assetId, "songId": recorded.songId,
+        record("end", ["taken": true, "slot": Self.awaySlotName, "songId": recordedSongId,
                        "duration": item.status == .readyToPlay ? item.duration.seconds : -1])
         /*
          * The statement in force at this moment travels with the boundary (v1.9.10). Everything the
@@ -2122,27 +2130,20 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
      */
     /*
      * **Two tracks were sounding at once, and nothing in this file asked whether another player was
-     * already playing (v2.0.0-beta.20).**
+     * already playing (v2.0.0-beta.20).** That second player is gone (v2.0.0-beta.33): the queue is
+     * the only thing in the app that constructs one, and it holds every item it plays, so "is
+     * something sounding?" is a question only it can answer.
      *
-     * The owner's report — *"when i fast forward a song, it plays over the top of the current song
-     * rather than stopping current song"* — is a press on the island while the away queue was armed
-     * but had not yet sounded: `awayStart` refused nothing, called `queuePlayer.play()`, and the
-     * plugin's own asset went on sounding the track the listener was already hearing. The plugin does
-     * not do this for us: `play(assetId:)` starts an `AVAudioPlayer` for the asset it is given and
-     * touches no other one (node_modules/@capgo/capacitor-native-audio, Plugin.swift `play`), so two
-     * assets playing at once is exactly what two plays produce.
-     *
-     * So "exactly one player sounds" is an invariant here rather than an assumption, and it is
-     * enforced **where the sound starts**, not where it is asked for: `awayStart` before the queue's
-     * Every transport path — the lock screen's commands, the end-of-track seam
-     * — ends in one of those two calls, so no path can start a second source.
+     * So "exactly one player sounds" is structural now rather than an invariant to enforce: there is
+     * one construction site and every transport path — the lock screen's commands, the end-of-track
+     * seam, a jump from the island — ends on that same queue.
      */
 
     /// **Is the away queue making a sound right now?**
     ///
-    /// state is the queue's"), and a stale `false` is the state in which this side used to skip the
-    /// pause and start a second player on top of the first. A stop decision taken from the player
-    /// itself cannot be stale.
+    /// Read from the player, never from this file's own bookkeeping: a stale `false` is the state in
+    /// which this side used to skip a pause and start a second player on top of the first. A stop
+    /// decision taken from the player itself cannot be stale.
     private var queueIsSounding: Bool {
         awayQueue?.timeControlStatus == .playing
     }
@@ -2299,18 +2300,6 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
         // buffer is empty while the player says it is waiting — either is the silent seam.
         if item.isPlaybackBufferEmpty && !item.isPlaybackLikelyToKeepUp { return true }
         return player.timeControlStatus == .waitingToPlayAtSpecifiedRate && item.isPlaybackBufferEmpty
-    }
-
-    /// How much of the audible track is left, in seconds (0 when it cannot be read). The look-ahead
-    /// uses it to decide whether a slot may be reloaded without the reload being heard.
-    private static func remainingSeconds(from assetId: String?, bridge: CAPBridgeProtocol?) -> Double {
-        guard let assetId, let found = AudibleBridgePlayer.player(assetId, from: bridge),
-              let item = found.player.currentItem,
-              item.status == .readyToPlay else { return 0 }
-        let duration = item.duration.seconds
-        let position = found.player.currentTime().seconds
-        guard duration.isFinite, position.isFinite, duration > 0, position >= 0 else { return 0 }
-        return max(0, duration - position)
     }
 
     /* ------------------------------------------------- the boundary log (v2.0-beta.16) */
