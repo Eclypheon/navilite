@@ -264,6 +264,39 @@ export function handoverVerdict(input: {
   };
 }
 
+/* ------------------------------------ a press that names an entry (v2.0.0-beta.32) */
+
+/**
+ * **Does `queueTransport('play')` for `songId` have to rebuild the queue? (v2.0.0-beta.32)**
+ *
+ * An `AVQueuePlayer` cannot jump, so a press that names an entry is served by rebuilding the item
+ * list from that entry — `startQueue(at:)` in `NaviliteRemote.swift`. The rebuild is only skippable
+ * when the queue is *stopped at its own front*, because that is the one state where
+ * `queuePlayer.currentItem` is `awayItems[0]`: the entry the press names is attached, and it is
+ * first. A queue that has sounded is not that state.
+ *
+ * `cursor` is how many entries the queue has sounded. **It rises inside AVFoundation's own advance**
+ * (`NaviliteRemote.swift`, the `AVPlayerItemDidPlayToEndTime` boundary sets `awayCursor = next`) while
+ * nothing trims the front of `attached`, so after one native advance the front of the list is an
+ * entry the player no longer holds. Reading only the front (`cursor < 0 || attached[0] !== songId`)
+ * therefore answers "no rebuild" for an entry that is gone: `startQueue` reaches its attach guard
+ * with `currentItem !== awayItems[0]`, logs `could not attach X, so it was not started`, and the
+ * owner's press starts nothing. That is the send-back on t_44c5a1d4; the cursor is what makes the
+ * front stale, so the cursor has to be part of the question.
+ */
+export function startNeedsRebuild(input: {
+  /** songIds attached to the queue, in play order — the front is never trimmed. */
+  attached: readonly string[];
+  /** How many entries the queue has sounded; `-1` before it has been started. */
+  cursor: number;
+  /** The entry the press names. */
+  songId: string;
+}): boolean {
+  const { attached, cursor, songId } = input;
+  if (cursor !== 0 || attached[0] !== songId) return true;
+  return false;
+}
+
 /**
  * **Is a re-arm a no-op? (v2.0.0-beta.22)**
  *

@@ -1730,7 +1730,19 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
             return false
         }
         let entry = queue[target]
-        if awayCursor < 0 || awayEntries.first != entry.songId {
+        /*
+         * **Rebuild unless the queue is stopped at its own front (t_44c5a1d4's send-back).**
+         *
+         * The attach guard below is `currentItem === awayItems[0]`, so skipping the rebuild is only
+         * safe in the one state where that holds: the queue is at `awayCursor == 0` and the entry the
+         * press names is the first one attached. This read `awayCursor < 0` instead, and the cursor
+         * rises inside AVFoundation's own advance (the `AVPlayerItemDidPlayToEndTime` boundary sets
+         * `awayCursor = next`) while nothing trims the front of `awayEntries` — so after one native
+         * advance the front was a consumed entry still sitting at index 0. Naming it answered "the
+         * queue already holds this", no rebuild happened, the guard failed, the log said
+         * `could not attach X, so it was not started`, and the owner's press started nothing.
+         */
+        if awayCursor != 0 || awayEntries.first != entry.songId {
             rebuildAwayQueue(at: target, token: token)
         }
         guard !awayItems.isEmpty, queuePlayer.currentItem === awayItems[0] else {

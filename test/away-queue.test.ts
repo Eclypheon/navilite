@@ -16,7 +16,10 @@
  *      must not stay in a player that would still sound it later.
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   armIsNoOp,
@@ -27,6 +30,7 @@ import {
   handoverVerdict,
   nextTarget,
   queueHolds,
+  startNeedsRebuild,
   type AwayEntry,
   type AwaySeamState,
   type AwayStatement,
@@ -287,3 +291,56 @@ test('an identical plan is not re-armed — one arm for fourteen identical state
   // And a queue that has never been created is armed.
   assert.equal(armIsNoOp({ attached: [], plan: [], cursor: -1, owned: false, armed: false }), false);
 });
+
+/* ------------------- v2.0.0-beta.32: a press that names an entry (t_44c5a1d4's send-back) */
+
+test('a press for the entry the queue was armed at still starts after the queue advanced natively', () => {
+  /*
+   * The phone's defect, stated without a phone. `armAwayQueue` attaches `b` and `c` ahead of `a`. The
+   * boundary then happens inside AVFoundation: `b` is sounded, `awayCursor` goes 0, and nothing trims
+   * the front of `awayEntries` — `b` was consumed by the player but still sits first in the list.
+   *
+   * A second boundary: `c` sounds, `awayCursor` is 1, `awayEntries` is still `['b','c']`. The owner now
+   * taps play on `b`. Reading only the front says "the queue already holds `b`", no rebuild happens,
+   * and `startQueue`'s attach guard (`currentItem === awayItems[0]`) fails: `could not attach b, so it
+   * was not started`, and the press starts nothing. The cursor is what makes the front stale.
+   */
+  const statement = order('a', 'b', 'c');
+  const state = armed(statement); // attached: ['b','c'], cursor: -1
+
+  // Before the queue has sounded anything (`awayCursor` is -1) a rebuild is the answer.
+  assert.equal(startNeedsRebuild({ attached: state.attached, cursor: state.cursor, songId: 'b' }), true);
+  const stoppedAtFront: AwaySeamState = { ...state, cursor: 0, owned: true };
+  assert.equal(
+    startNeedsRebuild({ attached: stoppedAtFront.attached, cursor: stoppedAtFront.cursor, songId: 'b' }),
+    false,
+  );
+
+  // One native advance: the front is consumed, the list is not trimmed.
+  const advanced: AwaySeamState = { ...stoppedAtFront, cursor: 1 };
+  assert.equal(
+    startNeedsRebuild({ attached: advanced.attached, cursor: advanced.cursor, songId: 'b' }),
+    true,
+    'the front of the queue is stale after the player advanced, so naming b must rebuild rather than be refused',
+  );
+  // The entry that is sounding now also restarts from its own rebuild — a press on a row is a start,
+  // not a resume of whatever the player happens to hold.
+  assert.equal(startNeedsRebuild({ attached: advanced.attached, cursor: advanced.cursor, songId: 'c' }), true);
+  // Nothing attached at all: always a rebuild.
+  assert.equal(startNeedsRebuild({ attached: [], cursor: -1, songId: 'a' }), true);
+});
+
+test('the phone asks the rebuild question with the cursor, not just the front', () => {
+  /*
+   * The model above is only worth its assertions if the Swift it mirrors says the same thing. The
+   * send-back was this exact line: `awayCursor < 0 || awayEntries.first != entry.songId` rebuilt only
+   * for a queue that had never sounded, so a queue that had sounded answered "no rebuild" for an
+   * entry it no longer held.
+   */
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const swift = readFileSync(join(root, 'ios', 'App', 'App', 'NaviliteRemote.swift'), 'utf8');
+
+  assert.match(swift, /if awayCursor != 0 \|\| awayEntries\.first != entry\.songId \{/);
+  assert.doesNotMatch(swift, /if awayCursor < 0 \|\| awayEntries\.first != entry\.songId \{/);
+});
+
