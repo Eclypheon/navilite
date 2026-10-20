@@ -3341,7 +3341,8 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
              */
             if let player = appFound?.player {
                 player.seek(to: CMTime(value: CMTimeValue(liveMs), timescale: 1000),
-                            toleranceBefore: .zero, toleranceAfter: .zero)
+                            toleranceBefore: CMTime(value: 250, timescale: 1000),
+                            toleranceAfter: CMTime(value: 250, timescale: 1000))
             }
             record("handover-seek", [
                 "songId": reading.songId, "soundingSongId": soundingSongId ?? "",

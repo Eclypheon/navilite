@@ -2580,7 +2580,7 @@ export class AudioEngine {
       this.modeReason = `the native player moved to another track while the app was away (${moved.songId}) — the app is adopting the track that is already playing`;
       // The index travels with the track (v1.9.9): the queue adopts by position in the order it
       // published, which is the only thing that is right when that order is shuffled.
-      await this.onAdvancedNatively?.(moved.songId, moved.index);
+      await this.onAdvancedNatively?.(moved.songId, moved.index, moved.reading?.positionMs);
     }
     /*
      * **The return is an ADOPTION when the player already holds the entry the queue is on
@@ -2632,12 +2632,13 @@ export class AudioEngine {
      * `paused` and no reading is rendered over it. Only a queue that is *sounding* owns the row.
      */
     const queueSounding = queueHoldsSound && held?.sounding !== false;
-    if (this.returnIsAdoption(held)) {
-      this.claimSound('app', held?.songId ?? '');
+    const shouldAdopt = this.returnIsAdoption(held) || (moved?.changed && queueHoldsSound);
+    if (shouldAdopt) {
+      this.claimSound(held?.path === 'queue' ? 'queue' : 'app', held?.songId ?? '');
       this.returnPath = 'adopt';
       this.returnAdoptions += 1;
       this.modeReason = `the return adopted ${this.track?.id ?? 'the visible entry'} — the player is already sounding it at ${Math.round((held?.positionMs ?? 0) / 1000)} s (${held?.path ?? 'plugin'}), so nothing was loaded, started, paused or seeked`;
-      await this.readReturn('adopt', false, held);
+      await this.readReturn('adopt', queueSounding, held);
       /*
        * The boundary goes back to the web layer here exactly as it does on the handover below — the
        * same statement, made in both directions, so no flag can stick (v1.9.8).
@@ -2847,6 +2848,15 @@ export class AudioEngine {
         // Nothing is sounding (the platform stopped it or the owner did): the row may say so.
         this.claimSound('none');
       } else this.dispatch({ type: 'engine-state', playing: false });
+    } else if (held && held.path === 'queue' && held.songId === this.track?.id) {
+      this.setNativePosition(held.positionMs, true);
+      this.concludeStart('player');
+      this.claimSound('queue', held.songId);
+      if (held.sounding !== false) {
+        this.dispatch({ type: 'engine-state', playing: true });
+      } else {
+        this.dispatch({ type: 'transport', action: 'pause' });
+      }
     } else if (truth) {
       /* The queue owns the sound: the app's silence is not news about it, and its position is not
        * this entry's position. Nothing is read from it and nothing is dispatched. */
@@ -2864,7 +2874,7 @@ export class AudioEngine {
      * at all). The row is settled to `paused`: a decision, one tap from playing, and this is a
      * dispatch to the state machine — nothing is written to the player.
      */
-    if (queueSounding && this.state !== 'playing') {
+    if (queueSounding && this.soundOwner !== 'app' && this.state !== 'playing') {
       /*
        * **A return that did not take the sound is not a return that found nothing sounding
        * (unreleased, `t_05775526`).** The settle below is a decision that nothing is playing; over a
@@ -3293,20 +3303,6 @@ export class AudioEngine {
     }
     const track = this.track;
     if (!track) return;
-    /*
-     * **The bars follow the sound or say nothing (unreleased, `t_05775526`).** While the away queue is
-     * the sound, the tap is on a silent player: polling it would render "playing" over no samples —
-     * the dead spectrum in the owner's report. The album-art theme with the reason on the line is the
-     * honest answer until the app's own player holds the sound again.
-     */
-    if (this.queueOwnsSound()) {
-      this.spectrumLive = false;
-      this.spectrumArming = false;
-      this.setSpectrumReason(
-        'the sound is the away queue’s, and the tap is on the app’s own player — the bars show the album-art theme rather than a flat “playing” spectrum',
-      );
-      return;
-    }
     if (!this.hasSpectrumTap()) {
       /*
        * No tap in this build (Android today, and the browser). v1.7 played a second, silent copy
