@@ -963,14 +963,16 @@ export class PlaybackQueue {
     if (at === -1) return;
     if (this.currentSong?.id === songId) {
       this.loading = false;
-      const currentPos = this.engine.status().positionMs;
-      const isPlaying = this.engine.status().state === 'playing';
-      if (
-        typeof positionMs === 'number' &&
-        Number.isFinite(positionMs) &&
-        positionMs >= 0 &&
-        (!isPlaying || currentPos < 1000 || positionMs > currentPos)
-      ) {
+      /*
+       * **The entry is already the visible one, and the reading still has to be rendered
+       * (unreleased).** This branch used to clear `loading` and nothing else — the *engine's* machine
+       * was left where the return's own start had put it, on `loading`, because that start never
+       * committed and no release ever came. That is the owner's spinner: the song on the label, the
+       * queue making the sound, and a row that says it is still waiting. A reading that names a
+       * position is the answer, and it is rendered only when not already playing — an active playing
+       * clock must never be rewound to a stale position.
+       */
+      if (typeof positionMs === 'number' && Number.isFinite(positionMs) && positionMs >= 0) {
         this.engine.renderReading(positionMs, measuredAt);
       }
       this.pendingStartMs = 0;

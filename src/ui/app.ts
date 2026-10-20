@@ -215,10 +215,7 @@ export async function boot(root: HTMLElement): Promise<void> {
    * Going out of sight is the last moment the app is guaranteed to be running: write the exact
    * resume snapshot here rather than hope the OS gives us another tick.
    */
-  let lastLifecycleState: boolean | null = null;
   const onLifecycle = (hidden: boolean): void => {
-    if (lastLifecycleState === hidden) return;
-    lastLifecycleState = hidden;
     void ctx.engine.handleVisibility(hidden);
     if (hidden) ctx.queue?.flushSnapshot();
     // §S4: on the way back, `list()` is the truth — a download that finished in the background is
