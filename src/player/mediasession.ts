@@ -64,7 +64,13 @@ export function updatePositionState(durationMs: number, positionMs: number, rate
   const position = Math.min(Math.max(0, positionMs / 1000), duration);
   try {
     navigator.mediaSession.setPositionState({ duration, position, playbackRate: rate });
-  } catch {
-    // Browsers reject inconsistent states; position display is cosmetic.
+  } catch (cause) {
+    /*
+     * Browsers reject inconsistent states, and the position on the system's own card is cosmetic —
+     * the app's row is the reading that counts. An absence already rendered (the card simply keeps
+     * the last position), not a playback failure; the cause is bound so the reason survives
+     * (design §5).
+     */
+    void cause;
   }
 }

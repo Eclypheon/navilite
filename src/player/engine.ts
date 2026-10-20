@@ -43,7 +43,7 @@
  * says so in one line and draws the album-art theme rather than animating a lie.
  */
 import { platformInfo, type OsName } from '../platform.ts';
-import { createNativeBridge, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativePlaybackFacts, type NativeSnapshot } from './native.ts';
+import { createNativeBridge, isUnavailableSnapshot, BRIDGE_BUILD_TIMEOUT_MS, type NativeBridge, type NativeBridgeEvents, type NativePlaybackFacts, type NativeSnapshot, type NativeSnapshotState, type SnapshotRefusal, type UnavailableSnapshot } from './native.ts';
 import { STOPPED_WORD, reduce } from './engine-contract.ts';
 import type { EngineOptions, EngineState, EngineStatus, PlaybackBackend, PlayerEvent, QueueStatement, TrackRequest, VisualiserTone, VisualiserWord } from './engine-contract.ts';
 import { measuredDurationIsBelievable, withDeadline } from './engine-helpers.ts';
@@ -238,6 +238,11 @@ export class AudioEngine {
   private nativeBands: Uint8Array | null = null;
   /** **The published state of the one player**, exactly as the phone answered it. */
   private lastSnapshot: NativeSnapshot | null = null;
+  /**
+   * **Which step of the one snapshot refused last** (unreleased, design §5) — non-null exactly while
+   * the row is painted from a refusal rather than a reading. Cleared by the next answer that parses.
+   */
+  private snapshotRefused: SnapshotRefusal | null = null;
   /** The one interval in the snapshot path (unreleased): {@link SNAPSHOT_POLL_MS}. */
   private snapshotPoll: ReturnType<typeof setInterval> | null = null;
   /** One read in flight at a time: a bridge slower than the tick must not answer out of order. */
@@ -587,6 +592,15 @@ export class AudioEngine {
       this.endedReported = false;
       this.startSnapshotPoll();
       this.startConsumers();
+      /*
+       * **Every way into `playing` is a window until this item's own frame arrives (unreleased).**
+       * A resume and a return from the background do not install anything, so nothing else here
+       * writes the arming state — and the chip would spend a capability word (`native audio`) on a
+       * build that has the tap and whose next read is already in flight. This is the fact
+       * `visualiserWord` documents as the arming branch; it is written here, where the transport
+       * says it is playing again.
+       */
+      if (this.backend === 'native' && this.hasSpectrumTap() && !this.spectrumLive) this.spectrumArming = true;
       return;
     }
     const reason =
@@ -785,16 +799,65 @@ export class AudioEngine {
     if (!this.foreground) return;
     if (this.snapshotReadInFlight) return;
     this.snapshotReadInFlight = true;
-    let snap = null;
+    /*
+     * **A reading belongs to the moment it was asked for (unreleased).** A bridge round trip can
+     * outlast a transition: the answer to a read taken while the player was playing can land after
+     * the listener paused it, and applying it would paint a live spectrum for a track that is
+     * stopped — the poll is stopped by that transition, so nothing would ever correct it. The
+     * engine's own generation is what says the moment changed.
+     */
+    const generation = this.generation;
+    let snap: NativeSnapshot | UnavailableSnapshot | null = null;
     try {
       snap = await bridge.snapshot();
     } finally {
       this.snapshotReadInFlight = false;
     }
     if (!snap) return;
+    /*
+     * **A read that could not be taken is a state, not a skipped tick** (unreleased, design §5).
+     * This used to be a `null` and a bare `return`, so a plugin that stopped answering left the last
+     * word on the chip — `spectrum`, or the transport's `playing` — over a player nothing had read.
+     */
+    if (isUnavailableSnapshot(snap)) {
+      this.noteSnapshotUnavailable(snap.unavailable);
+      return;
+    }
+    if (this.snapshotRefused !== null) this.clearSnapshotRefusal(snap.state);
+    if (generation !== this.generation) return;
     if (snap.generation !== 0 && snap.generation !== this.generation) return;
     this.lastSnapshot = snap;
     this.applySnapshot(snap);
+  }
+
+  /**
+   * **The one snapshot could not be read, and here is which step failed** (unreleased, design §5).
+   *
+   * The chip may not go on claiming a measurement while the thing that measures is unreadable, so a
+   * machine that says `playing` is moved to `error` and the reason names the refused step. It is
+   * self-healing on purpose: the next snapshot that answers puts the machine back on what the player
+   * itself reports (`clearSnapshotRefusal`), so one missed deadline is not a stuck error, and a
+   * plugin that has gone for good is no longer a silent `spectrum`.
+   */
+  private noteSnapshotUnavailable(refusal: SnapshotRefusal): void {
+    if (this.backend !== 'native') return;
+    const sentence = `the player would not answer the one snapshot (${refusal}), so the row has no reading — the bars keep the last frame that was dated to this item`;
+    this.snapshotRefused = refusal;
+    this.error = sentence;
+    this.modeReason = sentence;
+    if (this.state === 'playing') this.dispatch({ type: 'failure', message: sentence });
+    this.emit();
+  }
+
+  /** A snapshot answered again: the refused state is over, and the player's own word is the state. */
+  private clearSnapshotRefusal(state: NativeSnapshotState): void {
+    const refusal = this.snapshotRefused;
+    if (refusal === null) return;
+    this.snapshotRefused = null;
+    this.error = null;
+    if (state === 'playing') this.applyState('playing');
+    else if (this.state === 'error') this.applyState(state === 'ended' ? 'ended' : 'paused');
+    this.modeReason = `the one snapshot answers again after ${refusal} — the row is the player's own word`;
   }
 
   /// What one snapshot says, applied to the engine's own registers.
@@ -814,7 +877,11 @@ export class AudioEngine {
      * own frame, drawn as the silence it is.
      */
     const dated =
-      frame.attached && frame.frames > 0 && frame.itemKey !== '' && frame.itemKey === snap.entry.key;
+      snap.state === 'playing' &&
+      frame.attached &&
+      frame.frames > 0 &&
+      frame.itemKey !== '' &&
+      frame.itemKey === snap.entry.key;
     if (dated) {
       const bands = frame.bands;
       if (!this.nativeBands || this.nativeBands.length !== bands.length) this.nativeBands = new Uint8Array(bands.length);
@@ -828,7 +895,9 @@ export class AudioEngine {
       return;
     }
     this.nativeBands = null;
-    this.spectrumArming = this.state === 'playing';
+    // A build with no tap has no window to be in: the capability word is its honest answer, and the
+    // poll may not re-arm one for a measurement this build cannot take.
+    this.spectrumArming = this.state === 'playing' && this.hasSpectrumTap();
     if (this.spectrumLive) {
       this.spectrumLive = false;
       this.modeReason = snap.spectrum.attached
@@ -2053,10 +2122,28 @@ export class AudioEngine {
          * an unconfirmed position is not the position being heard, and the clock keeps the last
          * position the player itself reported.
          */
-        const truth =
+        const truthOf = async () =>
           generation === this.generation
             ? await withDeadline(this.native?.sync() ?? Promise.resolve(null), null, SEEK_VERIFY_TIMEOUT_MS, 'the player (after a seek)')
             : null;
+        let truth = await truthOf();
+        /*
+         * **One retry, and a second refused by this seek's own token** (unreleased, design §5).
+         *
+         * The deadline answering nothing used to end the seek with a sentence and no attempt:
+         * `withDeadline` gave up on the read and the seek was never asked again, so a player that
+         * was simply slow looked like a player that cannot seek. Asking once more is bounded work
+         * (one more seek, one more read) and the token is what stops it being a loop: a generation
+         * that moved on — a newer seek, a pause, a new track — refuses the retry outright, and the
+         * word for the end of it is `unsettled`.
+         */
+        if (!truth && generation === this.generation) {
+          this.modeReason = `the seek to ${Math.round(positionMs / 1000)} s is unsettled — the player did not say where it is, so it is asked once more`;
+          if (this.native) {
+            await withDeadline(this.native.seek(positionMs / 1000), undefined, SEEK_TIMEOUT_MS, 'native.seek (one retry)');
+          }
+          truth = await truthOf();
+        }
         if (generation !== this.generation) return;
         const asked = Math.round(positionMs / 1000);
         if (truth) {
@@ -2068,7 +2155,7 @@ export class AudioEngine {
               ? `the seek to ${asked} s landed — the player itself reports ${landed} s`
               : `the seek to ${asked} s was asked for and the player is at ${landed} s — the bar follows the player, not the request`;
         } else {
-          this.modeReason = `the seek to ${asked} s was sent and the player would not say where it is — the bar keeps the position the player last reported`;
+          this.modeReason = `the seek to ${asked} s is unsettled — one retry was made and the player still would not say where it is, and a second is refused by this seek's own token; the bar keeps the position the player last reported`;
         }
         this.emit();
       })();
@@ -2222,16 +2309,36 @@ export class AudioEngine {
      * player, so there is nothing to give back. Both halves of the row come out of the same answer,
      * dated to the same item, which is why the bars cannot lag the row.
      */
-    const snap = await this.native?.snapshot?.();
-    if (snap) {
+    const answer = await this.native?.snapshot?.();
+    if (answer && isUnavailableSnapshot(answer)) {
+      /*
+       * **A return that cannot read the player says which step refused** (unreleased, design §5).
+       * The old `null` was painted as nothing at all: the row kept the state it had before the app
+       * went away, which is a claim about a moment nobody had read.
+       */
+      this.noteSnapshotUnavailable(answer.unavailable);
+    } else if (answer) {
+      const snap = answer;
+      if (this.snapshotRefused !== null) this.clearSnapshotRefusal(snap.state);
       this.lastSnapshot = snap;
       this.applySnapshot(snap);
       if (snap.entry.songId && snap.entry.songId !== this.track?.id) {
         await this.onAdvancedNatively?.(snap.entry.songId, snap.entry.index);
       }
       this.modeReason = `the return read ${snap.entry.songId || 'nothing'} at ${Math.round(snap.positionMs / 1000)} s, ${snap.state} — one snapshot, nothing loaded, started, paused or seeked`;
-      if (snap.state === 'paused' && this.state !== 'paused') this.applyState('paused');
-      if (snap.state === 'playing' && this.state !== 'playing') this.applyState('playing');
+      if (snap.state === 'playing') {
+        if (this.state !== 'playing') this.applyState('playing');
+      } else if (this.state === 'playing') {
+        /*
+         * **The sound stopped and nobody here asked** (unreleased, design §5). This was a silent
+         * `applyState('paused')`, which is the word for a press; a return that finds the player
+         * stopped is the machine's `interrupted`, and after a failed `activateSession` it is the
+         * exact state the owner was reading as a pause he never made.
+         */
+        this.dispatch({ type: 'interruption' });
+      } else if (this.state !== 'paused') {
+        this.applyState(snap.state === 'ended' ? 'ended' : 'paused');
+      }
     }
     /*
      * `syncQueue` is not a write to the player: `awake: this.foreground` inside it is the only thing
@@ -2283,8 +2390,14 @@ export class AudioEngine {
     if (startMs > 0) {
       try {
         this.el.currentTime = startMs / 1000;
-      } catch {
-        // Not seekable yet; the next play will land at the start.
+      } catch (cause) {
+        /*
+         * The stream has no seekable range yet, so the start offset cannot be applied and playback
+         * begins at 0. Named on the row rather than swallowed (design §5): a listener who asked for
+         * 40 s and got 0 is owed the sentence, and the player's own reports move the clock from
+         * there either way.
+         */
+        this.modeReason = `the start offset of ${Math.round(startMs / 1000)} s could not be applied — the stream is not seekable yet, so it starts at 0 (${String(cause)})`;
       }
     }
   }
@@ -2653,9 +2766,9 @@ export class AudioEngine {
     if (this.ctx.state === 'suspended') {
       try {
         await this.ctx.resume();
-      } catch {
+      } catch (cause) {
         this.spectrumLive = false;
-        this.modeReason = 'the audio context could not be resumed (the browser wants a user gesture first)';
+        this.modeReason = `the audio context could not be resumed (the browser wants a user gesture first) — the bars follow the album art until it is (${String(cause)})`;
       }
     }
   }

@@ -416,6 +416,52 @@ export interface NativeQueueEntry {
  */
 export type NativeQueueOp = 'play' | 'pause' | 'resume' | 'seek';
 
+/**
+ * **A reading the bridge could not take, named** (unreleased, design §5).
+ *
+ * The three ways the one snapshot comes back empty, and each is a different step:
+ *   - `no_plugin` — this build has no `snapshot()` at all (an older plugin, a browser, a fake);
+ *   - `no_answer` — the call was made and did not answer inside its deadline;
+ *   - `not_a_snapshot` — it answered, and the answer is not the shape {@link NativeSnapshot} states.
+ *
+ * It is a value rather than a `null` because a `null` is an absence no surface can paint: the chip
+ * kept whatever word it had a moment ago, which is the capability claim this release exists to
+ * remove. `boundaryReason` carries the one sentence naming the step.
+ */
+export type SnapshotRefusal = 'no_plugin' | 'no_answer' | 'not_a_snapshot';
+
+/** The snapshot's own "I could not read the player, and here is which step failed". */
+export interface UnavailableSnapshot {
+  unavailable: SnapshotRefusal;
+}
+
+/** What `snapshot()` answers: the reading, or the named reason there is none. */
+export type SnapshotAnswer = NativeSnapshot | UnavailableSnapshot;
+
+/** True for the refusal half of {@link SnapshotAnswer} — the only safe way to tell the two apart. */
+export const isUnavailableSnapshot = (answer: SnapshotAnswer): answer is UnavailableSnapshot =>
+  (answer as UnavailableSnapshot).unavailable !== undefined;
+
+/**
+ * **A transport press the player did not take, named** (unreleased, design §5).
+ *
+ *   - `not_ready` — there is no queue transport in this build, or it did not answer in time;
+ *   - `post_end` — it answered and declined: no queue to take it, an unknown op, or an entry the
+ *     published order no longer holds;
+ *   - `superseded` — it declined a `play` for an entry the queue has already moved past, which is a
+ *     press that arrived after its own moment.
+ */
+export type TransportRefusal = 'not_ready' | 'post_end' | 'superseded';
+
+/** The queue's refusal, with the plugin's own sentence when it gave one. */
+export interface RefusedTransport {
+  refused: TransportRefusal;
+  why: string;
+}
+
+/** What `queueTransport()` answers: it was taken, or the named reason it was not. */
+export type TransportAnswer = { ok: true } | RefusedTransport;
+
 /** The app's statement of the queue: the resolved play order, the entry playing, and the rules. */
 export interface NativeQueueStatement {
   list: readonly NativeQueueEntry[];
@@ -487,9 +533,13 @@ export interface NativeBridge {
    * **The one read of the one player (unreleased).** Entry, clock, transport word and that item's own
    * spectrum frame, in one answer. Optional so a bridge older than it is a bridge with no reading
    * rather than a crash.
+   *
+   * A read that cannot be taken answers {@link UnavailableSnapshot} — a named reason, never a bare
+   * `null`: an absence with no word is the state the chip cannot paint, and a chip that keeps its
+   * last word through it is claiming a measurement nobody took (design §5).
    */
-  snapshot?(): Promise<NativeSnapshot | null>;
-  queueTransport?(op: NativeQueueOp, positionMs?: number, index?: number): Promise<boolean>;
+  snapshot?(): Promise<SnapshotAnswer>;
+  queueTransport?(op: NativeQueueOp, positionMs?: number, index?: number): Promise<TransportAnswer>;
   /**
    * **Write the return's own line into the phone's log (unreleased).**
    *
@@ -759,7 +809,13 @@ export async function boundaryLog(): Promise<{ path: string; lines: string[]; co
       lines: Array.isArray(answer.lines) ? answer.lines : [],
       count: Number.isFinite(answer.count) ? Number(answer.count) : 0,
     };
-  } catch {
+  } catch (cause) {
+    /*
+     * A diagnostic, never a feature: no plugin, no log, and the row simply has no file to show. The
+     * absence is rendered as an absent row, so there is no state to invent; the cause is bound so a
+     * support report can see why (design §5).
+     */
+    void cause;
     return null;
   }
 }
@@ -803,12 +859,22 @@ export function toAbsoluteArtworkUrl(artworkUrl?: string | null, streamUrl?: str
   if (streamUrl && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(streamUrl)) {
     try {
       return new URL(artworkUrl, streamUrl).toString();
-    } catch {}
+    } catch (cause) {
+      /*
+       * Not an error path with a state of its own: an artwork URL that will not resolve is drawn as
+       * the raw string, and "no art" is already a rendered state (the palette falls back). The cause
+       * is bound rather than dropped so the reason is not invisible in a debugger (design §5).
+       */
+      void cause;
+    }
   }
   if (typeof window !== 'undefined' && window.location?.origin) {
     try {
       return new URL(artworkUrl, window.location.origin).toString();
-    } catch {}
+    } catch (cause) {
+      // Same optional value, same rendered absence — see above.
+      void cause;
+    }
   }
   return artworkUrl;
 }
@@ -1148,18 +1214,42 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       positionMs?: number,
       ms = BRIDGE_TIMEOUT_MS,
       index = entryIndex(),
-    ): Promise<boolean> => {
-      if (!remote?.queueTransport) return false;
+    ): Promise<TransportAnswer> => {
+      /*
+       * **A refusal is a named result, not a line in the console** (unreleased, design §5). Every
+       * exit below writes one sentence into `boundaryReason` — the string the settings row and
+       * `nativeAdvance()` hand to the screen — so a press the queue did not take reads as which of
+       * the three it was, on the device, without a debugger.
+       */
+      if (!remote?.queueTransport) {
+        boundaryReason = `the queue's own player refused the ${op} (not_ready): this build has no queue transport`;
+        return { refused: 'not_ready', why: 'this build has no queue transport' };
+      }
       const at = Number.isFinite(positionMs) ? Math.round(positionMs as number) : -1;
       /* `index` travels only with `play`: it names an entry, and the presses name none. */
       const asked: { op: NativeQueueOp; index?: number; positionMs: number } = { op, positionMs: at };
       if (op === 'play') asked.index = index;
       const answer = await bounded(remote.queueTransport(asked), null, `queueTransport-${op}`, ms);
-      if (!answer?.ok) {
-        boundaryReason = `the queue's own player did not take the ${op}: ${answer?.why ?? 'the plugin did not answer'}`;
-        return false;
+      if (answer === null) {
+        boundaryReason = `the queue's own player refused the ${op} (not_ready): it did not answer within ${ms} ms`;
+        return { refused: 'not_ready', why: `it did not answer within ${ms} ms` };
       }
-      return true;
+      if (!answer?.ok) {
+        const why = answer?.why ?? 'the plugin gave no reason';
+        /*
+         * A `play` for an entry the published order has already left is not a refusal about the
+         * player: the press arrived after its own moment. `statement.index` is re-read after the
+         * round trip, so this is a fact about the order rather than a guess about the plugin.
+         */
+        const refused: TransportRefusal =
+          op === 'play' && Number.isFinite(index) && statement.index !== index ? 'superseded' : 'post_end';
+        boundaryReason =
+          refused === 'superseded'
+            ? `the play of entry ${index + 1} was superseded before the player answered — the queue is on entry ${statement.index + 1}: ${why}`
+            : `the queue's own player refused the ${op} (post_end): ${why}`;
+        return { refused, why };
+      }
+      return { ok: true };
     };
 
     /**
@@ -1167,11 +1257,20 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
      * this normalises it; the diagnostics that ride on the same answer are read here, so a return
      * costs one round trip rather than one per fact.
      */
-    const readSnapshot = async (): Promise<NativeSnapshot | null> => {
-      const state = remote?.snapshot ? await bounded(remote.snapshot(), null, 'snapshot') : null;
+    const readSnapshot = async (): Promise<SnapshotAnswer> => {
+      /*
+       * **Three named exits, and no `null`** (unreleased, design §5). Each sentence names the step
+       * that failed, because the chip paints this string: "the plugin did not answer" and "the
+       * plugin answered nonsense" are different defects, and a return used to show neither.
+       */
+      if (!remote?.snapshot) {
+        boundaryReason = 'the player plugin has no snapshot in this build (no_plugin), so the app cannot read what it is holding';
+        return { unavailable: 'no_plugin' };
+      }
+      const state = await bounded(remote.snapshot(), null, 'snapshot');
       if (!state) {
-        boundaryReason = 'the player plugin did not answer, so the app cannot read what it is holding';
-        return null;
+        boundaryReason = 'the player plugin did not answer the snapshot inside its deadline (no_answer), so the app cannot read what it is holding';
+        return { unavailable: 'no_answer' };
       }
       if (Number.isFinite(state.advances)) nativeAdvances = Number(state.advances);
       if (Number.isFinite(state.failures)) nativeFailures = Number(state.failures);
@@ -1186,8 +1285,8 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
       if (state.scene) nativeScene = state.scene;
       const snap = snapshotOf(state);
       if (!snap) {
-        boundaryReason = 'the player plugin answered something that is not a snapshot';
-        return null;
+        boundaryReason = 'the player plugin answered something that is not a snapshot (not_a_snapshot)';
+        return { unavailable: 'not_a_snapshot' };
       }
       if (snap.entry.songId) audibleSongId = snap.entry.songId;
       return snap;
@@ -1342,8 +1441,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          * `timeControlStatus`, `positionMs` is `currentItem`'s own clock and `durationMs` is that
          * item's own duration — one read, the same one the bars are dated to.
          */
-        const snap = await readSnapshot();
-        if (!snap) return null;
+        const answer = await readSnapshot();
+        if (isUnavailableSnapshot(answer)) return null;
+        const snap = answer;
         const playing = snap.state === 'playing';
         lastPositionMs = snap.positionMs;
         noteForegroundAudible(playing, snap.positionMs / 1000);
@@ -1355,7 +1455,15 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
           const result = await remote.activateSession();
           return result.active;
         } catch (error) {
-          console.warn('[navilite] could not re-arm the audio session', error);
+          /*
+           * **`interrupted`, not a silent `paused`** (unreleased, design §5). A session that could
+           * not be taken back is a player that is going to stop on its own: the word for that is
+           * the machine's `interrupted` (the sound stopped and nobody asked), and it is named here
+           * on the boundary's own line so the return path can paint it instead of a pause nobody
+           * pressed.
+           */
+          const why = error instanceof Error ? error.message : String(error);
+          boundaryReason = `the audio session could not be activated again (interrupted): ${why}`;
           return false;
         }
       },
@@ -1494,7 +1602,12 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
             handles.push(...added);
           })
           .catch((error: unknown) => {
-            console.warn('[navilite] lock-screen next/previous unavailable', error);
+            /*
+             * The lock-screen transport could not be attached: next/previous are the app's own on the
+             * row and still work, but the system's buttons are not listening. Named rather than
+             * warned (design §5) so the row can say so instead of the press simply doing nothing.
+             */
+            boundaryReason = `the lock-screen next/previous could not be attached (not_ready): ${String(error)}`;
           });
         return () => {
           detached = true;
@@ -1579,7 +1692,13 @@ export function localFileSrc(path: string): string {
   if (!path.startsWith('file://')) return path;
   try {
     return Capacitor.convertFileSrc(path);
-  } catch {
+  } catch (cause) {
+    /*
+     * The platform bridge is not there: the path goes back unchanged and the image simply does not
+     * render — an absence that is already on screen as a missing cover, so there is no state to
+     * invent for it. Bound rather than dropped (design §5).
+     */
+    void cause;
     return path;
   }
 }
