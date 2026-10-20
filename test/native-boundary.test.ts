@@ -148,11 +148,9 @@ function fakeBridge(record: Boundary): (os: string, events: NativeBridgeEvents) 
       },
       async setQueue(statement: NativeQueueStatement) {
         const songs = statement.list.map((entry) => entry.songId);
-        const statedSlots = statement.list.map((entry) => {
-          if (entry.warmUrl == null) return null;
-          return slots.get(entry.songId) ?? `missing:${entry.songId}`;
-        });
-        record.stated.push({ songs, slots: statedSlots, index: statement.index, repeat: statement.repeat, awake: statement.awake });
+        // No entry carries a slot (unreleased): the engine holds nothing warm, so every entry is
+        // one the native side fetches or already has in the queue it is walking.
+        record.stated.push({ songs, slots: songs.map(() => null), index: statement.index, repeat: statement.repeat, awake: statement.awake });
         // The native side can walk this queue: it holds the order and the index, and it fetches
         // whatever it was given no slot for.
         return songs.length > 0 && statement.index >= 0;
@@ -239,8 +237,8 @@ test('the native side is given the whole queue — every entry, in the order it 
   assert.equal(stated.awake, false, 'stated as "the app is away", which is the only state in which the native side may act');
   assert.deepEqual(
     stated.slots,
-    [null, 'navilite-slot-1', 'navilite-slot-2'],
-    'the entries the app holds warm carry their slot; everything else is published without one, which is the instruction to fetch it',
+    [null, null, null],
+    'no entry is published with a slot: the app holds nothing warm, so the native side fetches what it does not already have',
   );
   assert.equal(engine.status().nativeBoundary.armed, 3, 'the native side says it is holding all three entries');
 

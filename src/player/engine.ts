@@ -47,7 +47,6 @@ import { createNativeBridge, isUnavailableSnapshot, BRIDGE_BUILD_TIMEOUT_MS, typ
 import { STOPPED_WORD, reduce } from './engine-contract.ts';
 import type { EngineOptions, EngineState, EngineStatus, PlaybackBackend, PlayerEvent, QueueStatement, TrackRequest, VisualiserTone, VisualiserWord } from './engine-contract.ts';
 import { measuredDurationIsBelievable, withDeadline } from './engine-helpers.ts';
-import { WarmPool } from './warm-pool.ts';
 
 /**
  * How long a `resume()` is given to turn into actual playback before the engine stops believing it.
@@ -182,17 +181,6 @@ const ZERO_FRAMES_BEFORE_THEME = 18;
  */
 const SNAPSHOT_POLL_MS = 33;
 /**
- * How many tracks are warm on the player at once (v1.9.5): the previous song and the next two.
- *
- * The owner's own rule (*"after any selection the app must commence prefetching/caching the previous
- * song and the NEXT TWO songs, so stepping back or forward is instant"*), and it is three because
- * the bridge has exactly three slots that are not the one being heard — the bound is structural, not
- * a budget that a long session can spend. This is only the engine's side of it (the claims); the
- * number that matters on the device is the bridge's slot pool, and the two are the same number by
- * construction.
- */
-const MAX_WARM_TRACKS = 3;
-/**
  * The same non-zero frame for ~1 s is a frozen buffer, not a measurement.
  *
  * v1.1 lowered this from 25 frames (2.5 s): with the analyser running at a near-zero smoothing
@@ -204,7 +192,19 @@ const METER_INTERVAL_MS = 100;
 
 
 export class AudioEngine {
-  private readonly el: HTMLAudioElement;
+  /**
+   * The browser's player — **made when a web path first asks for it, and nothing makes one otherwise**
+   * (unreleased).
+   *
+   * It used to be built by the constructor of every engine, so a phone carried a second, never-loaded
+   * element beside the one `NaviliteRemote` owns: the second player the design deletes, needing only
+   * a `src` to sound. `new Audio()` now happens in exactly one method ({@link makeWebElement}),
+   * reached only through the getter below, and the native backend has no path to it — every read of
+   * {@link el} in this file is inside a web branch. There is deliberately no throw on a native read:
+   * a throw on a path the phone can reach stops a press. What a stray native read gets is an element
+   * nothing has given a `src`, which cannot sound.
+   */
+  private webEl: HTMLAudioElement | null = null;
   private readonly os: OsName;
   /** True inside the Capacitor shell: the native player is then the only engine there is. */
   private readonly nativePlatform: boolean;
@@ -329,18 +329,6 @@ export class AudioEngine {
    * Held per start, like `loadInFlight`: two overlapping starts share neither.
    */
   private audibleIsOutgoing: number | null = null;
-  /**
-   * The tracks the bridge is holding warm: `songId -> the exact URL it was warmed under` (v1.9.5).
-   *
-   * The pool's rules — its capacity, the drop order, which read means what, and the difference
-   * between giving a claim back and dropping one — live in {@link WarmPool}. What stays here is who
-   * is allowed to claim and every path a claim leaves by, each named at its site: the track is
-   * started and answered (`startNative`), a warm that did not happen (`prepareNext`), the
-   * pool is full ({@link WarmPool.trim} from `prepareNext`), the queue knows the chain has moved
-   * (`pruneWarmed`), the engine is stopped or the track list cleared (`discardPrepared`), and a cold
-   * load clears it outright.
-   */
-  private readonly warm = new WarmPool(MAX_WARM_TRACKS);
   /**
    * The queue as the **queue** published it (v1.9.9): the resolved play order, the position playing
    * now, and the repeat mode.
@@ -504,13 +492,28 @@ export class AudioEngine {
     this.os = info.os;
     this.nativePlatform = info.native;
     this.nativeFactory = options.nativeFactory ?? createNativeBridge;
+  }
 
-    /*
-     * The element's own events are inputs into the machine like any other — and they are attached
-     * exactly once, here, for the life of the engine. A listener attached per play (or per
-     * visibility change) is the other half of "double-attached listeners" that made a track
-     * restart or repeat; there is one of each, and this is where they live.
-     */
+  /**
+   * The browser's player, made on the first web read (unreleased) — see {@link webEl}.
+   *
+   * `backend === 'web'` is the only backend that has one: the element is the browser's transport
+   * (`startWeb`, `ensureGraph`) and the native backend reads its clock and its duration from the
+   * snapshot instead.
+   */
+  private get el(): HTMLAudioElement {
+    if (this.webEl === null) this.webEl = this.makeWebElement();
+    return this.webEl;
+  }
+
+  /**
+   * The element and its listeners, attached exactly once for the life of the engine.
+   *
+   * The element's own events are inputs into the machine like any other. A listener attached per play
+   * (or per visibility change) is the other half of "double-attached listeners" that made a track
+   * restart or repeat; there is one of each, and this is where they live.
+   */
+  private makeWebElement(): HTMLAudioElement {
     const el = new Audio();
     el.preload = 'auto';
     el.addEventListener('play', () => {
@@ -532,14 +535,14 @@ export class AudioEngine {
       /* The element's own numbers, and the duration the rest of the app would show (`durationMs`):
        * a ticker that hands an estimate the library contradicts to the lock screen's position state
        * would be the same 70:01 through a second door (`t_972b8fc5`). */
-      this.onProgress?.(this.el.currentTime * 1000, this.durationMs());
+      this.onProgress?.(el.currentTime * 1000, this.durationMs());
     });
     el.addEventListener('ended', () => {
       if (this.backend !== 'web') return;
       this.reportEnded('the element reached the end of the stream');
     });
     el.addEventListener('error', () => this.handleMediaError());
-    this.el = el;
+    return el;
   }
 
   subscribe(listener: (status: EngineStatus) => void): () => void {
@@ -1065,7 +1068,8 @@ export class AudioEngine {
         ? `${plugin.state}${plugin.reason ? ` · ${plugin.reason}` : ''} · ${(plugin.currentTimeMs / 1000).toFixed(1)}/${(plugin.durationMs / 1000).toFixed(1)} s`
         : null,
       droppedEvents: this.native?.droppedEvents?.() ?? { inaudible: 0, slotGrace: 0 },
-      warmedIds: this.warm.ids(),
+      /** Empty by construction: this engine holds no track warm (unreleased — `prepareNext`). */
+      warmedIds: [],
       /*
        * The native side's own boundary (v1.9.8). Read straight from the bridge, which is the only
        * thing that knows which slots it was given and what it did with them; a build with no such
@@ -1648,38 +1652,24 @@ export class AudioEngine {
   }
 
   /**
-   * Prepare the track that follows the current one — buffered on the player, silent (v1.9.1).
+   * Prepare the track that follows the current one — the queue's look-ahead.
    *
-   * This is the queue's look-ahead, and it is deliberately *data-level*: the same plugin loads it
-   * under its own asset id, nobody ever sends that asset `play`, it is not tapped for the spectrum
-   * and it is not in this engine's state machine. Nothing here can make a sound, which is what keeps
-   * the one-engine rule v1.7.6 set: the second `AVPlayer` that was deleted does not come back, a
-   * buffered item that is never played does.
+   * **There is nothing left to warm here** (unreleased). Warming was a claim map in this engine over
+   * the native-audio plugin's prepared slots; the plugin and the slots went with the two-player
+   * machinery, and what holds the next items now is the one player's own queue (`armAwayQueue`/
+   * `topUpAwayQueue` in `NaviliteRemote.swift`, fed by {@link setQueue}). So the bridge's answer is
+   * the whole answer: `prepare()` returns `false` on every build that ships, because no bridge holds
+   * a track warm for this engine, and `false` is the truth rather than a failure.
    *
-   * A no-op in a browser (where the element's own preload is the whole story) and on a bridge with
-   * no prepared slot. It never rejects: a preparation that cannot happen costs a cold fetch at the
-   * boundary, which is where v1.9.0 left it — not a failure the listener should see.
+   * Kept, with the queue's other two asks below, because `state/queue.ts` still makes them on every
+   * selection: deleting the call sites is the queue's look-ahead going, which the design files as
+   * its own subtraction. It is a named no-op until then, never a silent one.
    */
   async prepareNext(track: TrackRequest): Promise<boolean> {
     if (!this.nativePlatform) return false;
-    // Already warm under exactly this URL: the same stream, so a second preload is nothing.
-    if (this.warm.matches(track.id, track.url)) return true;
     const bridge = this.native ?? (await this.ensureNative());
     if (!bridge?.prepare) return false;
-    /*
-     * Claimed before the call, not after: two warms for the same track (the queue's own, then a
-     * start that reads it back) must not both go out, and the claim is what makes the second one a
-     * no-op.
-     *
-     * v1.9.2 — **and given back when the warm did not happen.** `bridge.prepare` answers whether
-     * the plugin actually took the asset; a warm that timed out, or that the bridge refused because
-     * the listener had already moved on, leaves no warmed track behind, so the claim must not
-     * outlive it. That leak is what the owner hit as a track that never came: the claim stayed for
-     * a track that was never loaded, the queue then refused to re-warm it ("already holding exactly
-     * this"), and the boundary paid a cold fetch with no word about why.
-     */
-    this.warm.claim(track.id, track.url);
-    const settled =
+    return (
       (await bridge.prepare({
         id: track.id,
         url: track.url,
@@ -1687,53 +1677,34 @@ export class AudioEngine {
         artist: track.artist,
         album: track.album,
         artworkUrl: track.artworkUrl,
-      })) === true;
-    if (!settled) {
-      this.warm.release(track.id, track.url);
-      return false;
-    }
-    this.warm.trim();
-    // A new warm slot is a new candidate for the native side to play itself (v1.9.9).
-    void this.syncQueue();
-    return true;
-  }
-
-
-  /**
-   * Drop the claims for tracks the queue is no longer around (v1.9.5).
-   *
-   * Called when a selection moves the queue: a claim for a track nobody is going to hear is a claim
-   * that would make a later start use an asset the player no longer holds. The bridge's own
-   * slots are not touched — they are reused by the next warm, and the pool is fixed, so dropping a
-   * claim costs nothing and removes a whole class of stale state.
-   */
-  pruneWarmed(keep: readonly string[]): void {
-    this.warm.prune(keep);
-    // What is no longer warm is no longer a slot the native side may be given (v1.9.9).
-    void this.syncQueue();
+      })) === true
+    );
   }
 
   /**
-   * The exact URL a track is warm under, or `null` when the pool does not hold it (v1.9.5).
+   * The queue's word that it has moved: there were claims to drop here once (v1.9.5).
    *
-   * This is the queue's single source of truth about warmth, and it is the engine's on purpose: the
-   * engine is what drops a claim a cold load invalidated, so a queue keeping its own copy could
-   * believe a track was warm that the player had long since forgotten — and would then never warm it
-   * again. The string it returns is the one the asset holds, so asking for it again asks for the
-   * bytes that are already there rather than for a second transcode.
+   * Nothing is warm in this engine any more ({@link prepareNext}), so there is nothing to drop and
+   * nothing to restate to the native side. A named no-op, kept for the caller.
    */
-  warmedUrl(songId: string): string | null {
-    return this.warm.urlOf(songId);
+  pruneWarmed(_keep: readonly string[]): void {}
+
+  /**
+   * The exact URL a track is warm under — `null`, because this engine warms nothing (unreleased).
+   *
+   * The queue still asks before a start, and `null` is the answer that means "fetch it": no URL in
+   * the app is a warmed asset, so every start asks for the track's own file.
+   */
+  warmedUrl(_songId: string): string | null {
+    return null;
   }
 
   /**
    * Throw the warmed tracks away — the queue is not going where they were warmed for.
+   *
+   * There are none ({@link prepareNext}); what is left is telling the player to drop what *it* holds.
    */
   async discardPrepared(): Promise<void> {
-    this.warm.clear();
-    // Nothing is warm, so the native side is told that none of these entries can be played from a
-    // slot — and a fetch here would be a fetch it has no reason to make.
-    void this.syncQueue();
     const bridge = this.native;
     if (this.backend !== 'native' || !bridge?.discard) return;
     await bridge.discard();
@@ -1781,12 +1752,11 @@ export class AudioEngine {
       return;
     }
     /*
-     * The warm pool goes with each entry, under the exact URL it holds: the bridge names a slot for
-     * an entry only when the two agree, so a slot whose bytes are a different stream is never played
-     * as if it were this entry. Everything else is stated without a slot, which the native side reads
-     * as "fetch this one yourself".
+     * The queue goes to the native side as the queue's own entries, with no warmth attached: the
+     * pool this used to join in is gone (unreleased), so every entry is one the player fetches or
+     * already holds from the statement before this one.
      */
-    const list = this.statement.list.map((entry) => ({ ...entry, warmUrl: this.warm.urlOf(entry.songId) }));
+    const list = this.statement.list.map((entry) => ({ ...entry }));
     const armed = await bridge.setQueue({
       list,
       index: this.statement.index,
@@ -2179,11 +2149,16 @@ export class AudioEngine {
     this.concludeStart('superseded');
     this.seekInFlight = null;
     this.seekTarget = null;
-    this.el.pause();
-    this.el.removeAttribute('src');
+    /*
+     * **The element is stopped only if there is one** (unreleased). On the phone the browser's
+     * player is never built, so there is nothing here to pause and nothing to unload — the native
+     * player is stopped below, and that is the only player there.
+     */
+    if (this.backend !== 'native') {
+      this.el.pause();
+      this.el.removeAttribute('src');
+    }
     this.track = null;
-    // Nothing is playing, so nothing is warm for it either (v1.9.1).
-    this.warm.clear();
     // Nothing is playing, so there is no queue for the native side to walk (v1.9.9).
     this.statement = { list: [], index: -1, repeat: 'off' };
     void this.syncQueue();
@@ -2499,22 +2474,13 @@ export class AudioEngine {
     try {
       {
         /*
-         * A track the pool did not hold is a cold fetch, and a cold fetch is where the old chain
-         * ends (v1.9.5): every claim from here on describes a track the player is not holding —
-         * `load` clears the bridge's own pool for the same reason — so the claim map is cleared with
-         * it. What is left is nothing claiming anything, which is the state a selection has to
-         * leave behind; the queue warms the new neighbourhood as soon as this start has sound.
-         *
-         * v1.9.11 — **and the load is no longer a cold fetch by definition.** It is asked, and then
-         * the reason line is written from its own answer: the bridge hands over to a slot that already
-         * holds this track (the armed next item becoming current from its own buffered state, which is
-         * the boundary this release is about), it writes the incoming track beside the one being heard
-         * when it has to fetch, or it finds the track already audible and has nothing to do. The
-         * engine's own claim being gone — a timed-out prepare, a prune — is no longer the same thing as
-         * the player not holding the track, and reporting it as a fetch was the last place the app
-         * still described the boundary as a reload.
+         * v1.9.11 — **the load is not a cold fetch by definition.** It is asked, and then the reason
+         * line is written from its own answer: the bridge hands over to a slot that already holds
+         * this track (the armed next item becoming current from its own buffered state, which is the
+         * boundary this release is about), it writes the incoming track beside the one being heard
+         * when it has to fetch, or it finds the track already audible and has nothing to do.
+         * Reporting the fetch as a reload was the last place the app described the boundary as one.
          */
-        this.warm.clear();
         await bridge.load(track);
         /*
          * **The guard the review found missing: two rapid plays of two different tracks race here.**

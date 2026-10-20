@@ -207,7 +207,7 @@ Four decisions, all of them about who owns a screen's content:
    for the whole 20 s request timeout.
 
 Item 4 of the owner's v2.0 list (the background auto-advance delay) is touched here only at the
-native boundary: the handover statement (`awake: false`) now arms the native side's own look-ahead,
+native boundary: the queue statement (`awake: false`) now arms the native side's own look-ahead,
 so the *first* boundary after the app goes away is a play from a loaded item rather than a fetch.
 DECISIONS.md's own note on that item stands — "if it can't be resolved it's fine", low priority — and
 the change is not device-verified here: the simulator cannot settle a background gap.

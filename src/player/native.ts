@@ -396,9 +396,9 @@ export interface NativeForegroundBoundary {
  *
  * `url` is the entry's **own file**, never a capped or transcoded variant: this side fetches an
  * unwarmed entry itself at a boundary, and the owner's rule is that a track being played is played
- * as the file sits on the server. `warmUrl` is the URL the app holds that entry warm *under*, and it
- * is what the bridge checks before it names a slot — the same string, asked for again, which is what
- * makes the slot's bytes the bytes the play will use.
+ * as the file sits on the server. There is no `warmUrl` beside it any more (unreleased): nothing in
+ * the app holds an entry warm under a second URL, so every entry is one the player fetches or
+ * already has in its own queue.
  */
 export interface NativeQueueEntry {
   songId: string;
@@ -407,7 +407,6 @@ export interface NativeQueueEntry {
   artist: string;
   album: string;
   artworkUrl: string | null;
-  warmUrl?: string | null;
 }
 
 /**

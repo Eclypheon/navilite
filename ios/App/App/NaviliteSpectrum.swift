@@ -1015,12 +1015,10 @@ private func audibleSpectrumTapProcess(
  * The bridge half of the spectrum: one method, `bands`, answering the frame of the item the queue is
  * playing now.
  *
- * It is a read of `AudibleSpectrumTap` and nothing else. Until v2.0.0-beta.33 this class also carried
- * `start`, `stop`, `configureBuffer` and `warmSlot`, whose whole job was to find a *different* player
- * — the removed native-audio plugin's `AVPlayer` — reflectively and put the tap on its item. There is
- * one player now, `NaviliteRemote`'s queue, and every item it builds carries its own tap from
- * `makeItem`, so there is nothing here to find, start, warm or stop. A method no shipped JS can reach
- * is a method that can only lie about the audio.
+ * It is a read of `AudibleSpectrumTap` and nothing else. There is one player, `NaviliteRemote`'s
+ * queue, and every item it builds carries its own tap from `makeItem`, so there is nothing here to
+ * find, start or stop — a method no shipped JS can reach is a method that can only lie about the
+ * audio.
  *
  * Registered by hand in `ViewController.capacitorDidLoad()`, because a Swift-only local plugin has no
  * npm package for `cap sync` to discover.
