@@ -221,6 +221,7 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
     /// Accessible to NaviliteSpectrum so the visualizer tap can attach to away queue items.
     var currentAwayQueue: AVQueuePlayer? { awayQueue }
     var currentAwayOwnsAudible: Bool { awayOwnsAudible }
+    var currentAwaySounding: Bool { queueIsSounding }
     /// How many entries are attached ahead of the one the queue is playing.
     private static let awayAhead = 2
     /// The queue itself, created once and re-filled from each statement.
@@ -3481,6 +3482,16 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                 ])
             }
             call.resolve(["released": sounding || reading != nil])
+        }
+    }
+
+    @objc func isAwaySounding(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                call.resolve(["sounding": false])
+                return
+            }
+            call.resolve(["sounding": self.queueIsSounding || self.awayOwnsAudible])
         }
     }
 

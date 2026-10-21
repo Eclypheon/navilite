@@ -51,7 +51,8 @@ export interface ResumeSessionState {
 /** The context a restored queue shows when the session did not record where it came from. */
 export const LAST_SESSION: QueueContext = { kind: 'song', name: 'your last session' };
 
-function isRepeatMode(value: unknown): value is RepeatMode {
+/** One validator for the repeat mode, shared with the resume snapshot (beta.24). */
+export function isRepeatMode(value: unknown): value is RepeatMode {
   return value === 'off' || value === 'all' || value === 'one';
 }
 

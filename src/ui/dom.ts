@@ -57,7 +57,8 @@ export function replace(host: Element, ...children: Array<Child | readonly Child
 /** `duration` is seconds, as Subsonic reports it. */
 export function formatDuration(seconds: number | undefined): string {
   if (!seconds || !Number.isFinite(seconds) || seconds <= 0) return '--:--';
-  const total = Math.round(seconds);
+  // Same rule as `formatTime`: a length is truncated, so a 179.6 s track reads 2:59 both places.
+  const total = Math.floor(seconds);
   const minutes = Math.floor(total / 60);
   const rest = total % 60;
   if (minutes >= 60) {

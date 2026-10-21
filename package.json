@@ -1,6 +1,6 @@
 {
   "name": "navilite",
-  "version": "2.0.0-beta.23",
+  "version": "2.0.0-beta.24",
   "private": true,
   "type": "module",
   "description": "A deliberately lightweight Navidrome (Subsonic) music player with a real audio spectrum, shipped as a PWA, an Android APK and an iOS IPA from one TypeScript codebase.",
@@ -16,7 +16,9 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "node --test \"test/*.test.ts\"",
+    "pretest": "npm run build",
+    "test": "node --test \"test/*.test.ts\" && npm run test:swift",
+    "test:swift": "sh scripts/press-rules-test.sh",
     "test:layout": "node --test test/layout-393.test.ts",
     "test:pager": "node --test test/pager.test.ts",
     "icons": "node tools/make-icons.mjs",

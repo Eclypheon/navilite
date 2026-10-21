@@ -22,6 +22,7 @@
  * dropped so the caller asks again, and the document can never be written back as a hit.
  */
 import { isRouteErrorDoc, type LyricsDoc } from '../api/lyrics.ts';
+import { availableLocalStorage } from './local-store.ts';
 
 const STORAGE_KEY = 'navilite.lyrics.v1';
 const MAX_ENTRIES = 200;
@@ -139,9 +140,5 @@ export class LyricsCache {
 export type LyricsStore = Pick<LyricsCache, 'get' | 'set' | 'clear' | 'size'>;
 
 function defaultStore(): Pick<Storage, 'getItem' | 'setItem'> | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage;
-  } catch {
-    return null;
-  }
+  return availableLocalStorage('__navilite_lyrics_probe__');
 }

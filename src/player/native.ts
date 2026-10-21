@@ -217,6 +217,13 @@ interface NaviliteRemotePlugin {
    */
   queueTransport?(next: { op: string; positionMs?: number }): Promise<{ ok?: boolean; why?: string }>;
   /**
+   * **`NaviliteRemote.isAwaySounding` (v2.0-beta.24)** — whether the away queue is making a sound
+   * (or is the player the app recorded as owning it) at this instant, read from the player. The
+   * engine asks before starting its own player so a resume can never layer `AudibleBridgePlayer` over
+   * an `AVQueuePlayer` that is still sounding, and the spectrum asks before choosing a slot to tap.
+   */
+  isAwaySounding?(): Promise<{ sounding?: boolean }>;
+  /**
    * **One line into the persisted log, for the return (unreleased).**
    *
    * The adopt/handover branch is decided here in the web layer and the file is written by Swift, so
@@ -547,6 +554,8 @@ export interface NativeBridge {
    * without it answers nothing, and the engine keeps its old route.
    */
   queueTransport?(op: 'pause' | 'resume' | 'seek', positionMs?: number): Promise<boolean>;
+  /** Check if the away queue is currently sounding or owns playback. */
+  isAwaySounding?(): Promise<boolean>;
   /**
    * **Write the return's own line into the phone's log (unreleased).**
    *
@@ -2069,6 +2078,11 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
         }
         return true;
       },
+      async isAwaySounding() {
+        if (!remote?.isAwaySounding) return false;
+        const answer = await bounded(remote.isAwaySounding(), null, 'isAwaySounding');
+        return answer?.sounding === true;
+      },
       async reconcile() {
         if (!remote?.now) return null;
         const measuredAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -2114,8 +2128,9 @@ export async function createNativeBridge(os: OsName, events: NativeBridgeEvents)
          * to come out of the slot the app expected.
          */
         const movedIndex = nativeIndex >= 0 && nativeIndex !== statement.index;
+        const movedSong = typeof state.songId === 'string' && !!state.songId && !!audibleSongId && state.songId !== audibleSongId;
         const reading = returnReadingOf(state.return);
-        if (slot === null || (slot === audibleId && !movedIndex)) {
+        if (slot === null || (slot === audibleId && !movedIndex && !movedSong)) {
           return { changed: false, songId: state.songId ?? null, index: nativeIndex, resume: handoverOf(state.resume), reading, measuredAt };
         }
         /*

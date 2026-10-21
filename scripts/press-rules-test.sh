@@ -8,6 +8,10 @@
 #
 # Exit status is the test's: 0 only when every branch answered what the release claims.
 set -eu
+if ! command -v xcrun >/dev/null 2>&1; then
+  echo "skip: no xcrun (this test needs the macOS Swift toolchain)"
+  exit 0
+fi
 cd "$(dirname "$0")/.."
 OUT="$(mktemp -t navilite-press-rules)"
 trap 'rm -f "$OUT"' EXIT INT TERM

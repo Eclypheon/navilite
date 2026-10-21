@@ -1964,12 +1964,20 @@ export class OfflineStore {
       const body = await this.lyricsFallback(song);
       if (body !== null && body !== '' && !isRouteErrorBody(body)) {
         await this.bridge.writeLyrics(song.id, body);
-        row.lyrics = { state: 'present', file: `${song.id}.lyrics`, bytes: body.length, fetchedAt: Date.now() };
+        // Bytes, not UTF-16 code units: a kana body is ~3 bytes per character (beta.24).
+        row.lyrics = { state: 'present', file: `${song.id}.lyrics`, bytes: new TextEncoder().encode(body).length, fetchedAt: Date.now() };
       } else {
         row.lyrics = { state: 'none', bytes: 0, fetchedAt: Date.now() };
       }
     } catch {
-      row.lyrics = { state: 'none', bytes: 0, fetchedAt: Date.now() };
+      /*
+       * **A source that did not answer is not "this track has no lyrics" (v2.0-beta.24).** This used
+       * to record `none`, the same value a real empty answer writes — and `enqueueLyrics` skips a
+       * `none` row for good, so a download made on a flaky link completed with its lyrics missing and
+       * nothing ever asked again. `failed` is the honest state: the pump's next pass re-asks it.
+       */
+      row.lyrics = { state: 'failed', bytes: 0, fetchedAt: Date.now() };
+      for (const playlistId of row.refs) this.schedulePump(playlistId);
     }
     for (const playlistId of row.refs) this.reconcileRecord(playlistId);
     this.saveMirror();

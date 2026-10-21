@@ -33,6 +33,42 @@ export interface LyricsView {
 
 /** After this long with no answer the panel says so — but a late answer still paints. */
 const PATIENCE_MS = 15000;
+
+/**
+ * Wait `ms` for a lyrics answer (v2.0-beta.24).
+ *
+ * An answer inside the window is delivered at once. When the window runs out the caller is told
+ * (`expired`, which paints the empty message) **and the answer is still delivered when it lands**:
+ * the patience is a promise to the reader, not a cancellation. Until beta.24 the race resolved
+ * `timeout` and dropped the real promise, so a slow link left the pane on "no lyrics yet" for the
+ * rest of the track even though the words had arrived.
+ *
+ * A source that throws delivers `null` — the same thing it means when the library answers nothing.
+ */
+export async function deliverLyricsWithPatience(
+  work: Promise<LyricsDoc | null>,
+  ms: number,
+  deliver: (doc: LyricsDoc | null) => void,
+  expired: () => void,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  let answer: LyricsDoc | null | 'timeout';
+  try {
+    answer = await Promise.race([work, timeout]);
+  } catch {
+    answer = null;
+  }
+  if (timer !== undefined) clearTimeout(timer);
+  if (answer === 'timeout') {
+    expired();
+    void work.then(deliver).catch(() => deliver(null));
+    return;
+  }
+  deliver(answer);
+}
 const EMPTY_MESSAGE = 'no romaji lyrics for this track yet';
 /**
  * v1.5: how long a hand scroll wins over the auto-scroll.
@@ -163,20 +199,24 @@ export function createLyricsView(service: LyricsService): LyricsView {
   };
 
   const load = async (song: Song): Promise<void> => {
-    const answer = await Promise.race([
+    await deliverLyricsWithPatience(
       service.lyricsFor(song),
-      new Promise<'timeout'>((resolve) => window.setTimeout(() => resolve('timeout'), PATIENCE_MS)),
-    ]);
-    // The track may have changed while this was in flight.
-    if (songId !== song.id) return;
-    loaded = true;
-    if (answer === 'timeout' || answer === null) {
-      doc = null;
-      message(EMPTY_MESSAGE);
-      return;
-    }
-    doc = answer;
-    paint();
+      PATIENCE_MS,
+      (value) => {
+        // The track may have changed while this was in flight.
+        if (songId !== song.id) return;
+        loaded = true;
+        doc = value;
+        if (value === null) message(EMPTY_MESSAGE);
+        else paint();
+      },
+      () => {
+        if (songId !== song.id) return;
+        loaded = true;
+        doc = null;
+        message(EMPTY_MESSAGE);
+      },
+    );
   };
 
   return {

@@ -14,6 +14,7 @@
  * boot, dropping rows whose files are gone.
  */
 import type { Song } from '../api/types.ts';
+import { availableLocalStorage } from './local-store.ts';
 
 export interface OfflineMirrorRow {
   /** The `file://` URL of the verified file, as the native side reported it. */
@@ -97,14 +98,13 @@ export const OFFLINE_MIRROR_KEY = 'navilite.offline';
 
 /** `localStorage` when it exists and works, otherwise a store that quietly keeps nothing. */
 export function mirrorStore(): MirrorStore {
-  try {
-    const probe = '__navilite_offline_probe__';
-    localStorage.setItem(probe, '1');
-    localStorage.removeItem(probe);
-    return localStorage;
-  } catch {
-    return { getItem: () => null, setItem: () => undefined, removeItem: () => undefined };
-  }
+  return (
+    availableLocalStorage('__navilite_offline_probe__') ?? {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    }
+  );
 }
 
 /** Parse and validate a stored mirror. Returns null for anything that cannot be trusted. */

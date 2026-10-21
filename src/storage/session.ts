@@ -22,7 +22,8 @@
  * is a single `localStorage.setItem` on a 5-second tick, which is what makes "exact" affordable.
  */
 import type { QueueContext, Song } from '../api/types.ts';
-import type { RepeatMode } from '../state/queue.ts';
+import { isRepeatMode, type RepeatMode } from '../state/queue.ts';
+import { availableLocalStorage } from './local-store.ts';
 
 /** Just the part of `Storage` this needs, so a test can pass a plain object. */
 export interface SnapshotStore {
@@ -62,10 +63,6 @@ export interface ResumeSnapshot {
  * expects to find playing, and the server's own `savePlayQueue` is still there for that case.
  */
 export const SNAPSHOT_MAX_AGE_MS = 12 * 60 * 60 * 1000;
-
-function isRepeatMode(value: unknown): value is RepeatMode {
-  return value === 'off' || value === 'all' || value === 'one';
-}
 
 /** A permutation check, because a corrupt `order` would index past the queue. */
 function isPermutation(order: unknown, length: number): order is number[] {
@@ -120,15 +117,14 @@ export function parseSnapshot(raw: string | null, now = Date.now()): ResumeSnaps
 
 /** `localStorage` when it exists and works, otherwise a store that quietly keeps nothing. */
 export function browserStore(): SnapshotStore {
-  try {
-    const probe = '__navilite_probe__';
-    localStorage.setItem(probe, '1');
-    localStorage.removeItem(probe);
-    return localStorage;
-  } catch {
-    // Private mode, a disabled store, or a non-browser runtime: resume is simply off.
-    return { getItem: () => null, setItem: () => undefined, removeItem: () => undefined };
-  }
+  return (
+    availableLocalStorage('__navilite_probe__') ?? {
+      // Private mode, a disabled store, or a non-browser runtime: resume is simply off.
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    }
+  );
 }
 
 export function loadSnapshot(store: SnapshotStore = browserStore(), now = Date.now()): ResumeSnapshot | null {

@@ -29,7 +29,6 @@ import { LyricsCache } from '../storage/lyrics.ts';
 import { createSecretStore } from '../storage/secret.ts';
 import { loadSettings, saveSettings } from '../storage/settings.ts';
 import { loadSnapshot } from '../storage/session.ts';
-import { CHANGELOG } from './changelog.ts';
 import type { AppContext, Shell } from './context.ts';
 import { ICONS, cover, formatDuration, h, icon, replace, starIcon } from './dom.ts';
 import { createLyricsView } from './lyrics.ts';
@@ -38,7 +37,8 @@ import { hideNowScreen, paneOfRoute, showNowScreen } from './now-screen.ts';
 import { bindTap, buildShell } from './shell.ts';
 
 const PASSWORD_KEY = 'subsonic-password';
-const BUILD_ID = '__BUILD_ID__';
+/** Stamped by `vite.config.ts` (define) from the git commit; `dev` when the source runs directly. */
+const BUILD_ID = typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev';
 export const DEFAULT_ROUTE = '#/artists';
 /** The now screen, on the spectrum pane. */
 export const NOW_ROUTE = '#/now';
@@ -777,8 +777,7 @@ function renderRoute(ctx: AppContext, shell: Shell): void {
       restoreScroll(shell, routeKey);
       break;
     case 'changelog':
-      renderChangelog(shell);
-      restoreScroll(shell, routeKey);
+      drawn(renderChangelog(shell));
       break;
     case 'connect':
       void renderConnect(ctx, shell);
@@ -1457,7 +1456,7 @@ async function renderAlbums(ctx: AppContext, shell: Shell): Promise<void> {
   const listHost = h('div', { class: 'grid' }, [h('p', { class: 'muted', text: 'Loading albums…' })]);
   shell.view.append(listHost);
   const load = async (): Promise<void> => {
-    const albums = await ctx.library!.albumList(select.value as AlbumListType, 200);
+    const albums = await ctx.library!.albumList(select.value as AlbumListType, 500);
     replace(listHost, ...albums.map((album) => albumCard(ctx, album)));
     if (albums.length === 0) replace(listHost, h('p', { class: 'muted', text: 'Nothing here yet.' }));
   };
@@ -2246,12 +2245,15 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
   downloadSummary.addEventListener('click', () => (location.hash = '#/downloads'));
   const removeDownloads = h('button', { class: 'button danger', text: 'Remove all downloads' });
   removeDownloads.addEventListener('click', () => {
+    // A destructive tap with no undo gets one question first (beta.24).
+    if (!confirm('Remove every downloaded track from this phone?')) return;
     void ctx.offline?.removeAll().then(() => ctx.toast('All downloads removed'));
   });
   subscribeOffline(ctx.offline, paintDownloads);
 
   const forget = h('button', { class: 'button danger', text: 'Forget credentials' });
   forget.addEventListener('click', () => {
+    if (!confirm('Forget the saved username and password? You will have to type them again.')) return;
     void (async () => {
       await ctx.secrets.remove(PASSWORD_KEY);
       ctx.settings = { ...ctx.settings, username: '' };
@@ -2297,23 +2299,30 @@ function renderSettings(ctx: AppContext, shell: Shell): void {
   );
 }
 
-function renderChangelog(shell: Shell): void {
-  replace(
-    shell.view,
-    h('div', { class: 'changelog' }, [
-      h('h1', { text: "What's new" }),
-      h('p', { class: 'muted small', text: 'Every user-visible change, newest last. The same list is in the repository as CHANGELOG.md.' }),
-      ...CHANGELOG.map((release) =>
-        h('section', { class: 'release' }, [
-          h('h2', { class: 'section', text: `Version ${release.version} — ${release.date}` }),
-          h('ul', { class: 'release-items' }, ...release.items.map((item) => h('li', { text: item }))),
+function renderChangelog(shell: Shell): Promise<void> {
+  /*
+   * **v2.0-beta.24 — the release text is loaded when the screen is opened.** It is ~65 kB of source
+   * (`src/ui/changelog.ts`) and used to ride in the main chunk for a screen almost nobody opens;
+   * a dynamic import puts it in its own chunk and leaves the app's first paint smaller.
+   */
+  return import('./changelog.ts').then(({ CHANGELOG }) => {
+    replace(
+      shell.view,
+      h('div', { class: 'changelog' }, [
+        h('h1', { text: "What's new" }),
+        h('p', { class: 'muted small', text: 'Every user-visible change, newest last. The same list is in the repository as CHANGELOG.md.' }),
+        ...CHANGELOG.map((release) =>
+          h('section', { class: 'release' }, [
+            h('h2', { class: 'section', text: `Version ${release.version} — ${release.date}` }),
+            h('ul', { class: 'release-items' }, ...release.items.map((item) => h('li', { text: item }))),
+          ]),
+        ),
+        h('div', { class: 'row' }, [
+          h('button', { class: 'button', text: 'Back to settings', onclick: () => (location.hash = '#/settings') }),
         ]),
-      ),
-      h('div', { class: 'row' }, [
-        h('button', { class: 'button', text: 'Back to settings', onclick: () => (location.hash = '#/settings') }),
       ]),
-    ]),
-  );
+    );
+  });
 }
 
 function songRow(

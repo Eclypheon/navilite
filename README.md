@@ -4,15 +4,16 @@ A deliberately **lightweight** music player for a self-hosted **Navidrome** libr
 **real** audio spectrum — built for one person's library, not for streaming services.
 
 One TypeScript codebase, three artifacts: **PWA**, **Android APK**, **iOS IPA** (sideloaded,
-free Apple ID). No framework, no UI kit: the whole app is ~98 kB of JavaScript across its chunks
-(33 kB gzipped) plus an 11 kB stylesheet (3 kB gzipped), and the native plugins are code-split so a
-browser never downloads them.
+free Apple ID). No framework, no UI kit: the app's main script is ~186 kB (~57 kB gzipped), plus a
+12 kB web-audio chunk and a 14 kB stylesheet (3.7 kB gzipped). The native plugins and the
+"What's new" text are code-split, so a browser never downloads them until they are needed.
 
 ```
 npm install
 npm run mock        # serves the built app + a synthetic Subsonic library on :4533
 npm run build       # dist/ — the PWA, and the payload for both native shells
-npm test            # 62 unit tests: deployment copy, md5 vectors, token auth, parsing, play rules,
+npm test            # 368 unit tests, then the Swift press rules: deployment copy, md5 vectors,
+                    # token auth, parsing, play rules, returns, downloads, lyrics; builds dist/ first
 npm run apk          # artifacts/Navilite-<version>-debug.apk
 npm run ipa:unsigned # artifacts/Navilite-<version>-unsigned.ipa
 ```

@@ -76,6 +76,8 @@ interface Record {
   silent: boolean;
   returns: NativeReturnRecord[];
   loadGate: Promise<void> | null;
+  /** Optional spectrum tap, for the beta.24 retry test: the tap answers `true` from `liveAfter` starts. */
+  spectrum: { starts: number; liveAfter: number; frames: number } | null;
 }
 
 const blank = (): Record => ({
@@ -91,6 +93,7 @@ const blank = (): Record => ({
   silent: false,
   returns: [],
   loadGate: null,
+  spectrum: null,
 });
 
 const track = (id: string) => ({
@@ -185,7 +188,32 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
       sync: async () => ({ playing: record.playing, positionMs: record.syncPositionMs, durationMs: 300_000 }),
       activateSession: async () => true,
       listenRemoteCommands: () => () => undefined,
-      hasNativeSpectrum: false,
+      hasNativeSpectrum: record.spectrum !== null,
+      async startSpectrum() {
+        if (!record.spectrum) return false;
+        record.spectrum.starts += 1;
+        return record.spectrum.starts >= record.spectrum.liveAfter;
+      },
+      async spectrumFrame() {
+        const tap = record.spectrum;
+        if (!tap) return null;
+        tap.frames += 1;
+        const live = tap.starts >= tap.liveAfter;
+        return {
+          bands: Array.from({ length: 64 }, (_unused, index) => (live ? 40 + ((tap.frames * 7 + index) % 180) : 0)),
+          bandCount: 64,
+          live,
+          frames: tap.frames,
+          itemFrames: tap.frames,
+          silentFrames: 0,
+          positionMs: 243_000,
+          playing: true,
+          attached: true,
+          itemIsCurrent: true,
+          itemFramePeriodMs: 33,
+          itemFrameAgeMs: 0,
+        };
+      },
     } as unknown as NativeBridge;
   };
 }
@@ -206,9 +234,18 @@ async function playing(engine: AudioEngine, record: Record, positionMs: number):
   record.plays = [];
 }
 
-/* ------------------------------------------------------------------ 1. the take takes */
+/* --------------------------------------------------- 1. the queue that is sounding is adopted */
 
-test('a return takes the sound back: the app’s own player sounds the queue’s entry at the queue’s position, and the queue is released after that start commits', async () => {
+/*
+ * **v2.0-beta.24 — the take is not attempted over a sound that already exists.**
+ *
+ * This test used to assert the take: the queue was sounding and the app started its own player at the
+ * queue's position, then released the queue. That is the branch the owner's beta.23 report is about —
+ * the start was the second player, and when it did not commit the row fell to `paused` over audible
+ * music. The return now adopts the queue whenever its reading names the visible entry, and writes
+ * nothing to either player; the take is covered by the test below, where the player gives no reading.
+ */
+test('a return with the queue sounding adopts it: the row is playing on the queue’s reading, nothing is started, and the queue keeps the sound', async () => {
   const record = blank();
   const engine = engineFor(record);
   try {
@@ -216,15 +253,57 @@ test('a return takes the sound back: the app’s own player sounds the queue’s
     await engine.handleVisibility(true);
 
     /*
-     * The queue played on while the app was away and holds the sound at 4:03 (`path: 'queue'`), and
-     * the app's own start of the same entry at that position does reach the speakers.
+     * The queue played on while the app was away and is sounding the visible entry at 4:03.
+     * `taken: true` is offered as well — and it must not be asked for, because there is nothing to
+     * take over.
      */
     const at = 243_000;
     record.sounding = { songId: 'a', index: 0, positionMs: at, path: 'queue', sounding: true };
-    /* The phone's answer to `handover()`: `taken: true` is the offer, and only then is it a reading. */
+    record.reading = { songId: 'a', index: 0, positionMs: at, path: 'plugin', sounding: false, taken: true };
+    record.playing = false;
+    record.syncPositionMs = 0;
+
+    await engine.handleVisibility(false);
+    await settle();
+
+    assert.equal(engine.status().state, 'playing', 'the row is playing');
+    assert.deepEqual(record.plays, [], 'no start was issued over a queue that is already sounding');
+    assert.equal(record.released, 0, 'and nothing was released — there was nothing to take');
+    assert.ok(!record.order.includes('handover'), `the handover was not even offered (${record.order.join(' → ')})`);
+    assert.ok(!record.order.some((entry) => entry.startsWith('pause') || entry.startsWith('seek')), 'nothing was paused or seeked');
+    const shown = engine.status().positionMs;
+    assert.ok(Math.abs(shown - at) <= NaviliteDriftMs, `the bar is on the queue’s position (${shown} vs ${at})`);
+    const request = record.returns.at(-1);
+    assert.equal(request?.path, 'adopt', 'the return names its branch');
+    assert.equal(request?.started, false, 'and it says no start was issued');
+
+    /* And the sound owner is the queue: a press reaches it, never the silent app player. */
+    await engine.pause();
+    assert.deepEqual(record.queueOps, ['pause'], 'the pause went to the away queue');
+    assert.ok(!record.order.includes('pause'), 'and never to the app’s own player');
+  } finally {
+    await engine.stop();
+    await settle();
+  }
+});
+
+/* ------------------------------------------------- 1b. the take, when the player gives no reading */
+
+test('a return with no reading from the player takes the sound back: the app starts the queue’s entry at the queue’s position and releases the queue after that start commits', async () => {
+  const record = blank();
+  const engine = engineFor(record);
+  try {
+    await playing(engine, record, 240_000);
+    await engine.handleVisibility(true);
+
+    /*
+     * Nothing is sounding according to `now()` — no reading there — and the phone's answer to
+     * `handover()` is the offer: this side starts the entry at the queue's position.
+     */
+    const at = 243_000;
+    record.sounding = null;
     record.reading = { songId: 'a', index: 0, positionMs: at, path: 'plugin', sounding: false, taken: true };
     record.playing = true;
-    // The app's own player is the sound now, so it reports where it really is.
     record.syncPositionMs = at + 400;
 
     await engine.handleVisibility(false);
@@ -235,12 +314,12 @@ test('a return takes the sound back: the app’s own player sounds the queue’s
     assert.equal(record.released, 1, 'and the queue is released exactly once, after that start');
     assert.ok(
       record.order.indexOf('release') > record.order.indexOf(`play:${at / 1000}`),
-      `the release is the last thing in the order (${record.order.join(' → ')})`,
+      `the release is after the start (${record.order.join(' → ')})`,
     );
     const shown = engine.status().positionMs;
     assert.ok(
-      Math.abs(shown - at) <= NaviliteDriftMs,
-      `the bar is on the queue’s position, not on 0 (${shown} vs ${at})`,
+      shown >= at && shown - at <= 2_000,
+      `the bar starts on the queue’s position and only ticks forward (${shown} vs ${at})`,
     );
     assert.ok(!record.order.some((entry) => entry.startsWith('pause') || entry.startsWith('seek')), 'nothing was paused or seeked');
     const request = record.returns.at(-1);
@@ -252,7 +331,45 @@ test('a return takes the sound back: the app’s own player sounds the queue’s
   }
 });
 
-/* ------------------------------------------------- 2. the take is refused: the queue owns the row */
+/* --------------------------- 1c. the tap is asked again until it answers (beta.24) */
+
+test('a foreground return keeps asking for the spectrum tap until it is live, then stops asking', async () => {
+  const record = blank();
+  record.spectrum = { starts: 0, liveAfter: 4, frames: 0 };
+  const engine = engineFor(record);
+  try {
+    await playing(engine, record, 240_000);
+    assert.ok(record.spectrum.starts >= 1, 'the first track installed its tap');
+    await engine.handleVisibility(true);
+
+    const at = 243_000;
+    record.sounding = { songId: 'a', index: 0, positionMs: at, path: 'queue', sounding: true };
+    record.playing = false;
+    const before = record.spectrum.starts;
+
+    await engine.handleVisibility(false);
+    await settle();
+    assert.ok(record.spectrum.starts > before, 'the return asked for the tap');
+
+    /* The first requests are refused (a queue whose item is still initialising); the retry asks again. */
+    await wait(800);
+    assert.ok(
+      record.spectrum.starts >= before + 2,
+      `the return retried the tap on its own (${record.spectrum.starts - before} asks after the return)`,
+    );
+    assert.equal(engine.status().spectrum, true, 'and the bars are live once the tap answers');
+
+    /* And once it is live, the retry loop gets out of the way. */
+    const settled = record.spectrum.starts;
+    await wait(400);
+    assert.equal(record.spectrum.starts, settled, 'the retry stopped as soon as the tap was live');
+  } finally {
+    await engine.stop();
+    await settle();
+  }
+});
+
+/* ------------------------------------------------- 2. the queue that is sounding owns the row */
 
 test('a return whose take is refused leaves the queue owning the row: playing, ticking from the queue’s reading, with pause/resume/seek routed to the queue — never paused over audible music', async () => {
   const record = blank();
@@ -372,7 +489,7 @@ const NaviliteDriftMs = 250;
  * `taken: false` was read as an offer.
  * ---------------------------------------------------------------------------------------------- */
 
-test('an adopt-route handover (taken: false) answers no reading: the row keeps the position F2 rendered, never enters loading, and issues no play', async () => {
+test('the queue sounding means the return adopts: no play, no release, and the position F2 rendered survives', async () => {
   const record = blank();
   const engine = engineFor(record);
   try {
@@ -414,7 +531,7 @@ test('an adopt-route handover (taken: false) answers no reading: the row keeps t
       Math.abs(shown - at) <= 2_000,
       `the position F2 rendered survives the return (${shown} vs ${at}) — 0:00 here is the restart`,
     );
-    assert.equal(record.returns.at(-1)?.path, 'handover', 'the return names the branch it took');
+    assert.equal(record.returns.at(-1)?.path, 'adopt', 'the queue is the sound, so the return is an adoption, not a handover');
     assert.equal(record.returns.at(-1)?.started, false, 'and says it issued no start');
   } finally {
     await engine.stop();

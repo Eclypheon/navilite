@@ -677,4 +677,19 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The audio spectrum visualizer immediately taps the active background audio stream and stays live on return.',
       ],
     },
+    {
+      version: '2.0-beta.24',
+      date: '2026-10-22',
+      items: [
+        "Coming back to the app while the phone's background player is sounding the same song now adopts it straight away instead of trying to take the sound back: the button stays on pause, the position comes from the player that is really playing, and no second player is started.",
+        'If the app ever loses track of which player is sounding, pressing play asks the phone first and resumes that player, instead of starting a second one over the music.',
+        'The spectrum keeps asking the phone to attach its tap until it is really live — every quarter second for two seconds — instead of waiting five seconds or giving up when the row settles to paused, and it taps the background player whenever that is the one sounding.',
+        'Removing all downloads and forgetting the saved password each ask once before they do it.',
+        'A downloaded playlist asks again for lyrics that a temporary network error failed to fetch, instead of recording the track as having none.',
+        'The albums lists show the whole library (up to 500 per list) instead of stopping at 200.',
+        'Lyrics that arrive more than fifteen seconds after the lyrics screen opens now appear when they arrive, instead of leaving the screen on "no lyrics yet" for that song.',
+        "A track's length and the elapsed time round the same way, so the last second of a song no longer looks like a missing one.",
+        'The app\'s first page is smaller: the "What\'s new" text is fetched only when that screen is opened.',
+      ],
+    },
   ];

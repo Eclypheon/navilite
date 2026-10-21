@@ -219,6 +219,18 @@ const SPECTRUM_ORPHAN_RECHECK_MS = 1000;
  */
 const SPECTRUM_RECHECK_MS = 5000;
 /**
+ * **v2.0-beta.24 — the foreground return's own retry cadence.**
+ *
+ * On the way back the tap has to be attached to the away queue's `currentItem`, and a queue that
+ * has just been armed has no audio track for a moment (`NaviliteSpectrum.install`'s own wait). One
+ * refused request used to be the whole answer: the bars stayed on the theme until the orphan poll
+ * came round — five seconds, or never once the row had settled to `paused`. The return asks again
+ * this often for {@link SPECTRUM_RETRY_ATTEMPTS} tries (two seconds), and stops the moment the tap
+ * has produced a frame or the track changes.
+ */
+const SPECTRUM_RETRY_MS = 250;
+const SPECTRUM_RETRY_ATTEMPTS = 8;
+/**
  * How close to the end of a track the tap may report "not playing" without being rebuilt.
  *
  * Kept from v1.7.5, when the tap read a *silent copy* of the stream that finished a beat before the
@@ -411,6 +423,17 @@ export class AudioEngine {
    * they always were.
    */
   private orphanReattachedFor: string | null = null;
+  /**
+   * **v2.0-beta.24 — the timer for the spectrum auto-retry loop on foreground return.**
+   *
+   * When the app returns to the foreground and the queue owns the sound, the spectrum tap may
+   * not attach on the first attempt (the away queue's `currentItem` may still be initialising
+   * its audio tracks). This timer retries `verifySpectrum()` every 250 ms until `spectrumLive`
+   * becomes true or 8 attempts have been made (2 seconds total). Cleared on any new track,
+   * on going hidden again, or when the spectrum comes alive.
+   */
+  private spectrumRetryTimer: ReturnType<typeof setInterval> | null = null;
+  private spectrumRetryCount = 0;
   /** The serial of the newest install request, so a superseded one cannot answer for this track. */
   private spectrumInstallSerial = 0;
   /** What the newest install request has answered, and whether it has answered at all (v1.9.22). */
@@ -1003,6 +1026,42 @@ export class AudioEngine {
    */
   lastStartOutcome(): 'player' | 'background' | 'timeout' | 'superseded' | null {
     return this.startOutcome;
+  }
+
+  /**
+   * **v2.0-beta.24 — keep asking the tap to attach after a foreground return.**
+   *
+   * The queue that owns the sound on the return may still be initialising its `currentItem`'s audio
+   * tracks, so the one `verifySpectrum()` the return issues can be refused for a reason that has
+   * nothing to do with this build or this track. This loop asks again every {@link SPECTRUM_RETRY_MS}
+   * until `spectrumLive` is true, the machine leaves `playing`, or the budget is spent (two
+   * seconds). It clears itself, so nothing has to remember it: `stopSpectrumRetry` on the way out, a
+   * new track, or the first live frame.
+   */
+  private startSpectrumRetry(): void {
+    if (this.backend !== 'native' || !this.hasSpectrumTap()) return;
+    this.stopSpectrumRetry();
+    const timer = setInterval(() => {
+      if (this.state !== 'playing' || this.spectrumLive) {
+        this.stopSpectrumRetry();
+        return;
+      }
+      if (this.spectrumRetryCount >= SPECTRUM_RETRY_ATTEMPTS) {
+        this.stopSpectrumRetry();
+        return;
+      }
+      this.spectrumRetryCount += 1;
+      this.verifySpectrum();
+    }, SPECTRUM_RETRY_MS);
+    // A retry loop must not hold a process that is not a browser open (tests, tools).
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.spectrumRetryTimer = timer;
+  }
+
+  private stopSpectrumRetry(): void {
+    if (this.spectrumRetryTimer !== null) clearInterval(this.spectrumRetryTimer);
+    this.spectrumRetryTimer = null;
+    this.spectrumRetryCount = 0;
   }
 
   private startClockTick(): void {
@@ -2319,9 +2378,35 @@ export class AudioEngine {
         await this.native?.queueTransport?.('resume');
         this.modeReason = `the press resumed the away queue, which is the player making the sound — at ${Math.round(this.nativePositionMs / 1000)} s, with nothing written to the app's own player`;
         this.startClockTick();
+        this.verifySpectrum();
+        this.startSpectrumRetry();
         this.emit();
         this.onProgress?.(this.nativePositionMs, this.durationMs());
         return;
+      }
+      /*
+       * **v2.0-beta.24 — last-resort check before starting the app's own player.** If
+       * `soundOwner` drifted to `'none'` (an `interruption` dispatch from the app's silent
+       * player while the queue was the actual sound), a resume here would start
+       * `AudibleBridgePlayer` on top of the still-playing `AVQueuePlayer` — two tracks at once.
+       * Ask the native side directly: if the away queue IS sounding, reclaim it and route there.
+       */
+      if (this.native?.isAwaySounding) {
+        const awaySounding = await this.native.isAwaySounding();
+        if (awaySounding) {
+          this.claimSound('queue', track.id);
+          this.generation += 1;
+          this.dispatch({ type: 'transport', action: 'play' });
+          this.muteReports(TRANSPORT_MUTE_MS);
+          await this.native?.queueTransport?.('resume');
+          this.modeReason = `the press found the away queue still sounding — reclaimed it as the sound owner and resumed it at ${Math.round(this.nativePositionMs / 1000)} s instead of starting a second player`;
+          this.startClockTick();
+          this.verifySpectrum();
+          this.startSpectrumRetry();
+          this.emit();
+          this.onProgress?.(this.nativePositionMs, this.durationMs());
+          return;
+        }
       }
       this.generation += 1;
       this.dispatch({ type: 'transport', action: 'play' });
@@ -2362,6 +2447,25 @@ export class AudioEngine {
     }
     // Stopped while the player was being asked: the restart is off.
     if (generation !== this.generation || this.track !== track || this.state !== 'playing') return;
+    /*
+     * **v2.0-beta.24 — do not start a second player over the away queue.** `sync()` reads the
+     * app's own player (which is silent when the queue owns the sound). If the away queue is
+     * still sounding, reclaim it instead of calling `startNative`, which would layer
+     * `AudibleBridgePlayer` on top of the still-playing `AVQueuePlayer`.
+     */
+    if (bridge.isAwaySounding) {
+      const awaySounding = await bridge.isAwaySounding();
+      if (awaySounding) {
+        this.claimSound('queue', track.id);
+        this.dispatch({ type: 'engine-state', playing: true });
+        this.startClockTick();
+        this.verifySpectrum();
+        this.startSpectrumRetry();
+        this.modeReason = `confirmPlaying found the away queue still sounding ${track.id} — reclaimed it instead of starting a second player`;
+        this.emit();
+        return;
+      }
+    }
     const from = truth.positionMs > 0 ? truth.positionMs : this.nativePositionMs;
     this.setNativePosition(from);
     await this.startNative(track, from);
@@ -2555,6 +2659,8 @@ export class AudioEngine {
        * the return path reads the player itself (`sync`) and settles it from the truth.
        */
       this.concludeStart('background');
+      // A retry started on the last return belongs to the screen that is going away (beta.24).
+      this.stopSpectrumRetry();
       // The player keeps playing and keeps reporting *to nobody* — the web view is suspended and
       // no callback arrives. So the clock stops counting here rather than at an unknown later
       // moment; what it shows is the last position the player was known to be at.
@@ -2653,7 +2759,10 @@ export class AudioEngine {
        */
       await this.syncQueue();
       await this.recordReturn('adopt', held, startsBefore);
-      if (this.state === 'playing') this.verifySpectrum();
+      if (this.state === 'playing') {
+        this.verifySpectrum();
+        this.startSpectrumRetry();
+      }
       return;
     }
     this.returnPath = 'handover';
@@ -2691,6 +2800,7 @@ export class AudioEngine {
     await this.syncQueue();
     await this.readReturn('handover', queueSounding, held);
     await this.recordReturn('handover', held, startsBefore);
+    if (this.state === 'playing') this.startSpectrumRetry();
   }
 
   /**
@@ -2751,7 +2861,15 @@ export class AudioEngine {
   private returnIsAdoption(reading: NativeReturnReading | null): boolean {
     const track = this.track;
     if (!track || !track.id || !reading || !reading.songId) return false;
-    if (reading.path === 'queue') return false;
+    /*
+     * **v2.0-beta.24 — the queue IS an adoption.** `path === 'queue'` used to return `false`,
+     * which forced every return where the queue held the sound into the handover branch. The
+     * handover then failed (the queue refused to hand over a sound it was already making), the
+     * app's own silent player reported `playing: false`, and the engine dispatched `interruption`
+     * — flipping the button to Play while the music went on. The queue sounding the visible entry
+     * IS an adoption: the sound exists, nothing needs to be started, and the row renders the
+     * queue's reading.
+     */
     return reading.songId === track.id;
   }
 
@@ -2999,6 +3117,8 @@ export class AudioEngine {
    * it start at all.
    */
   private async startNative(track: TrackRequest, startMs: number, ready?: NativeBridge): Promise<void> {
+    // The retry belonged to the track that is being replaced (beta.24).
+    this.stopSpectrumRetry();
     /*
      * v1.9.7 — **a bridge that cannot be built is a start that did not happen, and it is said here.**
      *
@@ -3373,6 +3493,7 @@ export class AudioEngine {
    * hand the canvas (the visualiser's own release envelope), not because anything was taken apart.
    */
   private disarmConsumers(reason: string): void {
+    this.stopSpectrumRetry();
     if (this.spectrumPoll !== null) {
       clearInterval(this.spectrumPoll);
       this.spectrumPoll = null;

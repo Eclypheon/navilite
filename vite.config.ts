@@ -29,6 +29,9 @@ function stampServiceWorker(): Plugin {
 }
 
 export default defineConfig({
+  // The About line names the commit this bundle was built from (v2.0-beta.24: it used to
+  // print the literal `__BUILD_ID__`, because only sw.js was stamped).
+  define: { __BUILD_ID__: JSON.stringify(buildId()) },
   // Relative base: the same dist/ has to work from a subpath behind the reverse
   // proxy and from the Capacitor webview's own origin.
   base: './',
