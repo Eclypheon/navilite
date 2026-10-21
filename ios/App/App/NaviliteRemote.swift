@@ -678,11 +678,20 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                  * boundary. So the statement is reconciled with the queue's own current item first,
                  * and only then is anything fetched ahead. A queue that is not armed yet answers nil
                  * and changes nothing.
+                 *
+                 * **And only a queue that is SOUNDING corrects the statement (v2.0.0-beta.25).** An
+                 * armed queue's `currentItem` is the entry after the one playing, so reading it here
+                 * moved the index (and the card, and the next boundary's target) one entry forward
+                 * every time the app was backgrounded while its own player was the sound — the
+                 * owner's "song 2's card appears over song 1, then song 2 is skipped".
                  */
-                if let sounding = self.queueSoundingEntry(),
-                   let at = self.queue.firstIndex(where: { $0.songId == sounding.songId }) {
-                    self.index = at
-                }
+                let queueSounding = self.queueIsSounding
+                let soundingAt = queueSounding
+                    ? self.queueSoundingEntry().flatMap { sounding in
+                        self.queue.firstIndex(where: { $0.songId == sounding.songId })
+                    }
+                    : nil
+                self.index = NavilitePressRules.statementIndex(stated: self.index, queueSounding: queueSounding, soundingIndex: soundingAt)
                 self.preloadAhead(token: self.generation)
             }
             /*
@@ -3433,6 +3442,15 @@ public class NaviliteRemote: CAPPlugin, CAPBridgedPlugin {
                     return
                 }
                 queuePlayer.seek(to: CMTime(value: CMTimeValue(positionMs), timescale: 1000))
+            case "stop":
+                /*
+                 * **The app is taking the sound (v2.0.0-beta.25).** A pause was not enough: it left
+                 * the queue owning the audible state, so the next press resumed it under the app's
+                 * own player (two songs) and the app's controls and tap stayed pointed at it. This
+                 * empties the queue, drops its ownership and any pending reading, and the next
+                 * statement re-arms it around the app's selection for the next boundary.
+                 */
+                self.stopAwayQueue(why: "the app's own player is taking the sound")
             default:
                 call.resolve(["ok": false, "why": "an unknown transport (\(op))"])
                 return

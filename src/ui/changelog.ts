@@ -692,4 +692,12 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The app\'s first page is smaller: the "What\'s new" text is fetched only when that screen is opened.',
       ],
     },
+    {
+      version: '2.0-beta.25',
+      date: '2026-10-22',
+      items: [
+        'Backgrounding the app no longer moves the lock-screen card onto the next song while the one playing is still sounding, so the next song is no longer skipped and the one after it is not played in its place.',
+        "Selecting another song while the phone's background player is the one making the sound now takes the sound back cleanly: that player stops, the controls and the spectrum follow the song you picked, and pressing play never starts a second copy.",
+      ],
+    },
   ];

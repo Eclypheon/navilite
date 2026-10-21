@@ -76,8 +76,10 @@ interface Record {
   silent: boolean;
   returns: NativeReturnRecord[];
   loadGate: Promise<void> | null;
+  /** What `isAwaySounding()` answers — the player's own word, independent of the engine's memory. */
+  awaySounding: boolean;
   /** Optional spectrum tap, for the beta.24 retry test: the tap answers `true` from `liveAfter` starts. */
-  spectrum: { starts: number; liveAfter: number; frames: number } | null;
+  spectrum: { starts: number; liveAfter: number; frames: number; assetIds: Array<string | null> } | null;
 }
 
 const blank = (): Record => ({
@@ -93,6 +95,7 @@ const blank = (): Record => ({
   silent: false,
   returns: [],
   loadGate: null,
+  awaySounding: false,
   spectrum: null,
 });
 
@@ -160,6 +163,9 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
         record.queueOps.push(positionMs === undefined ? op : `${op}:${positionMs}`);
         return true;
       },
+      async isAwaySounding() {
+        return record.awaySounding;
+      },
       async recordReturn(facts: NativeReturnRecord) {
         record.returns.push(facts);
         return true;
@@ -189,9 +195,10 @@ function fakeBridge(record: Record): (os: string, events: NativeBridgeEvents) =>
       activateSession: async () => true,
       listenRemoteCommands: () => () => undefined,
       hasNativeSpectrum: record.spectrum !== null,
-      async startSpectrum() {
+      async startSpectrum(_url: string, _positionMs: number, assetId?: string) {
         if (!record.spectrum) return false;
         record.spectrum.starts += 1;
+        record.spectrum.assetIds.push(assetId ?? null);
         return record.spectrum.starts >= record.spectrum.liveAfter;
       },
       async spectrumFrame() {
@@ -335,7 +342,7 @@ test('a return with no reading from the player takes the sound back: the app sta
 
 test('a foreground return keeps asking for the spectrum tap until it is live, then stops asking', async () => {
   const record = blank();
-  record.spectrum = { starts: 0, liveAfter: 4, frames: 0 };
+  record.spectrum = { starts: 0, liveAfter: 4, frames: 0, assetIds: [] };
   const engine = engineFor(record);
   try {
     await playing(engine, record, 240_000);
@@ -428,6 +435,103 @@ test('a return whose take is refused leaves the queue owning the row: playing, t
     await engine.seek(90_000);
     assert.equal(record.queueOps.at(-1), 'seek:90000', 'the seek went to the away queue');
     assert.ok(!record.order.some((entry) => entry.startsWith('seek')), 'and not to the app’s own player');
+  } finally {
+    await engine.stop();
+    await settle();
+  }
+});
+
+/* ------------------- 2b. a new selection takes the sound back from the queue (beta.25) */
+
+test('selecting another song while the queue owns the sound takes it back: the queue is stopped, and pause/resume/spectrum reach the app’s own player', async () => {
+  const record = blank();
+  record.spectrum = { starts: 0, liveAfter: 99, frames: 0, assetIds: [] };
+  const engine = engineFor(record);
+  try {
+    /* Put the engine in the queue-owned state the return path leaves behind (the refused take). */
+    await playing(engine, record, 240_000);
+    await engine.handleVisibility(true);
+    record.sounding = { songId: 'a', index: 0, positionMs: 243_000, path: 'queue', sounding: true };
+    record.reading = { songId: 'a', index: 0, positionMs: 243_000, path: 'plugin', sounding: false, taken: true };
+    record.silent = true;
+    record.playing = false;
+    record.syncPositionMs = 243_000;
+    await engine.handleVisibility(false);
+    await settle();
+    assert.equal(engine.status().state, 'playing', 'the queue owns the row');
+
+    record.silent = false;
+    record.playing = true;
+    record.syncPositionMs = 0;
+    record.order = [];
+    record.plays = [];
+    record.queueOps = [];
+    record.spectrum.assetIds = [];
+
+    /* The listener taps another row: the app's own player takes the sound. */
+    await engine.play(track('b'));
+    await settle();
+
+    assert.equal(engine.status().state, 'playing', 'the new track is playing');
+    assert.deepEqual(record.plays, ['0'], 'the app’s own player was asked for the new track');
+    assert.deepEqual(record.queueOps, ['stop'], 'the queue that was the sound was stopped, not left holding it');
+    assert.equal(
+      record.spectrum.assetIds.at(-1) ?? null,
+      null,
+      `the spectrum tap went to the app’s own player, not the away queue (${record.spectrum.assetIds.join(', ')})`,
+    );
+
+    /*
+     * And the app must control the sound it started, not the queue it left. Before beta.25 the
+     * engine's sound owner stayed `queue` (the vendored player's report can say `paused` for the
+     * asset it is playing), so this pause went to the queue — silence — and the play resumed the
+     * queue *under* the app's own player: two songs, one of them uncontrollable.
+     */
+    record.order = [];
+    await engine.pause();
+    assert.equal(engine.status().state, 'paused', 'the row pauses');
+    assert.ok(record.order.includes('pause'), `the app’s own player was paused (${record.order.join(' → ')})`);
+    assert.deepEqual(record.queueOps, ['stop'], 'and the queue was not asked again');
+
+    record.order = [];
+    await engine.toggle();
+    assert.equal(engine.status().state, 'playing', 'one tap resumes');
+    assert.ok(record.order.includes('resume'), `the resume reached the app’s own player (${record.order.join(' → ')})`);
+    assert.deepEqual(record.queueOps, ['stop'], 'and never the away queue — no second song');
+  } finally {
+    await engine.stop();
+    await settle();
+  }
+});
+
+test('a selection stops the queue even when the engine’s memory says the app is the sound: the player is asked, not the flag', async () => {
+  const record = blank();
+  const engine = engineFor(record);
+  try {
+    await playing(engine, record, 240_000);
+    /*
+     * The drift this guards: the engine believes its own player is the sound, while the away queue
+     * is the one actually sounding (a stale `soundOwner` after a return). A selection must still stop
+     * it, or the app's new track plays over it and the queue keeps the controls.
+     */
+    record.awaySounding = true;
+    record.playing = true;
+    record.syncPositionMs = 0;
+    record.order = [];
+    record.plays = [];
+    record.queueOps = [];
+
+    await engine.play(track('b'));
+    await settle();
+
+    assert.equal(engine.status().state, 'playing', 'the new track is playing');
+    assert.deepEqual(record.queueOps, ['stop'], 'the stop was decided from the player, not from the engine’s memory');
+    assert.deepEqual(record.plays, ['0'], 'and the app’s own player was asked for the new track');
+
+    record.order = [];
+    await engine.pause();
+    assert.ok(record.order.includes('pause'), `and the press goes to the player that is now the sound (${record.order.join(' → ')})`);
+    assert.deepEqual(record.queueOps, ['stop'], 'never back to the queue');
   } finally {
     await engine.stop();
     await settle();

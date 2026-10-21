@@ -536,7 +536,11 @@ test('warm work yields while a start is in flight, and issues nothing when it ca
  */
 test('a handover arms the first boundary: the native side preloads ahead when it is given the queue', () => {
   const native = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'ios', 'App', 'App', 'NaviliteRemote.swift'), 'utf8');
-  const setQueue = native.slice(native.indexOf('@objc func setQueue('), native.indexOf('@objc func setQueue(') + 6000);
+  /* The whole method, to the next one — a fixed 6000-character window stopped reaching
+   * `preloadAhead` once setQueue grew (beta.25). */
+  const setQueueStart = native.indexOf('@objc func setQueue(');
+  const setQueueEnd = native.indexOf('@objc func now(', setQueueStart);
+  const setQueue = native.slice(setQueueStart, setQueueEnd === -1 ? setQueueStart + 9000 : setQueueEnd);
   assert.ok(setQueue.includes('self.installEndObserver()'), 'the handover no longer installs the end observer');
   assert.match(
     setQueue,

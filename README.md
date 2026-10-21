@@ -12,7 +12,7 @@ free Apple ID). No framework, no UI kit: the app's main script is ~186 kB (~57 k
 npm install
 npm run mock        # serves the built app + a synthetic Subsonic library on :4533
 npm run build       # dist/ — the PWA, and the payload for both native shells
-npm test            # 368 unit tests, then the Swift press rules: deployment copy, md5 vectors,
+npm test            # 370 unit tests, then the Swift press rules: deployment copy, md5 vectors,
                     # token auth, parsing, play rules, returns, downloads, lyrics; builds dist/ first
 npm run apk          # artifacts/Navilite-<version>-debug.apk
 npm run ipa:unsigned # artifacts/Navilite-<version>-unsigned.ipa

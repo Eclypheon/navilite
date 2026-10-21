@@ -464,3 +464,8 @@ Plain language, user-visible changes only. The app shows this same list under
 - Lyrics that arrive more than fifteen seconds after the lyrics screen opens now appear when they arrive, instead of leaving the screen on "no lyrics yet" for that song.
 - A track's length and the elapsed time round the same way, so the last second of a song no longer looks like a missing one.
 - The app's first page is smaller: the "What's new" text is fetched only when that screen is opened.
+
+## 2.0-beta.25 — 2026-10-22
+
+- Backgrounding the app no longer moves the lock-screen card onto the next song while the one playing is still sounding, so the next song is no longer skipped and the one after it is not played in its place.
+- Selecting another song while the phone's background player is the one making the sound now takes the sound back cleanly: that player stops, the controls and the spectrum follow the song you picked, and pressing play never starts a second copy.

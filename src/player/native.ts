@@ -553,7 +553,7 @@ export interface NativeBridge {
    * press on the row stops, restarts or moves what the owner is listening to. Optional: a build
    * without it answers nothing, and the engine keeps its old route.
    */
-  queueTransport?(op: 'pause' | 'resume' | 'seek', positionMs?: number): Promise<boolean>;
+  queueTransport?(op: 'pause' | 'resume' | 'seek' | 'stop', positionMs?: number): Promise<boolean>;
   /** Check if the away queue is currently sounding or owns playback. */
   isAwaySounding?(): Promise<boolean>;
   /**

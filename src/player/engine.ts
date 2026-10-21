@@ -1881,9 +1881,6 @@ export class AudioEngine {
      * early returns above, because those issue nothing: this is the point past which a start is real.
      */
     this.startsIssued += 1;
-    if (this.queueOwnsSound()) {
-      void this.native?.queueTransport?.('pause');
-    }
     this.track = track;
     this.error = null;
     this.dispatch({ type: 'select', trackId: track.id });
@@ -1902,6 +1899,21 @@ export class AudioEngine {
          */
         this.fail(new Error('the native audio engine is not available in this build'));
         return;
+      }
+      /*
+       * **A new start takes the sound, whatever the engine remembers (v2.0.0-beta.25).**
+       *
+       * This used to pause the queue, and only when `soundOwner` said queue — but a pause leaves the
+       * queue holding the audible state, so the next press resumed *it* while the app's own player
+       * was already sounding the new entry (two songs), and a stale `soundOwner` meant the pause was
+       * not sent at all (the queue kept the old sound under the new one, while the app's controls
+       * and the spectrum stayed pointed at it). The question is asked of the *player* through
+       * `isAwaySounding()`, and the answer is a stop: the queue is emptied, its ownership and any
+       * pending reading go with it, and the next statement re-arms it around the selection for the
+       * next boundary.
+       */
+      if (this.queueOwnsSound() || (await ready.isAwaySounding?.()) === true) {
+        await ready.queueTransport?.('stop');
       }
       await this.startNative(track, startMs, ready);
       /*
@@ -3345,6 +3357,20 @@ export class AudioEngine {
        * behind it. So: the track starts, and the tap follows it — the time from "the item is the new
        * one" to "the new item is playing" is now nothing at all.
        */
+      /*
+       * **The app's own player is the sound from here (v2.0.0-beta.25).**
+       *
+       * The queue was stopped just above (or was already silent), and both the load and the adoption
+       * above ended in a play request for this track. Until now the engine's
+       * sound owner only moved to the app on a report that said `playing` — and the vendored player
+       * answers `paused` for the asset it is playing often enough that the owner stayed `queue`. Then
+       * the row's pause went to the queue (nothing audible), play resumed the queue under the app's own
+       * player (two songs), and the spectrum kept tapping the queue (dead bars): exactly the owner's
+       * "it detaches when I select another song". A play this side just issued is the evidence; it is
+       * not a claim about the queue, which is already out of the way.
+       */
+      if (this.track !== track) return;
+      this.claimSound('app', track.id);
       this.attachSpectrum(track);
     } catch (cause) {
       this.fail(cause);

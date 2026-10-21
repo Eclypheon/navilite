@@ -2,7 +2,7 @@
 
 > **This file is the record of one verification pass, not a live document.** The counts below (30-
 > odd tests, 1.4.0 artifact sizes) are what that pass observed and are kept as evidence. The suite
-> that runs today is `npm test` (368 TypeScript tests plus the Swift press rules), and the sizes are
+> that runs today is `npm test` (370 TypeScript tests plus the Swift press rules), and the sizes are
 > printed by `npm run build`.
 
 Written by the implementation pass. Every claim below is a command that was run or an output

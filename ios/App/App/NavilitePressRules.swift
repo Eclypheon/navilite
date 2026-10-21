@@ -690,4 +690,26 @@ enum NavilitePressRules {
         }
         return (answeredSongId, answeredIndex)
     }
+
+    /* --------------------------------------- a statement is not a reading (v2.0.0-beta.25) */
+
+    /**
+     * **Which entry a statement is taken at.**
+     *
+     * The queue's own entry corrects a statement that lags a boundary it took — but only while the
+     * queue is *making a sound*. A queue that is merely **armed** (paused on the entry after the one
+     * playing, waiting to take the boundary) is not a reading about what is playing: its
+     * `currentItem` is the next track. Taking that as the index moved this side's cursor, the
+     * lock-screen card and the next boundary's target onto the entry **after** the one playing, which
+     * is the owner's report — background the first song and the card advances to song 2, then the
+     * real end advances to song 3 and song 2 is never played.
+     *
+     * So: the queue corrects the statement only when the queue is sounding. Otherwise the statement
+     * (the app's cursor) is the truth, and the armed tail stays where it is.
+     */
+    static func statementIndex(stated: Int, queueSounding: Bool, soundingIndex: Int?) -> Int {
+        guard queueSounding, let soundingIndex, soundingIndex >= 0 else { return stated }
+        return soundingIndex
+    }
+
 }

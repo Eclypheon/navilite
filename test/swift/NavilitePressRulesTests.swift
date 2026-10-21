@@ -762,6 +762,26 @@ struct PressRulesTests {
         check("(1) ...and it expires for the second occurrence of one song in the same queue too",
               NavilitePressRules.answerAfter(offering: "Y", answeredSongId: "X", answeredIndex: 7) == nil)
 
+        print("\n# a statement is not a reading — an armed queue must not move the index (beta.25)")
+
+        /*
+         * **The owner's first-song report.** The away queue is armed while the app is on screen: it
+         * holds the entry *after* the one playing, paused. A statement that arrives while the queue
+         * is merely armed must be taken at the app's own index; reading the queue's `currentItem`
+         * there moved the card and the next boundary onto the following track, so song 2 was never
+         * played.
+         */
+        check("(1) an armed, silent queue does NOT move the statement — the app's index stands",
+              NavilitePressRules.statementIndex(stated: 0, queueSounding: false, soundingIndex: 1) == 0)
+        check("(1) ...even when the queue's own currentItem names the next entry",
+              NavilitePressRules.statementIndex(stated: 4, queueSounding: false, soundingIndex: 5) == 4)
+        check("(1) a queue that IS sounding corrects a statement that lags the boundary it took",
+              NavilitePressRules.statementIndex(stated: 0, queueSounding: true, soundingIndex: 1) == 1)
+        check("(1) a sounding queue that cannot name its entry changes nothing",
+              NavilitePressRules.statementIndex(stated: 3, queueSounding: true, soundingIndex: nil) == 3)
+        check("(1) ...and neither does a nonsense index",
+              NavilitePressRules.statementIndex(stated: 3, queueSounding: true, soundingIndex: -1) == 3)
+
         print("\n\(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }
