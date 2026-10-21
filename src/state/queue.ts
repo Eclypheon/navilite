@@ -972,7 +972,14 @@ export class PlaybackQueue {
        * position is the answer, and it is rendered only when not already playing — an active playing
        * clock must never be rewound to a stale position.
        */
-      if (typeof positionMs === 'number' && Number.isFinite(positionMs) && positionMs >= 0) {
+      const currentPos = this.engine.status().positionMs;
+      const isPlaying = this.engine.status().state === 'playing';
+      if (
+        typeof positionMs === 'number' &&
+        Number.isFinite(positionMs) &&
+        positionMs >= 0 &&
+        (!isPlaying || currentPos < 1000 || positionMs >= currentPos - 500)
+      ) {
         this.engine.renderReading(positionMs, measuredAt);
       }
       this.pendingStartMs = 0;

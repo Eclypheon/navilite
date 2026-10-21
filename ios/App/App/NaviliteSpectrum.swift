@@ -1523,6 +1523,11 @@ enum AudibleBridgePlayer {
     }
 
     static func find(from bridge: CAPBridgeProtocol?) -> (player: AVPlayer, assetId: String)? {
+        if let remote = bridge?.plugin(withName: "NaviliteRemote") as? NaviliteRemote,
+           remote.currentAwayOwnsAudible,
+           let queue = remote.currentAwayQueue, queue.currentItem != nil {
+            return (queue, NaviliteRemote.awaySlotName)
+        }
         guard let plugin = bridge?.plugin(withName: "NativeAudio") else { return nil }
         var fallback: (player: AVPlayer, assetId: String)?
         for child in Mirror(reflecting: plugin).children where child.label == "audioList" {

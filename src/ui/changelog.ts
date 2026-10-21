@@ -667,4 +667,14 @@ export const CHANGELOG: ChangelogRelease[] = [
         'The audio visualiser attaches cleanly and stays live across background transitions.',
       ],
     },
+    {
+      version: '2.0-beta.23',
+      date: '2026-10-21',
+      items: [
+        'Returning to the app from the background seamlessly continues audio playback with zero loading spinner, zero audio jitter, and no duplicate tracks playing at once.',
+        'The seek bar remains in perfect sync with native playback without any delayed jump or snap back.',
+        'Play, pause, and seek controls respond immediately on return, controlling the active track directly.',
+        'The audio spectrum visualizer immediately taps the active background audio stream and stays live on return.',
+      ],
+    },
   ];

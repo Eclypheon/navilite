@@ -1822,6 +1822,9 @@ export class AudioEngine {
      * early returns above, because those issue nothing: this is the point past which a start is real.
      */
     this.startsIssued += 1;
+    if (this.queueOwnsSound()) {
+      void this.native?.queueTransport?.('pause');
+    }
     this.track = track;
     this.error = null;
     this.dispatch({ type: 'select', trackId: track.id });
@@ -2120,9 +2123,11 @@ export class AudioEngine {
     this.modeReason = answered !== null
       ? `the away queue is sounding ${track.id} at ${Math.round(answered / 1000)} s and the app has been told so — the row renders that reading, the app's own player stays silent, and nothing is started, paused or seeked`
       : 'the native player took the track boundary itself while the app was not listening — the audio never stopped, and this is the app catching up with it';
+    this.claimSound('queue', track.id);
     this.dispatch({ type: 'engine-state', playing: true });
     this.concludeStart('player');
     this.attachSpectrum(track);
+    this.startClockTick();
     this.emit();
   }
 
@@ -2740,10 +2745,8 @@ export class AudioEngine {
    * the player's own `currentItem`, not from a cursor this side moved — and `path` is that route:
    * the away queue (`queue`), the app's fetch player (`fetch`) or the plugin's own player (`plugin`).
    *
-   * The away queue is excluded even when it names the same entry: it is a second player, and the only
-   * way the app can come to own a sound the queue is making is to start that entry itself (the
-   * handover). What this answers `true` for is the case the owner reports: the plugin is playing the
-   * track, the queue's cursor is on the same track, and there is nothing to hand over at all.
+   * When the reading names the visible entry, the player is already sounding it — whether through
+   * the away queue or the app's own player. Adopting it avoids any reload, stutter, or handover race.
    */
   private returnIsAdoption(reading: NativeReturnReading | null): boolean {
     const track = this.track;
@@ -2860,6 +2863,7 @@ export class AudioEngine {
       this.claimSound('queue', held.songId);
       if (held.sounding !== false) {
         this.dispatch({ type: 'engine-state', playing: true });
+        this.startClockTick();
       } else {
         this.dispatch({ type: 'transport', action: 'pause' });
       }
