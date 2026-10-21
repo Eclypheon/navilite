@@ -2310,7 +2310,7 @@ function renderChangelog(shell: Shell): Promise<void> {
       shell.view,
       h('div', { class: 'changelog' }, [
         h('h1', { text: "What's new" }),
-        h('p', { class: 'muted small', text: 'Every user-visible change, newest last. The same list is in the repository as CHANGELOG.md.' }),
+        h('p', { class: 'muted small', text: 'Every user-visible change, newest first. The same list is in the repository as CHANGELOG.md.' }),
         ...CHANGELOG.map((release) =>
           h('section', { class: 'release' }, [
             h('h2', { class: 'section', text: `Version ${release.version} — ${release.date}` }),
