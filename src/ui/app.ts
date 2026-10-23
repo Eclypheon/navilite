@@ -1567,7 +1567,7 @@ async function renderDownloads(ctx: AppContext, shell: Shell): Promise<void> {
   }
   replace(
     host,
-    ...songs.map((song, index) => songRow(ctx, song, index, items, items[0]?.context ?? null, true)),
+    ...songs.map((song, index) => songRow(ctx, song, index, items, items[0]?.context ?? null, true, () => void ctx.offline?.voidMissingFile(song.id), `Delete download ${song.title}`)),
   );
   updateRowHighlight(ctx, shell);
   /*
@@ -2333,6 +2333,7 @@ function songRow(
   context: QueueContext | null,
   showAlbum: boolean,
   onRemove?: () => void,
+  onRemoveLabel?: string,
 ): HTMLElement {
   /*
    * v1.5: the whole row is the tap target — "tapping anywhere on a song row must play that song".
@@ -2456,7 +2457,7 @@ function songRow(
   // beside it, in a wrapper that keeps the two on one line.
   return h('div', { class: 'row-shell' }, [
     row,
-    h('button', { class: 'row-remove', 'aria-label': `Remove ${song.title} from this playlist`, onclick: onRemove }, [
+    h('button', { class: 'row-remove', 'aria-label': onRemoveLabel ?? `Remove ${song.title} from this playlist`, onclick: onRemove }, [
       icon(ICONS.close, 16),
     ]),
   ]);
